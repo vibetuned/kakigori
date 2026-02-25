@@ -5,11 +5,19 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
+    "accelerate>=1.1.0",
     "brotli>=1.2.0",
     "cairosvg>=2.8.2",
     "fonttools>=4.61.1",
+    "numpy>=2.0.0",
+    "Pillow>=11.0.0",
     "svgpathtools>=1.7.2",
+    "timm>=1.0.25",
+    "torch>=2.7.0",
+    "torchvision>=0.22.0",
+    "transformers>=4.48.3",
     "tqdm>=4.67.3",
+    "pypdfium2>=4.30.0",
     "verovio>=6.0.1",
 ]
 
@@ -17,6 +25,9 @@ dependencies = [
 dev = [
     "ruff>=0.15.2",
     "ty>=0.0.18",
+    "tensorboard>=2.19.0",
+    "setuptools",
+    "six",
 ]
 
 [build-system]
@@ -26,8 +37,20 @@ build-backend = "hatchling.build"
 [tool.hatch.version]
 source = "vcs"
 
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu130" }]
+torchvision = [{ index = "pytorch-cu130" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+
 [project.scripts]
 render-dataset = "gelato_graph.dataset.render_dataset:main"
 extract-annotations = "gelato_graph.dataset.extract_annotations:main"
 extract-classes = "gelato_graph.dataset.extract_classes:main"
 visualize-dataset = "gelato_graph.dataset.visualize_dataset:main"
+train-model = "gelato_graph.model.train:main"
+infer-model = "gelato_graph.model.infer:main"
