@@ -4,7 +4,14 @@ dynamic = ["version"]
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.14"
-dependencies = []
+dependencies = [
+    "brotli>=1.2.0",
+    "cairosvg>=2.8.2",
+    "fonttools>=4.61.1",
+    "svgpathtools>=1.7.2",
+    "tqdm>=4.67.3",
+    "verovio>=6.0.1",
+]
 
 [dependency-groups]
 dev = [
@@ -18,3 +25,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.version]
 source = "vcs"
+
+[project.scripts]
+render-dataset = "gelato_graph.dataset.render_dataset:main"
+extract-annotations = "gelato_graph.dataset.extract_annotations:main"
+extract-classes = "gelato_graph.dataset.extract_classes:main"
+visualize-dataset = "gelato_graph.dataset.visualize_dataset:main"
