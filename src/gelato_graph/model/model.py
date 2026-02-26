@@ -11,9 +11,10 @@ class EdgeMusicDetector(nn.Module):
         
         # 1. The Encoder
         self.backbone = timm.create_model(
-            'mobilenetv5_300m.gemma3n', 
+            'mobilenetv5_300m.gemma3n', #'convnext_base.dinov3_lvd1689m', 
             pretrained=True, 
             features_only=True,
+            #out_indices=(1, 2, 3) # Adjust indices based on desired feature resolution for dino models 
             out_indices=(2, 3, 4) # Adjust indices based on desired feature resolution
         )
         
