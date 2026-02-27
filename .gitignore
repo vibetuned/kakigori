@@ -12,3 +12,4 @@ wheels/
 /data/
 /checkpoints/
 /runs/
+.rsyncignore

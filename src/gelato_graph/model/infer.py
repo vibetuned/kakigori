@@ -102,12 +102,26 @@ def decode_outputs(
         # --- Vectorised decode (stays on GPU) ---
         scores = max_scores[pos[:, 0], pos[:, 1]]        # (N,)
         cls_idx = max_classes[pos[:, 0], pos[:, 1]]      # (N,)
+        
+        # Get the spatial dimensions of this specific feature grid (e.g., 80x80, 40x40, 20x20)
+        H, W = reg_map.shape[2], reg_map.shape[3]
 
-        cx_n = reg_map[0, 0, pos[:, 0], pos[:, 1]]
-        cy_n = reg_map[0, 1, pos[:, 0], pos[:, 1]]
+        # THE FIX: Extract the grid-relative offsets and apply sigmoid
+        # pos[:, 0] is the row index (y grid position)
+        # pos[:, 1] is the column index (x grid position)
+        tx = reg_map[0, 0, pos[:, 0], pos[:, 1]].sigmoid()
+        ty = reg_map[0, 1, pos[:, 0], pos[:, 1]].sigmoid()
+        
+        # Convert local offsets back to global normalized coordinates (0.0 to 1.0)
+        cx_n = (tx + pos[:, 1]) / W
+        cy_n = (ty + pos[:, 0]) / H
+        
+        # Width and height remain as global normalized predictions
         bw_n = reg_map[0, 2, pos[:, 0], pos[:, 1]].abs()
         bh_n = reg_map[0, 3, pos[:, 0], pos[:, 1]].abs()
 
+        # Scale from normalized [0, 1] up to the padded letterbox canvas,
+        # then undo the padding and scaling to get back to the raw PDF page pixels
         cx_orig = (cx_n * s - meta["pad_x"]) / meta["scale"]
         cy_orig = (cy_n * s - meta["pad_y"]) / meta["scale"]
         bw_orig = bw_n * s / meta["scale"]

@@ -7,13 +7,13 @@ main loop, providing a cleaner, standard implementation.
 import torch
 import torch.nn as nn
 from transformers import Trainer
-from .losses import FocalLoss, CIoULoss
+from .losses import FocalLoss, CIoULoss, DynamicFocalLoss
 
 
 class OMRTrainer(Trainer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.focal_loss_fn = FocalLoss(alpha=0.25, gamma=2.0)
+        self.focal_loss_fn = DynamicFocalLoss(alpha=0.25, base_gamma=2.0, max_gamma=3.0)
         self.ciou_loss_fn = CIoULoss()
 
     def build_targets(self, targets_list, feature_sizes, num_classes, device):
@@ -29,7 +29,12 @@ class OMRTrainer(Trainer):
         # - Scale 0 (e.g., 64x64 grid): For tiny objects like dots and noteheads (< 4% of image area)
         # - Scale 1 (e.g., 32x32 grid): For medium objects like short stems and rests (4% to 16%)
         # - Scale 2 (e.g., 16x16 grid): For large objects like Clefs, beams, and brackets (> 16%)
-        scale_ranges = [(0.0, 0.04), (0.04, 0.16), (0.16, 2.0)] 
+        # scale_ranges = [(0.0, 0.04), (0.04, 0.16), (0.16, 2.0)] 
+        # P2 (Tiny - < 0.0002): artic, stem, notehead, tie, flag.
+        # P3 (Medium - 0.0002 to 0.002): note, slur, keySig, chord, clef, beam.
+        # P4 (Large - > 0.002): tuplet, staff, measure, system, page-margin.
+        scale_ranges = [(0.0, 0.0002), (0.0002, 0.002), (0.002, 2.0)] 
+        
 
         for scale_idx, (fh, fw) in enumerate(feature_sizes):
             # Initialize empty target tensors for this specific scale
@@ -60,15 +65,28 @@ class OMRTrainer(Trainer):
                     continue
 
                 # 4. Map the valid box centers strictly to this grid's coordinates
-                gi = (valid_boxes[:, 0] * fw).long().clamp(0, fw - 1)
-                gj = (valid_boxes[:, 1] * fh).long().clamp(0, fh - 1)
+                gi = valid_boxes[:, 0] * fw
+                gj = valid_boxes[:, 1] * fh
+                
+                # Get the integer grid cell coordinates
+                gi_idx = gi.long().clamp(0, fw - 1)
+                gj_idx = gj.long().clamp(0, fh - 1)
 
                 for n in range(valid_boxes.shape[0]):
-                    j, i = gj[n], gi[n]
+                    j, i = gj_idx[n], gi_idx[n]
                     
-                    # Assign the filtered ground truth to the grid cell
+                    # THE FIX: Calculate local offsets (0.0 to 1.0) inside the grid cell
+                    tx = gi[n] - i
+                    ty = gj[n] - j
+                    
                     cls_map[b, valid_labels[n], j, i] = 1.0
-                    reg_map[b, :, j, i] = valid_boxes[n]
+                    
+                    # Store relative (tx, ty) but keep global (w, h)
+                    reg_map[b, 0, j, i] = tx
+                    reg_map[b, 1, j, i] = ty
+                    reg_map[b, 2, j, i] = valid_boxes[n, 2]
+                    reg_map[b, 3, j, i] = valid_boxes[n, 3]
+                    
                     obj_mask[b, j, i] = True
 
             cls_targets.append(cls_map)
@@ -77,7 +95,7 @@ class OMRTrainer(Trainer):
 
         return cls_targets, reg_targets, obj_masks
 
-    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+    def compute_loss2(self, model, inputs, return_outputs=False, **kwargs):
         """Custom loss computation for the OMR model."""
         images = inputs.get("pixel_values")
         targets_list = inputs.get("labels")
@@ -110,9 +128,26 @@ class OMRTrainer(Trainer):
                 pred_pos = out["reg"][b_idx, :, r_idx, c_idx]
                 tgt_pos = reg_targets[scale_idx][b_idx, :, r_idx, c_idx]
                 
+                fw, fh = out["reg"].shape[3], out["reg"].shape[2]
+                
+                # THE FIX: Convert (tx, ty) back to global (cx, cy)
+                # Apply sigmoid to force the network's offset prediction strictly between 0 and 1
+                pred_cx = (pred_pos[:, 0].sigmoid() + c_idx) / fw 
+                pred_cy = (pred_pos[:, 1].sigmoid() + r_idx) / fh
+                pred_w = pred_pos[:, 2]
+                pred_h = pred_pos[:, 3]
+                
+                tgt_cx = (tgt_pos[:, 0] + c_idx) / fw
+                tgt_cy = (tgt_pos[:, 1] + r_idx) / fh
+                tgt_w = tgt_pos[:, 2]
+                tgt_h = tgt_pos[:, 3]
+                
+                pred_boxes = torch.stack([pred_cx, pred_cy, pred_w, pred_h], dim=1)
+                tgt_boxes = torch.stack([tgt_cx, tgt_cy, tgt_w, tgt_h], dim=1)
+                
                 total_reg = total_reg + self.ciou_loss_fn(
-                    pred_pos.unsqueeze(-1).unsqueeze(-1),
-                    tgt_pos.unsqueeze(-1).unsqueeze(-1),
+                    pred_boxes.unsqueeze(-1).unsqueeze(-1),
+                    tgt_boxes.unsqueeze(-1).unsqueeze(-1),
                 )
 
         reg_weight = 5.0
@@ -132,3 +167,72 @@ class OMRTrainer(Trainer):
             logs.update(self._custom_metrics)
             self._custom_metrics = {}
         super().log(logs, start_time=start_time)
+
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        """Custom loss computation for the OMR model."""
+        images = inputs.get("pixel_values")
+        targets_list = inputs.get("labels")
+        
+        num_classes = model.heads[0].cls_branch[-1].out_channels
+        device = images.device
+
+        outputs = model(images)
+        
+        feature_sizes = [(o["cls"].shape[2], o["cls"].shape[3]) for o in outputs]
+        cls_targets, reg_targets, obj_masks = self.build_targets(
+            targets_list, feature_sizes, num_classes, device
+        )
+
+        total_cls = torch.tensor(0.0, device=device)
+        total_reg = torch.tensor(0.0, device=device)
+
+        # Calculate progress (0.0 to 1.0) using HF Trainer state
+        max_steps = self.state.max_steps
+        current_step = self.state.global_step
+        progress = current_step / max_steps if max_steps > 0 else 0.0
+
+        for scale_idx, out in enumerate(outputs):
+            # Pass the progress variable to the new DynamicFocalLoss
+            total_cls = total_cls + self.focal_loss_fn(out["cls"], cls_targets[scale_idx], progress=progress)
+
+            # Regression loss (CIoU)
+            mask = obj_masks[scale_idx]
+            mask = obj_masks[scale_idx]
+            if mask.any():
+                pos_indices = mask.nonzero(as_tuple=False)
+                b_idx, r_idx, c_idx = pos_indices[:, 0], pos_indices[:, 1], pos_indices[:, 2]
+                
+                pred_pos = out["reg"][b_idx, :, r_idx, c_idx]
+                tgt_pos = reg_targets[scale_idx][b_idx, :, r_idx, c_idx]
+                
+                fw, fh = out["reg"].shape[3], out["reg"].shape[2]
+                
+                # THE FIX: Convert (tx, ty) back to global (cx, cy)
+                # Apply sigmoid to force the network's offset prediction strictly between 0 and 1
+                pred_cx = (pred_pos[:, 0].sigmoid() + c_idx) / fw 
+                pred_cy = (pred_pos[:, 1].sigmoid() + r_idx) / fh
+                pred_w = pred_pos[:, 2]
+                pred_h = pred_pos[:, 3]
+                
+                tgt_cx = (tgt_pos[:, 0] + c_idx) / fw
+                tgt_cy = (tgt_pos[:, 1] + r_idx) / fh
+                tgt_w = tgt_pos[:, 2]
+                tgt_h = tgt_pos[:, 3]
+                
+                pred_boxes = torch.stack([pred_cx, pred_cy, pred_w, pred_h], dim=1)
+                tgt_boxes = torch.stack([tgt_cx, tgt_cy, tgt_w, tgt_h], dim=1)
+                
+                total_reg = total_reg + self.ciou_loss_fn(
+                    pred_boxes.unsqueeze(-1).unsqueeze(-1),
+                    tgt_boxes.unsqueeze(-1).unsqueeze(-1),
+                )
+
+        reg_weight = 5.0
+        total_loss = total_cls + reg_weight * total_reg
+
+        self._custom_metrics = {
+            "train/cls_loss": total_cls.detach().item(),
+            "train/reg_loss": total_reg.detach().item(),
+        }
+
+        return (total_loss, outputs) if return_outputs else total_loss

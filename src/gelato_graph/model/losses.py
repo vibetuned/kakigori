@@ -105,3 +105,44 @@ class CIoULoss(nn.Module):
         if self.reduction == 'mean':
             return ciou_loss.mean()
         return ciou_loss.sum()
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class DynamicFocalLoss(nn.Module):
+    def __init__(self, alpha=0.25, base_gamma=2.0, max_gamma=3.0, reduction='mean'):
+        super().__init__()
+        self.alpha = alpha
+        self.base_gamma = base_gamma
+        self.max_gamma = max_gamma
+        self.reduction = reduction
+
+    def forward(self, inputs, targets, progress=0.0):
+        """
+        progress: A float between 0.0 (start of epoch 1) and 1.0 (end of final epoch).
+        """
+        # Linearly scale gamma as training progresses
+        current_gamma = self.base_gamma + (self.max_gamma - self.base_gamma) * progress
+        
+        # Use BCEWithLogits for numerical stability
+        bce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
+        
+        # Get the predicted probabilities (sigmoid of logits)
+        probs = torch.sigmoid(inputs)
+        
+        # Calculate the modulating factor: (1 - p_t)^gamma
+        p_t = probs * targets + (1 - probs) * (1 - targets)
+        modulating_factor = (1.0 - p_t) ** current_gamma
+        
+        # Apply alpha weighting
+        alpha_weight = self.alpha * targets + (1 - self.alpha) * (1 - targets)
+        
+        # Combine pieces
+        focal_loss = alpha_weight * modulating_factor * bce_loss
+        
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        elif self.reduction == 'sum':
+            return focal_loss.sum()
+        return focal_loss

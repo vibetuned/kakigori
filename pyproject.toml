@@ -21,6 +21,8 @@ dependencies = [
     "verovio>=6.0.1",
     "torchmetrics>=1.8.2",
     "pycocotools>=2.0.11",
+    "opencv-contrib-python>=4.13.0.92",
+    "matplotlib>=3.10.8",
 ]
 
 [dependency-groups]
@@ -40,12 +42,12 @@ build-backend = "hatchling.build"
 source = "vcs"
 
 [tool.uv.sources]
-torch = [{ index = "pytorch-cu130" }]
-torchvision = [{ index = "pytorch-cu130" }]
+torch = [{ index = "pytorch-cu128" }]
+torchvision = [{ index = "pytorch-cu128" }]
 
 [[tool.uv.index]]
-name = "pytorch-cu130"
-url = "https://download.pytorch.org/whl/cu130"
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
 
@@ -57,3 +59,6 @@ visualize-dataset = "gelato_graph.dataset.visualize_dataset:main"
 train-model = "gelato_graph.model.train:main"
 eval-model = "gelato_graph.model.eval:main"
 infer-model = "gelato_graph.model.infer:main"
+visualize-model = "gelato_graph.model.visualize:main"
+calculate-areas = "gelato_graph.model.calculate_areas:main"
+

@@ -10,7 +10,8 @@ from pathlib import Path
 
 import torch
 from torch.utils.data import DataLoader
-from torchvision.ops import nms
+#from torchvision.ops import nms
+from torchvision.ops import batched_nms
 from tqdm import tqdm
 from torchmetrics.detection.mean_ap import MeanAveragePrecision
 from transformers.trainer_utils import get_last_checkpoint
@@ -46,8 +47,11 @@ def decode_batch_for_eval(outputs, conf_thresh, iou_thresh, input_size):
             cls_idx = max_classes[pos[:, 0], pos[:, 1]]
 
             # Extract normalized coordinates
-            cx_n = reg_map[0, pos[:, 0], pos[:, 1]]
-            cy_n = reg_map[1, pos[:, 0], pos[:, 1]]
+            # FIX: Decode tx, ty offsets using sigmoid and grid indices
+            W, H = reg_map.shape[2], reg_map.shape[1]
+            
+            cx_n = (reg_map[0, pos[:, 0], pos[:, 1]].sigmoid() + pos[:, 1]) / W
+            cy_n = (reg_map[1, pos[:, 0], pos[:, 1]].sigmoid() + pos[:, 0]) / H
             bw_n = reg_map[2, pos[:, 0], pos[:, 1]].abs()
             bh_n = reg_map[3, pos[:, 0], pos[:, 1]].abs()
 
@@ -74,7 +78,7 @@ def decode_batch_for_eval(outputs, conf_thresh, iou_thresh, input_size):
             b_labels = torch.cat(b_labels, dim=0)
 
             # Apply PyTorch Vision's highly optimized NMS
-            keep = nms(b_boxes, b_scores, iou_thresh)
+            keep = batched_nms(b_boxes, b_scores, b_labels, iou_thresh)
             
             batch_preds.append({
                 "boxes": b_boxes[keep],
@@ -156,14 +160,23 @@ def main():
     ckpt = Path(args.checkpoint)
     if ckpt.is_dir():
         last = get_last_checkpoint(str(ckpt))
-        ckpt = Path(last) if last else ckpt
+        if last is not None:
+            ckpt = Path(last)
+        logger.info(f"  Using last checkpoint: {ckpt}")
 
     for name in ("model.safetensors", "pytorch_model.bin"):
         weights = (ckpt / name) if ckpt.is_dir() else ckpt
         if weights.exists():
-            state = torch.load(weights, map_location=device, weights_only=False) if name.endswith(".bin") else __import__('safetensors.torch').torch.load_file(weights, device=str(device))
+            if weights.suffix == ".safetensors":
+                from safetensors.torch import load_file
+                state = load_file(weights, device=str(device))
+            else:
+                state = torch.load(weights, map_location=device, weights_only=False)
             model.load_state_dict(state)
+            logger.info(f"  Loaded weights: {weights}")
             break
+    else:
+        logger.warning("No weights file found — using random weights.")
             
     model.to(device).eval()
 
@@ -172,7 +185,8 @@ def main():
         box_format="xyxy", 
         iou_type="bbox",
         # Default is [1, 10, 100]. We scale this up for dense OMR pages!
-        max_detection_thresholds=[100, 1000, 5000] 
+        max_detection_thresholds=[100, 1000, 5000],
+        class_metrics=True 
     )
     
     # Silence the warning since we actively expect thousands of detections
@@ -201,6 +215,28 @@ def main():
     logger.info(f"mAP @ IoU=0.50      : {results['map_50'].item():.4f}")
     logger.info(f"mAP @ IoU=0.75      : {results['map_75'].item():.4f}")
     logger.info(f"mAP @ IoU=0.50:0.95 : {results['map'].item():.4f}")
+
+    logger.info("\n--- Class-wise mAP @ IoU=0.50:0.95 ---")
+    
+    if 'classes' in results:
+        classes_present = results['classes'].tolist()
+        map_50_per_class = results['map_per_class'].tolist()
+        
+        # Pair up the string names with their scores
+        class_scores = []
+        for cls_idx, score in zip(classes_present, map_50_per_class):
+            cls_name = class_list[int(cls_idx)]
+            class_scores.append((cls_name, score))
+            
+        # Sort from highest performing to lowest performing
+        class_scores.sort(key=lambda x: x[1], reverse=True)
+        
+        # Print a cleanly formatted table
+        for cls_name, score in class_scores:
+            # The <25 pads the class name with spaces so the scores align perfectly
+            logger.info(f"{cls_name:<25}: {score:.4f}")
+    else:
+        logger.warning("No class-wise metrics were returned by the evaluator.")
 
 
 if __name__ == "__main__":

@@ -157,6 +157,9 @@ def _letterbox(
 def _scanned_document_augment(image: Image.Image) -> Image.Image:
     """Apply augmentations that simulate a scanned/photocopied document."""
     import numpy as np
+    import cv2
+    import random
+    from io import BytesIO
 
     img = np.array(image, dtype=np.float32)  # (H, W, 3), [0, 255]
 
@@ -172,10 +175,34 @@ def _scanned_document_augment(image: Image.Image) -> Image.Image:
         noise = np.random.normal(0, sigma, img.shape).astype(np.float32)
         img = np.clip(img + noise, 0, 255)
 
-    # 3. Gray gradient overlay (simulates uneven lighting on scanned pages)
+    # 3. Faded Ink (Morphological Erosion)
+    # Thins out black pixels, simulating degraded or lightly printed ink
+    if random.random() < 0.4:
+        # We use dilation because our text is dark on a light background 
+        # (dilating the light background erodes the dark text)
+        kernel_size = random.choice([2, 3])
+        kernel = np.ones((kernel_size, kernel_size), np.uint8)
+        img = cv2.dilate(img, kernel, iterations=1)
+
+    # 4. Whiteout / Missing Chunks (Random Erasing)
+    # Drops random white blobs to simulate holes, severe fading, or whiteout
+    if random.random() < 0.5:
+        h, w = img.shape[:2]
+        num_holes = random.randint(5, 20)
+        for _ in range(num_holes):
+            # Size of the missing chunk
+            hole_w = random.randint(5, max(10, w // 20))
+            hole_h = random.randint(5, max(10, h // 20))
+            # Position
+            x = random.randint(0, w - hole_w)
+            y = random.randint(0, h - hole_h)
+            # Fill with a light color (simulating paper)
+            paper_color = random.uniform(220, 255)
+            img[y:y+hole_h, x:x+hole_w] = paper_color
+
+    # 5. Gray gradient overlay
     if random.random() < 0.4:
         h, w = img.shape[:2]
-        # Create a smooth gradient along a random direction
         direction = random.choice(["horizontal", "vertical", "diagonal"])
         if direction == "horizontal":
             grad = np.linspace(0, 1, w, dtype=np.float32)[None, :, None]
@@ -190,23 +217,21 @@ def _scanned_document_augment(image: Image.Image) -> Image.Image:
             grad = grad[:, :, None]
             grad = np.broadcast_to(grad, img.shape)
 
-        # Random flip the gradient direction
         if random.random() < 0.5:
             grad = 1.0 - grad
 
         intensity = random.uniform(10, 35)
         img = np.clip(img + (grad - 0.5) * intensity, 0, 255)
 
-    # 4. Salt-and-pepper noise (dithering / photocopy artifacts)
+    # 6. Salt-and-pepper noise
     if random.random() < 0.3:
         sp_amount = random.uniform(0.001, 0.005)
         mask = np.random.random(img.shape[:2])
         img[mask < sp_amount / 2] = 0        # pepper
         img[mask > 1 - sp_amount / 2] = 255  # salt
 
-    # 5. Slight JPEG-style compression artifacts (via quality jitter)
+    # 7. Slight JPEG-style compression artifacts
     if random.random() < 0.3:
-        from io import BytesIO
         pil_img = Image.fromarray(img.astype(np.uint8))
         buf = BytesIO()
         quality = random.randint(40, 75)

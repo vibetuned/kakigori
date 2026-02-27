@@ -36,6 +36,7 @@ def main():
     
     # Training args (subset of common ones, others can be passed via unknown args if needed)
     parser.add_argument("--output-dir", type=str, default="checkpoints")
+    parser.add_argument("--logging-dir", type=str, default="runs", help="Root directory for TensorBoard run logs.")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -49,6 +50,41 @@ def main():
     args, unknown = parser.parse_known_args()
 
     set_seed(args.seed)
+
+    # --- Resolve Output Run Directory ---
+    output_root = Path(args.output_dir)
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    if args.resume or args.resume_from_checkpoint:
+        # Find the latest existing run directory to resume from
+        existing_runs = sorted(
+            [d for d in output_root.iterdir() if d.is_dir() and d.name.startswith("run_")],
+            key=lambda d: d.name,
+        )
+        if existing_runs:
+            run_dir = existing_runs[-1]
+            logger.info(f"Resuming from existing run: {run_dir}")
+        else:
+            run_dir = output_root / "run_001"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            logger.warning(f"No existing runs found in {output_root}, creating {run_dir}")
+    else:
+        # Create a new numbered run directory
+        existing_runs = sorted(
+            [d for d in output_root.iterdir() if d.is_dir() and d.name.startswith("run_")],
+            key=lambda d: d.name,
+        )
+        if existing_runs:
+            last_num = int(existing_runs[-1].name.split("_")[1])
+            next_num = last_num + 1
+        else:
+            next_num = 1
+        run_dir = output_root / f"run_{next_num:03d}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Created new run directory: {run_dir}")
+
+    # Set TensorBoard logging dir via env var (logging_dir kwarg is deprecated)
+    os.environ["TENSORBOARD_LOGGING_DIR"] = args.logging_dir + "/" + run_dir.name
 
     # --- Load Configuration ---
     with open(args.config) as f:
@@ -76,7 +112,8 @@ def main():
 
     # --- Initialize Training Arguments ---
     training_args = TrainingArguments(
-        output_dir=args.output_dir,
+        output_dir=str(run_dir),
+        run_name=run_dir.name,
         num_train_epochs=args.epochs,
         per_device_train_batch_size=args.batch_size,
         learning_rate=args.lr,
@@ -87,7 +124,6 @@ def main():
         dataloader_num_workers=args.num_workers,
         remove_unused_columns=False,  # Important!
         report_to="tensorboard",
-        logging_dir=f"{args.output_dir}/runs",
         save_total_limit=3,
         logging_first_step=True,
     )
@@ -105,13 +141,12 @@ def main():
     if args.resume_from_checkpoint is not None:
         checkpoint = args.resume_from_checkpoint
     elif args.resume:
-        if os.path.isdir(args.output_dir):
-            last_checkpoint = get_last_checkpoint(args.output_dir)
-            if last_checkpoint is not None:
-                logger.info(f"Checkpoint detected, resuming training at {last_checkpoint}.")
-                checkpoint = last_checkpoint
-            else:
-                logger.warning(f"No checkpoint found in {args.output_dir}, starting from scratch.")
+        last_checkpoint = get_last_checkpoint(str(run_dir))
+        if last_checkpoint is not None:
+            logger.info(f"Checkpoint detected, resuming training at {last_checkpoint}.")
+            checkpoint = last_checkpoint
+        else:
+            logger.warning(f"No checkpoint found in {run_dir}, starting from scratch.")
     
     trainer.train(resume_from_checkpoint=checkpoint)
     trainer.save_model()
