@@ -1,34 +1,46 @@
-import argparse
+import sys
 import json
 import logging
+import argparse
 from pathlib import Path
-import tkinter as tk
-from tkinter import ttk
-from PIL import Image, ImageTk, ImageDraw
+
+from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
+                               QHBoxLayout, QSplitter, QScrollArea, QLabel, 
+                               QPushButton, QCheckBox, QGraphicsView, QGraphicsScene)
+from PySide6.QtGui import QPixmap, QColor, QPen, QFont
+from PySide6.QtGui import QShortcut, QKeySequence
+from PySide6.QtCore import Qt, QRectF
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-class BBoxVisualizer:
-    def __init__(self, master, img_dir: str, ann_dir: str, hierarchy_path: str):
-        self.master = master
-        self.master.title("Gelato Graph - Dataset Annotations Visualizer")
+class ResizableGraphicsView(QGraphicsView):
+    """Custom view that automatically scales the scene to fit the window on resize."""
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.scene() and not self.scene().sceneRect().isEmpty():
+            self.fitInView(self.scene().sceneRect(), Qt.KeepAspectRatio)
+
+class BBoxVisualizer(QMainWindow):
+    def __init__(self, img_dir: str, ann_dir: str, hierarchy_path: str):
+        super().__init__()
+        self.setWindowTitle("Gelato Graph - PySide6 Annotations Visualizer")
+        self.resize(1400, 900)
         
         self.img_dir = Path(img_dir)
         self.ann_dir = Path(ann_dir)
         self.hierarchy_path = Path(hierarchy_path)
         
-        # Discover all image paths
         self.image_paths = sorted(list(self.img_dir.rglob("*.png")) + list(self.img_dir.rglob("*.jpg")))
         self.current_index = 0
         
-        # Load configs
         self.target_classes = self.load_target_classes()
         self.hierarchy = self.load_hierarchy()
-        self.visibility_vars = {} # class_name -> tk.BooleanVar
+        
+        self.class_checkboxes = {}  # Tracks individual class QCheckBox widgets
+        self.drawn_annotations = [] # Tracks drawn items: [{'class': cls_name, 'items': [rect, text]}]
         
         self.setup_ui()
-        self.bind_keys()
         
         if self.image_paths:
             self.load_image()
@@ -36,7 +48,6 @@ class BBoxVisualizer:
             logger.warning(f"No images found in {self.img_dir}")
             
     def load_target_classes(self) -> set:
-        """Loads the valid target classes from gelato_config.json"""
         target = set()
         if Path("gelato_config.json").exists():
             try:
@@ -48,7 +59,6 @@ class BBoxVisualizer:
         return target
         
     def load_hierarchy(self) -> dict:
-        """Loads hierarchy.json and populates missing target classes into an 'Uncategorized' group."""
         hierarchy = {}
         if self.hierarchy_path.exists():
             try:
@@ -57,14 +67,12 @@ class BBoxVisualizer:
             except Exception as e:
                 logger.error(f"Failed to read {self.hierarchy_path}: {e}")
         
-        # Calculate which classes configured in gelato_config are missing from the hierarchy view
         assigned_classes = {cls for group in hierarchy.values() for cls in group}
         missing_classes = self.target_classes - assigned_classes
         
         if missing_classes:
             hierarchy["Uncategorized"] = sorted(list(missing_classes))
             
-        # Also clean up groups to only include classes we actually target
         clean_hierarchy = {}
         for group, classes in hierarchy.items():
             valid_classes = [c for c in classes if c in self.target_classes or not self.target_classes]
@@ -74,76 +82,103 @@ class BBoxVisualizer:
         return clean_hierarchy
 
     def setup_ui(self):
-        # Base container
-        self.main_paned = ttk.PanedWindow(self.master, orient=tk.HORIZONTAL)
-        self.main_paned.pack(fill=tk.BOTH, expand=True)
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        main_layout = QVBoxLayout(central_widget)
+        main_layout.setContentsMargins(0, 0, 0, 0)
         
-        # Sidebar
-        self.sidebar_frame = ttk.Frame(self.main_paned, width=300, padding=10)
-        self.main_paned.add(self.sidebar_frame, weight=0)
+        # Splitter handles draggable sidebar resizing perfectly
+        splitter = QSplitter(Qt.Horizontal)
+        main_layout.addWidget(splitter)
         
-        # Main canvas viewer area
-        self.canvas_frame = ttk.Frame(self.main_paned)
-        self.main_paned.add(self.canvas_frame, weight=1)
+        # --- Sidebar ---
+        sidebar_widget = QWidget()
+        sidebar_layout = QVBoxLayout(sidebar_widget)
         
-        self.canvas = tk.Canvas(self.canvas_frame, bg="gray20", highlightthickness=0)
-        self.canvas.pack(fill=tk.BOTH, expand=True)
+        title = QLabel("Class Visibility Toggle")
+        title.setFont(QFont("Arial", 12, QFont.Bold))
+        sidebar_layout.addWidget(title)
         
-        # Bottom Navigation
-        self.nav_frame = ttk.Frame(self.canvas_frame, padding=5)
-        self.nav_frame.pack(side=tk.BOTTOM, fill=tk.X)
-        
-        self.lbl_info = ttk.Label(self.nav_frame, text="0 / 0 : No Images", font=("Arial", 10, "bold"))
-        self.lbl_info.pack(side=tk.LEFT, padx=10)
-        
-        ttk.Button(self.nav_frame, text="Next >", command=self.next_image).pack(side=tk.RIGHT)
-        ttk.Button(self.nav_frame, text="< Prev", command=self.prev_image).pack(side=tk.RIGHT)
-        
-        # Sidebar scrollable area
-        ttk.Label(self.sidebar_frame, text="Class Visibility Toggle", font=("Arial", 12, "bold")).pack(anchor=tk.W, pady=(0, 10))
-        
-        canvas_sidebar = tk.Canvas(self.sidebar_frame, borderwidth=0, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(self.sidebar_frame, orient="vertical", command=canvas_sidebar.yview)
-        self.scrollable = ttk.Frame(canvas_sidebar)
-        
-        self.scrollable.bind("<Configure>", lambda e: canvas_sidebar.configure(scrollregion=canvas_sidebar.bbox("all")))
-        canvas_sidebar.create_window((0, 0), window=self.scrollable, anchor="nw")
-        canvas_sidebar.configure(yscrollcommand=scrollbar.set)
-        
-        canvas_sidebar.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_content = QWidget()
+        self.scroll_layout = QVBoxLayout(scroll_content)
+        self.scroll_layout.setAlignment(Qt.AlignTop)
         
         # Build hierarchy checkboxes
         for group_name, classes in self.hierarchy.items():
-            group_frame = ttk.Frame(self.scrollable)
-            group_frame.pack(fill=tk.X, anchor=tk.W, pady=(5, 0))
-            
-            group_var = tk.BooleanVar(value=True)
-            cb = ttk.Checkbutton(group_frame, text=group_name, variable=group_var,
-                                 command=lambda gvar=group_var, clist=classes: self.toggle_group(gvar, clist))
-            cb.pack(anchor=tk.W)
-            
-            items_frame = ttk.Frame(self.scrollable)
-            items_frame.pack(fill=tk.X, anchor=tk.W, padx=(20, 0))
+            group_cb = QCheckBox(group_name)
+            group_cb.setChecked(True)
+            # Default argument capturing for lambda inside a loop
+            group_cb.toggled.connect(lambda checked, cb=group_cb, cls_list=classes: self.toggle_group(checked, cls_list, cb))
+            self.scroll_layout.addWidget(group_cb)
             
             for cls in classes:
-                var = tk.BooleanVar(value=True)
-                self.visibility_vars[cls] = var
-                ttk.Checkbutton(items_frame, text=cls, variable=var, command=self.redraw_image).pack(anchor=tk.W)
+                cls_cb = QCheckBox(cls)
+                cls_cb.setChecked(True)
+                cls_cb.setStyleSheet("margin-left: 20px;")
+                cls_cb.toggled.connect(self.update_visibility)
                 
-        self.master.bind("<Configure>", self.on_resize)
+                self.class_checkboxes[cls] = cls_cb
+                self.scroll_layout.addWidget(cls_cb)
+                
+        scroll_area.setWidget(scroll_content)
+        sidebar_layout.addWidget(scroll_area)
+        splitter.addWidget(sidebar_widget)
         
-    def toggle_group(self, group_var, classes):
-        state = group_var.get()
-        for cls in classes:
-            if cls in self.visibility_vars:
-                self.visibility_vars[cls].set(state)
-        self.redraw_image()
+        # --- Canvas Viewer Area ---
+        canvas_container = QWidget()
+        canvas_layout = QVBoxLayout(canvas_container)
+        canvas_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.scene = QGraphicsScene()
+        self.view = ResizableGraphicsView(self.scene)
+        self.view.setStyleSheet("background-color: #2b2b2b; border: none;")
+        
+        canvas_layout.addWidget(self.view)
+        
+        # --- Bottom Navigation ---
+        nav_layout = QHBoxLayout()
+        self.lbl_info = QLabel("0 / 0 : No Images")
+        self.lbl_info.setFont(QFont("Arial", 10, QFont.Bold))
+        
+        btn_prev = QPushButton("< Prev")
+        btn_next = QPushButton("Next >")
+        
+        btn_prev.clicked.connect(self.prev_image)
+        btn_next.clicked.connect(self.next_image)
+        
+        nav_layout.addWidget(self.lbl_info)
+        nav_layout.addStretch()
+        nav_layout.addWidget(btn_prev)
+        nav_layout.addWidget(btn_next)
+        
+        canvas_layout.addLayout(nav_layout)
+        splitter.addWidget(canvas_container)
+        
+        # Initial sidebar vs canvas width ratio
+        splitter.setSizes([300, 1100])
 
-    def bind_keys(self):
-        self.master.bind("<Right>", lambda e: self.next_image())
-        self.master.bind("<Left>", lambda e: self.prev_image())
+        # --- Keyboard Shortcuts ---
+        # Next Image: Right Arrow or 'd'
+        QShortcut(QKeySequence(Qt.Key_Right), self, self.next_image)
+        QShortcut(QKeySequence(Qt.Key_D), self, self.next_image)
         
+        # Previous Image: Left Arrow or 'a'
+        QShortcut(QKeySequence(Qt.Key_Left), self, self.prev_image)
+        QShortcut(QKeySequence(Qt.Key_A), self, self.prev_image)
+
+
+    def toggle_group(self, checked, classes, group_cb):
+        # Prevent the individual checkboxes from triggering a massive redraw loop
+        for cls in classes:
+            if cls in self.class_checkboxes:
+                cb = self.class_checkboxes[cls]
+                cb.blockSignals(True)
+                cb.setChecked(checked)
+                cb.blockSignals(False)
+        self.update_visibility()
+
     def next_image(self):
         if self.image_paths:
             self.current_index = (self.current_index + 1) % len(self.image_paths)
@@ -153,83 +188,88 @@ class BBoxVisualizer:
         if self.image_paths:
             self.current_index = (self.current_index - 1) % len(self.image_paths)
             self.load_image()
-            
+
+    def get_color(self, cls_name: str) -> QColor:
+        colors = ["#ff3333", "#3333ff", "#33cc33", "#ff9900", "#9933cc", "#33cccc", "#ff33cc", "#ffcc00", "#008080", "#ff66b2"]
+        hex_color = colors[sum(ord(c) for c in cls_name) % len(colors)]
+        return QColor(hex_color)
+
     def load_image(self):
         if not self.image_paths: return
-        img_path = self.image_paths[self.current_index]
-        self.lbl_info.config(text=f"Image {self.current_index + 1} / {len(self.image_paths)} : {img_path.name}")
         
-        self.original_image = Image.open(img_path).convert("RGB")
+        # Clear the old scene and memory references
+        self.scene.clear()
+        self.drawn_annotations.clear()
+        
+        img_path = self.image_paths[self.current_index]
+        self.lbl_info.setText(f"Image {self.current_index + 1} / {len(self.image_paths)} : {img_path.name}")
+        
+        # Load the raw image natively
+        pixmap = QPixmap(str(img_path))
+        self.scene.setSceneRect(0, 0, pixmap.width(), pixmap.height())
+        self.scene.addPixmap(pixmap)
         
         ann_path = self.ann_dir / f"{img_path.stem}.json"
-        self.annotations = []
+        annotations = []
         if ann_path.exists():
             try:
                 with open(ann_path, 'r') as f:
                     data = json.load(f)
-                    self.annotations = data.get("annotations", [])
+                    annotations = data.get("annotations", [])
             except Exception as e:
                 logger.error(f"Error reading {ann_path}: {e}")
-        
-        self.redraw_image()
-        
-    def redraw_image(self, event=None):
-        if not hasattr(self, 'original_image'): return
-        
-        cw = self.canvas.winfo_width()
-        ch = self.canvas.winfo_height()
-        if cw < 10 or ch < 10:
-            cw, ch = 800, 800
-            
-        ow, oh = self.original_image.size
-        # Letterbox scaling
-        scale = min(cw / ow, ch / oh)
-        new_w, new_h = int(ow * scale), int(oh * scale)
-        if new_w <= 0 or new_h <= 0: return
 
-        resized_img = self.original_image.resize((new_w, new_h), Image.Resampling.LANCZOS)
-        draw = ImageDraw.Draw(resized_img)
-        
-        visible_classes = {cls for cls, var in self.visibility_vars.items() if var.get()}
-        
-        # Generate stable mock colors
-        colors = ["red", "blue", "green", "darkorange", "purple", "cyan", "magenta", "gold", "teal", "hotpink"]
-        def get_color(cls_name):
-            return colors[sum(ord(c) for c in cls_name) % len(colors)]
-        
-        for ann in self.annotations:
+        # Draw annotations ONCE and save references to their graphic objects
+        for ann in annotations:
             cls = ann.get('class')
-            if cls in visible_classes:
-                x1, y1, x2, y2 = ann['bbox']
-                sx1, sy1 = x1 * scale, y1 * scale
-                sx2, sy2 = x2 * scale, y2 * scale
-                
-                color = get_color(cls)
-                draw.rectangle([sx1, sy1, sx2, sy2], outline=color, width=2)
-                draw.text((sx1, max(0, sy1 - 10)), cls, fill=color)
-                
-        self.tk_image = ImageTk.PhotoImage(resized_img)
-        self.canvas.delete("all")
+            x1, y1, x2, y2 = ann['bbox']
+            
+            color = self.get_color(cls)
+            pen = QPen(color)
+            pen.setWidth(max(1, int(pixmap.width() * 0.002))) # Scale line thickness dynamically
+            
+            # Create graphic items
+            rect_item = self.scene.addRect(QRectF(x1, y1, x2 - x1, y2 - y1), pen)
+            text_item = self.scene.addText(cls)
+            text_item.setDefaultTextColor(color)
+            text_item.setPos(x1, max(0, y1 - 25))
+            
+            self.drawn_annotations.append({
+                'class': cls,
+                'items': [rect_item, text_item]
+            })
         
-        x_offset = (cw - new_w) // 2
-        y_offset = (ch - new_h) // 2
-        self.canvas.create_image(x_offset, y_offset, anchor=tk.NW, image=self.tk_image)
+        # Ensure items start with correct visibility based on sidebar
+        self.update_visibility()
         
-    def on_resize(self, event):
-        if event.widget == self.canvas:
-            self.redraw_image()
+        # Fit view to scene automatically
+        self.view.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio)
+
+    def update_visibility(self):
+        # Determine what is currently checked in the UI
+        visible_classes = {cls for cls, cb in self.class_checkboxes.items() if cb.isChecked()}
+        
+        # Instantly toggle the vector layer visibility (no image redrawing required)
+        for ann_obj in self.drawn_annotations:
+            is_visible = ann_obj['class'] in visible_classes
+            for item in ann_obj['items']:
+                item.setVisible(is_visible)
 
 def main():
-    parser = argparse.ArgumentParser(description="Visualize dataset annotations in an interactive GUI.")
-    parser.add_argument("--img_dir", type=str, default="data/output_imgs", help="Directory containing images")
-    parser.add_argument("--ann_dir", type=str, default="data/annotations", help="Directory containing annotation JSONs")
-    parser.add_argument("--hierarchy", type=str, default="data/hierarchy.json", help="Path to hierarchy.json config")
+    parser = argparse.ArgumentParser(description="PySide6 Annotations Visualizer")
+    parser.add_argument("--img_dir", type=str, default="data/output_imgs")
+    parser.add_argument("--ann_dir", type=str, default="data/annotations")
+    parser.add_argument("--hierarchy", type=str, default="data/hierarchy.json")
     args = parser.parse_args()
     
-    root = tk.Tk()
-    root.geometry("1400x900")
-    app = BBoxVisualizer(root, args.img_dir, args.ann_dir, args.hierarchy)
-    root.mainloop()
+    app = QApplication(sys.argv)
+    
+    # Optional: Force a dark theme style if running on a light desktop
+    app.setStyle("Fusion")
+    
+    window = BBoxVisualizer(args.img_dir, args.ann_dir, args.hierarchy)
+    window.show()
+    sys.exit(app.exec())
 
 if __name__ == "__main__":
     main()

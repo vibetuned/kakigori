@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -82,6 +83,23 @@ class DecoupledHead(nn.Module):
             DepthwiseSeparableConv(in_channels, in_channels),
             nn.Conv2d(in_channels, 4, kernel_size=1) # 4 outputs: cx, cy, w, h
         )
+        # Initialize the biases
+        self._init_biases()
+
+    def _init_biases(self):
+        # 1. Initialize Classification Branch (Focal Loss Prior)
+        # Tell the network that it should initially guess a ~1% probability for objects
+        pi = 0.01
+        focal_bias = -math.log((1.0 - pi) / pi)
+        nn.init.constant_(self.cls_branch[-1].bias, focal_bias)
+        
+        # 2. Initialize Regression Branch (Width/Height Exp Prior)
+        # Tell the network that objects are initially ~1% of the image size
+        # Indices: 0=tx, 1=ty, 2=width, 3=height
+        nn.init.constant_(self.reg_branch[-1].bias[0], 0.0)
+        nn.init.constant_(self.reg_branch[-1].bias[1], 0.0)
+        nn.init.constant_(self.reg_branch[-1].bias[2], math.log(0.01))
+        nn.init.constant_(self.reg_branch[-1].bias[3], math.log(0.01))
 
     def forward(self, x):
         cls_output = self.cls_branch(x)

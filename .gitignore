@@ -13,3 +13,4 @@ wheels/
 /checkpoints/
 /runs/
 .rsyncignore
+/inference_out/

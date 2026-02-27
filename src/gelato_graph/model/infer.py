@@ -117,8 +117,9 @@ def decode_outputs(
         cy_n = (ty + pos[:, 0]) / H
         
         # Width and height remain as global normalized predictions
-        bw_n = reg_map[0, 2, pos[:, 0], pos[:, 1]].abs()
-        bh_n = reg_map[0, 3, pos[:, 0], pos[:, 1]].abs()
+        # THE FIX: Use exp() to decode the width and height
+        bw_n = reg_map[0, 2, pos[:, 0], pos[:, 1]].exp()
+        bh_n = reg_map[0, 3, pos[:, 0], pos[:, 1]].exp()
 
         # Scale from normalized [0, 1] up to the padded letterbox canvas,
         # then undo the padding and scaling to get back to the raw PDF page pixels

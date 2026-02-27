@@ -50,10 +50,14 @@ def decode_batch_for_eval(outputs, conf_thresh, iou_thresh, input_size):
             # FIX: Decode tx, ty offsets using sigmoid and grid indices
             W, H = reg_map.shape[2], reg_map.shape[1]
             
+            # Notice we drop the leading '0,' because reg_map is only 3D here: (4, H, W)
+            # Channel 0: tx, Channel 1: ty
             cx_n = (reg_map[0, pos[:, 0], pos[:, 1]].sigmoid() + pos[:, 1]) / W
             cy_n = (reg_map[1, pos[:, 0], pos[:, 1]].sigmoid() + pos[:, 0]) / H
-            bw_n = reg_map[2, pos[:, 0], pos[:, 1]].abs()
-            bh_n = reg_map[3, pos[:, 0], pos[:, 1]].abs()
+            
+            # Channel 2: tw, Channel 3: th
+            bw_n = reg_map[2, pos[:, 0], pos[:, 1]].exp()
+            bh_n = reg_map[3, pos[:, 0], pos[:, 1]].exp()
 
             # Convert to absolute pixel coordinates on the padded canvas
             cx = cx_n * input_size

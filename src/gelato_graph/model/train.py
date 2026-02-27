@@ -37,7 +37,7 @@ def main():
     # Training args (subset of common ones, others can be passed via unknown args if needed)
     parser.add_argument("--output-dir", type=str, default="checkpoints")
     parser.add_argument("--logging-dir", type=str, default="runs", help="Root directory for TensorBoard run logs.")
-    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--logging-steps", type=int, default=50)

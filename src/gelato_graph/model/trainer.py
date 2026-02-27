@@ -95,72 +95,6 @@ class OMRTrainer(Trainer):
 
         return cls_targets, reg_targets, obj_masks
 
-    def compute_loss2(self, model, inputs, return_outputs=False, **kwargs):
-        """Custom loss computation for the OMR model."""
-        images = inputs.get("pixel_values")
-        targets_list = inputs.get("labels")
-        
-        # Determine num_classes from the model head or config
-        # Assuming the first head's out_channels is num_classes
-        num_classes = model.heads[0].cls_branch[-1].out_channels
-        device = images.device
-
-        outputs = model(images)
-        
-        feature_sizes = [(o["cls"].shape[2], o["cls"].shape[3]) for o in outputs]
-        cls_targets, reg_targets, obj_masks = self.build_targets(
-            targets_list, feature_sizes, num_classes, device
-        )
-
-        total_cls = torch.tensor(0.0, device=device)
-        total_reg = torch.tensor(0.0, device=device)
-
-        for scale_idx, out in enumerate(outputs):
-            # Classification loss
-            total_cls = total_cls + self.focal_loss_fn(out["cls"], cls_targets[scale_idx])
-
-            # Regression loss
-            mask = obj_masks[scale_idx]
-            if mask.any():
-                pos_indices = mask.nonzero(as_tuple=False)
-                b_idx, r_idx, c_idx = pos_indices[:, 0], pos_indices[:, 1], pos_indices[:, 2]
-                
-                pred_pos = out["reg"][b_idx, :, r_idx, c_idx]
-                tgt_pos = reg_targets[scale_idx][b_idx, :, r_idx, c_idx]
-                
-                fw, fh = out["reg"].shape[3], out["reg"].shape[2]
-                
-                # THE FIX: Convert (tx, ty) back to global (cx, cy)
-                # Apply sigmoid to force the network's offset prediction strictly between 0 and 1
-                pred_cx = (pred_pos[:, 0].sigmoid() + c_idx) / fw 
-                pred_cy = (pred_pos[:, 1].sigmoid() + r_idx) / fh
-                pred_w = pred_pos[:, 2]
-                pred_h = pred_pos[:, 3]
-                
-                tgt_cx = (tgt_pos[:, 0] + c_idx) / fw
-                tgt_cy = (tgt_pos[:, 1] + r_idx) / fh
-                tgt_w = tgt_pos[:, 2]
-                tgt_h = tgt_pos[:, 3]
-                
-                pred_boxes = torch.stack([pred_cx, pred_cy, pred_w, pred_h], dim=1)
-                tgt_boxes = torch.stack([tgt_cx, tgt_cy, tgt_w, tgt_h], dim=1)
-                
-                total_reg = total_reg + self.ciou_loss_fn(
-                    pred_boxes.unsqueeze(-1).unsqueeze(-1),
-                    tgt_boxes.unsqueeze(-1).unsqueeze(-1),
-                )
-
-        reg_weight = 5.0
-        total_loss = total_cls + reg_weight * total_reg
-
-        # Accumulate custom metrics; they are flushed via the log() override below.
-        self._custom_metrics = {
-            "train/cls_loss": total_cls.detach().item(),
-            "train/reg_loss": total_reg.detach().item(),
-        }
-
-        return (total_loss, outputs) if return_outputs else total_loss
-
     def log(self, logs: dict, start_time: float | None = None) -> None:
         """Merge custom metrics into every log call made by the Trainer."""
         if hasattr(self, "_custom_metrics"):
@@ -211,8 +145,10 @@ class OMRTrainer(Trainer):
                 # Apply sigmoid to force the network's offset prediction strictly between 0 and 1
                 pred_cx = (pred_pos[:, 0].sigmoid() + c_idx) / fw 
                 pred_cy = (pred_pos[:, 1].sigmoid() + r_idx) / fh
-                pred_w = pred_pos[:, 2]
-                pred_h = pred_pos[:, 3]
+
+                # THE FIX: Apply exponential to guarantee strictly positive width/height
+                pred_w = torch.exp(pred_pos[:, 2])
+                pred_h = torch.exp(pred_pos[:, 3])
                 
                 tgt_cx = (tgt_pos[:, 0] + c_idx) / fw
                 tgt_cy = (tgt_pos[:, 1] + r_idx) / fh
@@ -223,8 +159,8 @@ class OMRTrainer(Trainer):
                 tgt_boxes = torch.stack([tgt_cx, tgt_cy, tgt_w, tgt_h], dim=1)
                 
                 total_reg = total_reg + self.ciou_loss_fn(
-                    pred_boxes.unsqueeze(-1).unsqueeze(-1),
-                    tgt_boxes.unsqueeze(-1).unsqueeze(-1),
+                    pred_boxes,
+                    tgt_boxes,
                 )
 
         reg_weight = 5.0
