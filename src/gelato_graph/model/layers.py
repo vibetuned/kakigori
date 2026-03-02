@@ -57,10 +57,11 @@ class PANetNeck(nn.Module):
 
         # Bottom-up pathway (optional, for full PANet)
         if self.use_bottom_up:
-            p1_downsampled = F.interpolate(p1, size=p2.shape[-2:], mode='nearest')
+            # Safely downsample by taking the max features, preserving tiny objects
+            p1_downsampled = F.adaptive_max_pool2d(p1, output_size=p2.shape[-2:])
             p2 = self.fuse_bu_p1_p2(p2 + p1_downsampled)
 
-            p2_downsampled = F.interpolate(p2, size=p3.shape[-2:], mode='nearest')
+            p2_downsampled = F.adaptive_max_pool2d(p2, output_size=p3.shape[-2:])
             p3 = self.fuse_bu_p2_p3(p3 + p2_downsampled)
 
         # Return the fused multi-scale features
@@ -96,10 +97,11 @@ class DecoupledHead(nn.Module):
         # 2. Initialize Regression Branch (Width/Height Exp Prior)
         # Tell the network that objects are initially ~1% of the image size
         # Indices: 0=tx, 1=ty, 2=width, 3=height
-        nn.init.constant_(self.reg_branch[-1].bias[0], 0.0)
-        nn.init.constant_(self.reg_branch[-1].bias[1], 0.0)
-        nn.init.constant_(self.reg_branch[-1].bias[2], math.log(0.01))
-        nn.init.constant_(self.reg_branch[-1].bias[3], math.log(0.01))
+        # Safely overwrite the 1D bias tensor all at once
+        with torch.no_grad():
+            self.reg_branch[-1].bias.copy_(
+                torch.tensor([0.0, 0.0, math.log(0.01), math.log(0.01)])
+            )
 
     def forward(self, x):
         cls_output = self.cls_branch(x)

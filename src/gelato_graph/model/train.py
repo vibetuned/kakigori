@@ -14,30 +14,59 @@ from transformers.trainer_utils import get_last_checkpoint
 
 from .model import EdgeMusicDetector
 from .dataset import OMRDataset
-from .collator import omr_collate_fn
 from .trainer import OMRTrainer
+from .utils import load_checkpoint, RatioSampler, omr_collate_fn
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
+def parse_args():
+    # First, parse configuration file path
+    conf_parser = argparse.ArgumentParser(add_help=False)
+    conf_parser.add_argument("--train-config", type=str, default="conf/train.yaml", help="Path to YAML training configuration.")
+    conf_args, remaining_argv = conf_parser.parse_known_args()
 
-def main():
-    parser = argparse.ArgumentParser(description="OMR Trainer")
+    yaml_defaults = {}
+    if os.path.exists(conf_args.train_config):
+        import yaml
+        with open(conf_args.train_config, "r") as f:
+            yaml_defaults = yaml.safe_load(f) or {}
+
+    parser = argparse.ArgumentParser(description="OMR Trainer", parents=[conf_parser])
     
     # Data args
     parser.add_argument("--img-dir", type=str, default="data/dataset-small-render/imgs")
     parser.add_argument("--ann-dir", type=str, default="data/dataset-small-render/annotations")
+    parser.add_argument("--synthetic-img-dir", type=str, default="data/synthetic-small/img")
+    parser.add_argument("--synthetic-ann-dir", type=str, default="data/synthetic-small/annotations")
+    parser.add_argument("--synthetic-ratio", type=int, default=4, help="ratio of synthetic to real (default 4)")
+    parser.add_argument("--use-synthetic", action="store_true", help="use synthetic data merged with real data")
     parser.add_argument("--config", type=str, default="gelato_config.json")
     parser.add_argument("--input-size", type=int, default=640)
     parser.add_argument("--num-workers", type=int, default=4)
     
     # Model args
     parser.add_argument("--use-bottom-up", action="store_true")
+    parser.add_argument(
+        "--out-indices", type=int, nargs=3, default=[1, 2, 3],
+        help="Three backbone feature map indices to extract (default: 1 2 3).",
+    )
+
+    # Trainer args
+    parser.add_argument("--reg-weight", type=float, default=5.0)
+    parser.add_argument("--cls-weight", type=float, default=1.0)
+    parser.add_argument("--base-gamma", type=float, default=2.0)
+    parser.add_argument("--max-gamma", type=float, default=4.0)
+    parser.add_argument(
+        "--scale-ranges", type=float, nargs=6, default=None,
+        help="Six floats defining 3 (min, max) area ranges for scale assignment, "
+             "e.g. 0.0 0.0002 0.0002 0.002 0.002 2.0 (default).",
+    )
     
     # Training args (subset of common ones, others can be passed via unknown args if needed)
     parser.add_argument("--output-dir", type=str, default="checkpoints")
     parser.add_argument("--logging-dir", type=str, default="runs", help="Root directory for TensorBoard run logs.")
-    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--epochs", type=int, default=40)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--logging-steps", type=int, default=50)
@@ -46,8 +75,14 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--resume", action="store_true", help="Auto-detect and resume from the last checkpoint.")
     parser.add_argument("--resume-from-checkpoint", type=str, default=None, help="Path to a specific checkpoint to resume from.")
+    parser.add_argument("--fine-tune", type=str, default=None, help="Path to a checkpoint to fine-tune from (loads weights only, starts new run).")
 
-    args, unknown = parser.parse_known_args()
+    parser.set_defaults(**yaml_defaults)
+    args, unknown = parser.parse_known_args(remaining_argv)
+    return args
+
+def main():
+    args = parse_args()
 
     set_seed(args.seed)
 
@@ -104,11 +139,34 @@ def main():
     
     train_dataset = torch.utils.data.Subset(full_ds, range(len(full_ds)))
 
+    custom_sampler = None
+    if args.use_synthetic:
+        logger.info(f"Loading synthetic dataset with ratio 1:{args.synthetic_ratio}...")
+        synthetic_ds = OMRDataset(
+            img_dir=args.synthetic_img_dir,
+            ann_dir=args.synthetic_ann_dir,
+            class_list=class_list,
+            input_size=args.input_size,
+            augment=True,
+        )
+        synth_subset = torch.utils.data.Subset(synthetic_ds, range(len(synthetic_ds)))
+        train_dataset = torch.utils.data.ConcatDataset([train_dataset, synth_subset])
+        
+        dataset_lengths = [len(full_ds), len(synthetic_ds)]
+        ratios = [1, args.synthetic_ratio]
+        custom_sampler = RatioSampler(dataset_lengths, ratios)
+
     # --- Initialize Model ---
     model = EdgeMusicDetector(
         num_classes=num_classes,
         use_bottom_up=args.use_bottom_up,
+        out_indices=tuple(args.out_indices),
     )
+    
+    if args.fine_tune:
+        logger.info(f"Loading weights from {args.fine_tune} for fine-tuning (forcing CPU to save VRAM)...")
+        device = torch.device('cpu')
+        load_checkpoint(model, args.fine_tune, device=device, eval=False)
 
     # --- Initialize Training Arguments ---
     training_args = TrainingArguments(
@@ -126,7 +184,19 @@ def main():
         report_to="tensorboard",
         save_total_limit=3,
         logging_first_step=True,
+        # --- THE FIX: Cosine Warmup Schedule ---
+        lr_scheduler_type="cosine",
+        warmup_ratio=0.1,  # Use the first 10% of training steps to warm up the LR
+        # NEW: The Speed & VRAM Cheat Code
+        fp16=True, # Change to bf16=True if you have an RTX 3000/4000 series GPU
+        dataloader_pin_memory=True, # Speeds up CPU-to-GPU data transfer
     )
+
+    # --- Parse scale ranges from flat list into list of tuples ---
+    scale_ranges = None
+    if args.scale_ranges is not None:
+        sr = args.scale_ranges
+        scale_ranges = [(sr[0], sr[1]), (sr[2], sr[3]), (sr[4], sr[5])]
 
     # --- Initialize Trainer ---
     trainer = OMRTrainer(
@@ -134,6 +204,10 @@ def main():
         args=training_args,
         train_dataset=train_dataset,
         data_collator=omr_collate_fn,
+        scale_ranges=scale_ranges,
+        base_gamma=args.base_gamma,
+        max_gamma=args.max_gamma,
+        custom_sampler=custom_sampler,
     )
 
     # --- Start Training ---

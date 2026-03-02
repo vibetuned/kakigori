@@ -13,8 +13,6 @@ import json
 import logging
 from pathlib import Path
 
-from transformers.trainer_utils import get_last_checkpoint
-
 import torch
 import torchvision.transforms.functional as TF
 from PIL import Image
@@ -22,6 +20,7 @@ from tqdm import tqdm
 
 from .model import EdgeMusicDetector
 from .dataset import _letterbox
+from .utils import decode_model_outputs, load_checkpoint
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -44,10 +43,9 @@ def pdf_to_pages(pdf_path: Path, dpi: int = 300) -> list[Image.Image]:
     doc = pdfium.PdfDocument(str(pdf_path))
     scale = dpi / 72.0
     pages = []
-    for i, page in enumerate(doc):
+    for i, page in tqdm(enumerate(doc), desc="Rendering PDF pages", total=len(doc)):
         bitmap = page.render(scale=scale, rotation=0)
         pages.append(bitmap.to_pil().convert("RGB"))
-        logger.info(f"  Rendered page {i + 1}/{len(doc)}")
     return pages
 
 
@@ -75,111 +73,6 @@ def preprocess(image: Image.Image, input_size: int, device: torch.device) -> tup
     return tensor, meta
 
 
-# ---------------------------------------------------------------------------
-# Post-processing: decode + NMS
-# ---------------------------------------------------------------------------
-
-def decode_outputs(
-    outputs: list[dict],
-    meta: dict,
-    conf_thresh: float,
-    class_list: list[str],
-) -> list[dict]:
-    """Decode multi-scale head outputs into detections in original image coords."""
-    detections = []
-    s = meta["input_size"]
-
-    for out in outputs:
-        cls_map = out["cls"].sigmoid()   # (1, C, H, W)
-        reg_map = out["reg"]             # (1, 4, H, W)
-
-        max_scores, max_classes = cls_map[0].max(dim=0)  # (H, W)
-        pos = (max_scores >= conf_thresh).nonzero(as_tuple=False)  # (N, 2)
-
-        if pos.numel() == 0:
-            continue
-
-        # --- Vectorised decode (stays on GPU) ---
-        scores = max_scores[pos[:, 0], pos[:, 1]]        # (N,)
-        cls_idx = max_classes[pos[:, 0], pos[:, 1]]      # (N,)
-        
-        # Get the spatial dimensions of this specific feature grid (e.g., 80x80, 40x40, 20x20)
-        H, W = reg_map.shape[2], reg_map.shape[3]
-
-        # THE FIX: Extract the grid-relative offsets and apply sigmoid
-        # pos[:, 0] is the row index (y grid position)
-        # pos[:, 1] is the column index (x grid position)
-        tx = reg_map[0, 0, pos[:, 0], pos[:, 1]].sigmoid()
-        ty = reg_map[0, 1, pos[:, 0], pos[:, 1]].sigmoid()
-        
-        # Convert local offsets back to global normalized coordinates (0.0 to 1.0)
-        cx_n = (tx + pos[:, 1]) / W
-        cy_n = (ty + pos[:, 0]) / H
-        
-        # Width and height remain as global normalized predictions
-        # THE FIX: Use exp() to decode the width and height
-        bw_n = reg_map[0, 2, pos[:, 0], pos[:, 1]].exp()
-        bh_n = reg_map[0, 3, pos[:, 0], pos[:, 1]].exp()
-
-        # Scale from normalized [0, 1] up to the padded letterbox canvas,
-        # then undo the padding and scaling to get back to the raw PDF page pixels
-        cx_orig = (cx_n * s - meta["pad_x"]) / meta["scale"]
-        cy_orig = (cy_n * s - meta["pad_y"]) / meta["scale"]
-        bw_orig = bw_n * s / meta["scale"]
-        bh_orig = bh_n * s / meta["scale"]
-
-        x1 = (cx_orig - bw_orig / 2).clamp(min=0.0)
-        y1 = (cy_orig - bh_orig / 2).clamp(min=0.0)
-        x2 = (cx_orig + bw_orig / 2).clamp(max=float(meta["orig_w"]))
-        y2 = (cy_orig + bh_orig / 2).clamp(max=float(meta["orig_h"]))
-
-        # Filter degenerate boxes on GPU before moving to CPU
-        valid = (x2 > x1) & (y2 > y1)
-        if not valid.any():
-            continue
-
-        x1, y1, x2, y2 = x1[valid].tolist(), y1[valid].tolist(), x2[valid].tolist(), y2[valid].tolist()
-        scores = scores[valid].tolist()
-        cls_idx = cls_idx[valid].tolist()
-
-        detections.extend([
-            {
-                "class": class_list[int(ci)],
-                "score": round(sc, 4),
-                "bbox": [round(bx1, 1), round(by1, 1), round(bx2, 1), round(by2, 1)],
-            }
-            for sc, ci, bx1, by1, bx2, by2 in zip(scores, cls_idx, x1, y1, x2, y2)
-        ])
-
-    return detections
-
-
-def _iou(a: torch.Tensor, b: torch.Tensor) -> float:
-    ix1 = max(a[0], b[0]); iy1 = max(a[1], b[1])
-    ix2 = min(a[2], b[2]); iy2 = min(a[3], b[3])
-    inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
-    union = (a[2]-a[0])*(a[3]-a[1]) + (b[2]-b[0])*(b[3]-b[1]) - inter
-    return (inter / union).item() if union > 0 else 0.0
-
-
-def nms(detections: list[dict], iou_thresh: float = 0.5) -> list[dict]:
-    """Class-agnostic NMS."""
-    if not detections:
-        return []
-    boxes = torch.tensor([[d["bbox"][0], d["bbox"][1], d["bbox"][2], d["bbox"][3]] for d in detections])
-    scores = torch.tensor([d["score"] for d in detections])
-    try:
-        from torchvision.ops import nms as tv_nms
-        keep = tv_nms(boxes, scores, iou_thresh).tolist()
-    except Exception:
-        keep = []
-        order = scores.argsort(descending=True).tolist()
-        while order:
-            i = order.pop(0)
-            keep.append(i)
-            b = boxes[i]
-            order = [j for j in order if _iou(boxes[j], b) < iou_thresh]
-    return [detections[i] for i in keep]
 
 
 # ---------------------------------------------------------------------------
@@ -197,6 +90,10 @@ def main():
     parser.add_argument("--iou-thresh", type=float, default=0.5)
     parser.add_argument("--dpi", type=int, default=150, help="DPI for PDF page rendering.")
     parser.add_argument("--use-bottom-up", action="store_true")
+    parser.add_argument(
+        "--out-indices", type=int, nargs=3, default=[1, 2, 3],
+        help="Three backbone feature map indices to extract (default: 1 2 3).",
+    )
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -210,32 +107,8 @@ def main():
 
     # --- Load model ---
     logger.info(f"Loading model from {args.checkpoint}")
-    model = EdgeMusicDetector(num_classes=num_classes, use_bottom_up=args.use_bottom_up)
-
-    ckpt = Path(args.checkpoint)
-    if ckpt.is_dir():
-        # Prefer the last HF Trainer checkpoint inside the directory
-        last = get_last_checkpoint(str(ckpt))
-        if last is not None:
-            ckpt = Path(last)
-            logger.info(f"  Using last checkpoint: {ckpt}")
-        # else: treat the directory itself as the checkpoint (single-run dir)
-
-    # Look for weights file inside the resolved checkpoint directory
-    for name in ("model.safetensors", "pytorch_model.bin"):
-        weights = (ckpt / name) if ckpt.is_dir() else ckpt
-        if weights.exists():
-            if weights.suffix == ".safetensors":
-                from safetensors.torch import load_file
-                state = load_file(weights, device=str(device))
-            else:
-                state = torch.load(weights, map_location=device, weights_only=False)
-            model.load_state_dict(state)
-            logger.info(f"  Loaded weights: {weights}")
-            break
-    else:
-        logger.warning("No weights file found — using random weights.")
-    model.to(device).eval()
+    model = EdgeMusicDetector(num_classes=num_classes, use_bottom_up=args.use_bottom_up, out_indices=args.out_indices)
+    load_checkpoint(model, args.checkpoint, device)
 
     # --- Render PDF ---
     output_dir = Path(args.output_dir)
@@ -253,8 +126,28 @@ def main():
 
             tensor, meta = preprocess(page_image, args.input_size, device)
             outputs = model(tensor)
-            detections = decode_outputs(outputs, meta, args.conf_thresh, class_list)
-            detections = nms(detections, args.iou_thresh)
+            batch_preds = decode_model_outputs(outputs, args.conf_thresh, args.iou_thresh, args.input_size)
+
+            detections_dict = batch_preds[0]
+
+            detections = [
+                {
+                    "class": class_list[int(c)],
+                    "score": round(float(s), 4),
+                    
+                    "bbox": [
+                        round(float(((bx1 - meta["pad_x"]) / meta["scale"]).clamp(min=0.0)), 1),
+                        round(float(((by1 - meta["pad_y"]) / meta["scale"]).clamp(min=0.0)), 1),
+                        round(float(((bx2 - meta["pad_x"]) / meta["scale"]).clamp(max=float(meta["orig_w"]))), 1),
+                        round(float(((by2 - meta["pad_y"]) / meta["scale"]).clamp(max=float(meta["orig_h"]))), 1),
+                    ]
+                }
+                for bx1, by1, bx2, by2, s, c in zip(
+                    detections_dict["boxes"][:, 0], detections_dict["boxes"][:, 1], 
+                    detections_dict["boxes"][:, 2], detections_dict["boxes"][:, 3], 
+                    detections_dict["scores"], detections_dict["labels"]
+                )
+            ]
             pbar.set_postfix(dets=len(detections))
 
             # One JSON per page — matches dataset annotation format

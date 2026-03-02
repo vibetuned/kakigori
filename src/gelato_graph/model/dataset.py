@@ -1,30 +1,18 @@
 """OMR Dataset — loads rendered score images and their bounding-box annotations."""
-
 import json
 import random
 from pathlib import Path
+import cv2
+import numpy as np
 
 import torch
 from torch.utils.data import Dataset
 from PIL import Image, ImageFile
 import torchvision.transforms.functional as TF
 
-# Support loading of truncated images (common if rendering was interrupted)
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
-
 class OMRDataset(Dataset):
-    """Dataset for Optical Music Recognition object detection.
-
-    Each sample is a full-page score image paired with bounding-box annotations.
-    Annotations are stored as JSON with format:
-        {"image": "...", "width": W, "height": H,
-         "annotations": [{"class": "note", "bbox": [x1, y1, x2, y2]}, ...]}
-
-    Boxes are returned in *normalised* (cx, cy, w, h) format relative to the
-    **model input size**, after resizing.
-    """
-
     def __init__(
         self,
         img_dir: str,
@@ -38,10 +26,8 @@ class OMRDataset(Dataset):
         self.input_size = input_size
         self.augment = augment
 
-        # Build class → index mapping (0-indexed)
         self.class_to_idx = {c: i for i, c in enumerate(class_list)}
 
-        # Pair images ↔ annotations by stem
         ann_stems = {p.stem for p in self.ann_dir.glob("*.json")}
         self.samples: list[tuple[Path, Path]] = []
         for img_path in sorted(self.img_dir.glob("*.png")):
@@ -49,17 +35,34 @@ class OMRDataset(Dataset):
                 ann_path = self.ann_dir / f"{img_path.stem}.json"
                 self.samples.append((img_path, ann_path))
 
+        # --- Initialize Albumentations conditionally ---
+        if self.augment:
+            import albumentations as A
+            
+            # Dynamically calculate hole sizes based on the padded input_size
+            max_hole = max(10, self.input_size // 20)
+            min_hole = 5
+            
+            self.scanner_pipeline = A.Compose([
+                A.RandomBrightnessContrast(brightness_limit=0.1, contrast_limit=0.15, p=0.5),
+                A.GaussNoise(var_limit=(4.0, 64.0), p=0.5),
+                A.CoarseDropout(
+                    max_holes=20, max_height=max_hole, max_width=max_hole,
+                    min_holes=5, min_height=min_hole, min_width=min_hole,
+                    fill_value=240, p=0.5
+                ),
+                A.ImageCompression(quality_lower=40, quality_upper=75, p=0.3)
+            ])
+
     def __len__(self) -> int:
         return len(self.samples)
 
     def __getitem__(self, idx: int):
         img_path, ann_path = self.samples[idx]
 
-        # --- Load image & annotations ------------------------------------
         try:
             image = Image.open(img_path).convert("RGB")
         except (OSError, SyntaxError) as e:
-            # If image is broken, pick a random different sample to avoid crashing the loop
             print(f"Warning: Skipping corrupted image {img_path}: {e}")
             return self.__getitem__(random.randint(0, len(self.samples) - 1))
 
@@ -68,20 +71,17 @@ class OMRDataset(Dataset):
 
         orig_w, orig_h = image.size
 
-        # --- Parse annotations -------------------------------------------
-        boxes = []  # will be (cx, cy, w, h) normalised
+        boxes = []
         labels = []
         for ann in ann_data["annotations"]:
             cls_name = ann["class"]
             if cls_name not in self.class_to_idx:
                 continue
             x1, y1, x2, y2 = ann["bbox"]
-            # Normalise to [0, 1] relative to original image size
             cx = ((x1 + x2) / 2) / orig_w
             cy = ((y1 + y2) / 2) / orig_h
             bw = (x2 - x1) / orig_w
             bh = (y2 - y1) / orig_h
-            # Skip degenerate boxes
             if bw <= 0 or bh <= 0:
                 continue
             boxes.append([cx, cy, bw, bh])
@@ -90,18 +90,55 @@ class OMRDataset(Dataset):
         boxes = torch.tensor(boxes, dtype=torch.float32) if boxes else torch.zeros(0, 4)
         labels = torch.tensor(labels, dtype=torch.long) if labels else torch.zeros(0, dtype=torch.long)
 
-        # --- Letterbox resize (preserve aspect ratio, pad with grey) ------
         image, boxes = _letterbox(image, self.input_size, boxes)
 
-        # --- Augmentation (train-time only) ------------------------------
+        # --- Augmentation Call ---
         if self.augment:
-            image = _scanned_document_augment(image)
+            image = self._scanned_document_augment(image)
 
-        # --- To tensor & normalise [0, 1] --------------------------------
-        image = TF.to_tensor(image)  # (3, H, W), float32, [0, 1]
+        image = TF.to_tensor(image)
 
         targets = {"boxes": boxes, "labels": labels}
         return image, targets
+
+    def _scanned_document_augment(self, image: Image.Image) -> Image.Image:
+        """Apply augmentations using the pre-initialized pipeline."""
+        img = np.array(image)
+        h, w = img.shape[:2]
+
+        # 1. C++ Albumentations pass
+        img = self.scanner_pipeline(image=img)["image"]
+
+        # 2. NumPy / OpenCV manual passes
+        if np.random.rand() < 0.4:
+            kernel_size = np.random.choice([2, 3])
+            kernel = np.ones((kernel_size, kernel_size), np.uint8)
+            img = cv2.dilate(img, kernel, iterations=1)
+
+        if np.random.rand() < 0.3:
+            sp_amount = np.random.uniform(0.001, 0.005)
+            mask = np.random.rand(h, w)
+            img[mask < sp_amount / 2] = 0
+            img[mask > 1 - sp_amount / 2] = 255
+
+        if np.random.rand() < 0.4:
+            direction = np.random.choice(["horizontal", "vertical", "diagonal"])
+            if direction == "horizontal":
+                grad = np.linspace(0, 1, w, dtype=np.float32)[None, :, None]
+            elif direction == "vertical":
+                grad = np.linspace(0, 1, h, dtype=np.float32)[:, None, None]
+            else:
+                gx = np.linspace(0, 1, w, dtype=np.float32)
+                gy = np.linspace(0, 1, h, dtype=np.float32)
+                grad = ((gx[None, :] + gy[:, None]) / 2)[:, :, None]
+
+            if np.random.rand() < 0.5:
+                grad = 1.0 - grad
+
+            intensity = np.random.uniform(10, 35)
+            img = np.clip(img.astype(np.float32) + (grad - 0.5) * intensity, 0, 255).astype(np.uint8)
+
+        return Image.fromarray(img)
 
 
 # ---------------------------------------------------------------------------
@@ -149,95 +186,3 @@ def _letterbox(
 
     return canvas, boxes
 
-
-# ---------------------------------------------------------------------------
-# Scanned-document style augmentations
-# ---------------------------------------------------------------------------
-
-def _scanned_document_augment(image: Image.Image) -> Image.Image:
-    """Apply augmentations that simulate a scanned/photocopied document."""
-    import numpy as np
-    import cv2
-    import random
-    from io import BytesIO
-
-    img = np.array(image, dtype=np.float32)  # (H, W, 3), [0, 255]
-
-    # 1. Random brightness / contrast jitter
-    if random.random() < 0.5:
-        alpha = random.uniform(0.85, 1.15)  # contrast
-        beta = random.uniform(-15, 15)       # brightness
-        img = np.clip(alpha * img + beta, 0, 255)
-
-    # 2. Gaussian noise (simulates scanner sensor noise)
-    if random.random() < 0.5:
-        sigma = random.uniform(2, 8)
-        noise = np.random.normal(0, sigma, img.shape).astype(np.float32)
-        img = np.clip(img + noise, 0, 255)
-
-    # 3. Faded Ink (Morphological Erosion)
-    # Thins out black pixels, simulating degraded or lightly printed ink
-    if random.random() < 0.4:
-        # We use dilation because our text is dark on a light background 
-        # (dilating the light background erodes the dark text)
-        kernel_size = random.choice([2, 3])
-        kernel = np.ones((kernel_size, kernel_size), np.uint8)
-        img = cv2.dilate(img, kernel, iterations=1)
-
-    # 4. Whiteout / Missing Chunks (Random Erasing)
-    # Drops random white blobs to simulate holes, severe fading, or whiteout
-    if random.random() < 0.5:
-        h, w = img.shape[:2]
-        num_holes = random.randint(5, 20)
-        for _ in range(num_holes):
-            # Size of the missing chunk
-            hole_w = random.randint(5, max(10, w // 20))
-            hole_h = random.randint(5, max(10, h // 20))
-            # Position
-            x = random.randint(0, w - hole_w)
-            y = random.randint(0, h - hole_h)
-            # Fill with a light color (simulating paper)
-            paper_color = random.uniform(220, 255)
-            img[y:y+hole_h, x:x+hole_w] = paper_color
-
-    # 5. Gray gradient overlay
-    if random.random() < 0.4:
-        h, w = img.shape[:2]
-        direction = random.choice(["horizontal", "vertical", "diagonal"])
-        if direction == "horizontal":
-            grad = np.linspace(0, 1, w, dtype=np.float32)[None, :, None]
-            grad = np.broadcast_to(grad, img.shape)
-        elif direction == "vertical":
-            grad = np.linspace(0, 1, h, dtype=np.float32)[:, None, None]
-            grad = np.broadcast_to(grad, img.shape)
-        else:  # diagonal
-            gx = np.linspace(0, 1, w, dtype=np.float32)
-            gy = np.linspace(0, 1, h, dtype=np.float32)
-            grad = (gx[None, :] + gy[:, None]) / 2
-            grad = grad[:, :, None]
-            grad = np.broadcast_to(grad, img.shape)
-
-        if random.random() < 0.5:
-            grad = 1.0 - grad
-
-        intensity = random.uniform(10, 35)
-        img = np.clip(img + (grad - 0.5) * intensity, 0, 255)
-
-    # 6. Salt-and-pepper noise
-    if random.random() < 0.3:
-        sp_amount = random.uniform(0.001, 0.005)
-        mask = np.random.random(img.shape[:2])
-        img[mask < sp_amount / 2] = 0        # pepper
-        img[mask > 1 - sp_amount / 2] = 255  # salt
-
-    # 7. Slight JPEG-style compression artifacts
-    if random.random() < 0.3:
-        pil_img = Image.fromarray(img.astype(np.uint8))
-        buf = BytesIO()
-        quality = random.randint(40, 75)
-        pil_img.save(buf, format="JPEG", quality=quality)
-        buf.seek(0)
-        pil_img = Image.open(buf).convert("RGB")
-        img = np.array(pil_img, dtype=np.float32)
-
-    return Image.fromarray(img.astype(np.uint8))

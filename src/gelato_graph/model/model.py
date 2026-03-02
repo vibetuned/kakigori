@@ -6,7 +6,7 @@ import timm
 from .layers import PANetNeck, DecoupledHead    
 
 class EdgeMusicDetector(nn.Module):
-    def __init__(self, num_classes=91, use_bottom_up=False):
+    def __init__(self, num_classes=91, use_bottom_up=False, out_indices=(0, 1, 2)):
         super().__init__()
         
         # 1. The Encoder
@@ -14,14 +14,13 @@ class EdgeMusicDetector(nn.Module):
             #'mobilenetv5_300m.gemma3n', 
             #out_indices=(2, 3, 4), # Adjust indices based on desired feature resolution
             'convnext_base.dinov3_lvd1689m', 
-            out_indices=(1, 2, 3), # Adjust indices based on desired feature resolution for dino models 
+            out_indices=out_indices, # Adjust indices based on desired feature resolution
             pretrained=True, 
             features_only=True,
         )
         
         # Calculate the actual channel outputs of those specific layers
-        dummy_input = torch.randn(1, 3, 256, 256)
-        backbone_channels = [f.shape[1] for f in self.backbone(dummy_input)]
+        backbone_channels = self.backbone.feature_info.channels()
         
         # 2. The Neck
         hidden_dim = 128

@@ -8,7 +8,6 @@ from pathlib import Path
 import numpy as np
 import torch
 from PIL import Image, ImageDraw
-from transformers.trainer_utils import get_last_checkpoint
 
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QSplitter, QScrollArea, QLabel, 
@@ -17,9 +16,9 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
 from PySide6.QtGui import QPixmap, QColor, QPen, QFont, QImage, QShortcut, QKeySequence
 from PySide6.QtCore import Qt, QRectF, QObject, Signal
 
-# Assuming these are in your local modules as per your original script
 from .model import EdgeMusicDetector
 from .infer import preprocess, decode_outputs, nms
+from .utils import load_checkpoint
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -275,6 +274,36 @@ class ModelVisualizer(QMainWindow):
                 cb.blockSignals(False)
         self._redraw()
 
+    def _update_bbox_items(self):
+        """Safely destroys old QGraphicsItems and draws new ones based on current cache."""
+        # 1. Remove old Qt items from the scene to prevent memory leaks
+        for ann in self.drawn_bboxes:
+            for item in ann['items']:
+                self.scene.removeItem(item)
+        self.drawn_bboxes.clear()
+
+        path = self.image_paths[self.current_index]
+        cached = self._cache.get(path)
+        if not cached: return
+
+        # 2. Draw the new boxes based on the current confidence threshold
+        for det in cached.get("detections", []):
+            cls = det["class"]
+            x1, y1, x2, y2 = det["bbox"]
+            color = _class_color(cls)
+            pen = QPen(color)
+            pen.setWidth(max(1, int(self.original_w * 0.002)))
+            
+            rect_item = self.scene.addRect(QRectF(x1, y1, x2-x1, y2-y1), pen)
+            rect_item.setZValue(2)
+            
+            text_item = self.scene.addText(f"{cls} {det.get('score', 0):.2f}")
+            text_item.setDefaultTextColor(color)
+            text_item.setPos(x1, max(0, y1 - 25))
+            text_item.setZValue(2)
+            
+            self.drawn_bboxes.append({'class': cls, 'items': [rect_item, text_item]})
+
     def _on_conf_change(self, value):
         self.current_conf_thresh = value / 100.0
         self.lbl_conf.setText(f"{self.current_conf_thresh:.2f}")
@@ -282,7 +311,14 @@ class ModelVisualizer(QMainWindow):
         path = self.image_paths[self.current_index] if self.image_paths else None
         if path and path in self._cache and "raw_outputs" in self._cache[path]:
             cached = self._cache[path]
-            cached["detections"] = nms(decode_outputs(cached["raw_outputs"], cached["meta"], self.current_conf_thresh, self.class_list), self.iou_thresh)
+            # Recalculate the NMS and detections
+            cached["detections"] = nms(
+                decode_outputs(cached["raw_outputs"], cached["meta"], self.current_conf_thresh, self.class_list), 
+                self.iou_thresh
+            )
+            # Rebuild the Qt graphics items based on the new detections
+            self._update_bbox_items()
+            
         self._redraw()
 
     # --- Navigation & Background Inference ---
@@ -358,26 +394,8 @@ class ModelVisualizer(QMainWindow):
     def _on_inference_done(self, path):
         if self.image_paths and self.image_paths[self.current_index] == path:
             self.lbl_status.setText("✓ Cached")
-            
-            # Initial Setup of BBoxes natively in Qt (only done once per image load)
-            cached = self._cache[path]
-            for det in cached.get("detections", []):
-                cls = det["class"]
-                x1, y1, x2, y2 = det["bbox"]
-                color = _class_color(cls)
-                pen = QPen(color)
-                pen.setWidth(max(1, int(self.original_w * 0.002)))
-                
-                rect_item = self.scene.addRect(QRectF(x1, y1, x2-x1, y2-y1), pen)
-                rect_item.setZValue(2)
-                
-                text_item = self.scene.addText(f"{cls} {det.get('score', 0):.2f}")
-                text_item.setDefaultTextColor(color)
-                text_item.setPos(x1, max(0, y1 - 25))
-                text_item.setZValue(2)
-                
-                self.drawn_bboxes.append({'class': cls, 'items': [rect_item, text_item]})
-            
+            # Build the initial boxes natively in Qt
+            self._update_bbox_items()
             self._redraw()
 
     # --- Rendering Updates ---
@@ -399,7 +417,7 @@ class ModelVisualizer(QMainWindow):
         mode = "bbox" if mode_id == 0 else "heatmap" if mode_id == 1 else "features"
         visible_classes = {cls for cls, cb in self.class_checkboxes.items() if cb.isChecked()}
 
-        # 1. Update BBox Visibility
+        # 1. Update BBox Visibility based on the class sidebar toggles
         for ann in self.drawn_bboxes:
             is_visible = (mode == "bbox") and (ann['class'] in visible_classes)
             for item in ann['items']:
@@ -411,7 +429,7 @@ class ModelVisualizer(QMainWindow):
             return
             
         self.overlay_pixmap_item.setVisible(True)
-        scale_idx = self.scale_group.checkedId() # -1 is 'All', 0 is P3, etc.
+        scale_idx = self.scale_group.checkedId()
         indices = range(len(cached.get("raw_outputs", []))) if scale_idx == -1 else [scale_idx]
 
         combined = None
@@ -444,14 +462,12 @@ class ModelVisualizer(QMainWindow):
             hm_pil = Image.fromarray(combined)
             hm_cropped = self._crop_letterbox(hm_pil, cached["meta"])
             
-            # Key difference: Resize exactly to the original image dimensions, Qt handles the display scaling
             hm_display = hm_cropped.resize((self.original_w, self.original_h), Image.Resampling.BILINEAR)
             
             overlay_rgba = Image.fromarray(_jet_rgba(np.array(hm_display, dtype=np.float32), alpha=0.6 if mode=="features" else 0.65), "RGBA")
             self.overlay_pixmap_item.setPixmap(pil2qpixmap(overlay_rgba))
         else:
             self.overlay_pixmap_item.setPixmap(QPixmap())
-
 
 def main():
     # Setup args, device, and load PyTorch model exactly as you had in your script...
@@ -485,28 +501,7 @@ def main():
     # --- Load model ---
     logger.info(f"Loading model from {args.checkpoint}")
     model = EdgeMusicDetector(num_classes=num_classes, use_bottom_up=args.use_bottom_up)
-
-    ckpt = Path(args.checkpoint)
-    if ckpt.is_dir():
-        last = get_last_checkpoint(str(ckpt))
-        if last is not None:
-            ckpt = Path(last)
-        logger.info(f"  Using last checkpoint: {ckpt}")
-
-    for name in ("model.safetensors", "pytorch_model.bin"):
-        weights = (ckpt / name) if ckpt.is_dir() else ckpt
-        if weights.exists():
-            if weights.suffix == ".safetensors":
-                from safetensors.torch import load_file
-                state = load_file(weights, device=str(device))
-            else:
-                state = torch.load(weights, map_location=device, weights_only=False)
-            model.load_state_dict(state)
-            logger.info(f"  Loaded weights: {weights}")
-            break
-    else:
-        logger.warning("No weights file found — using random weights.")
-    model.to(device).eval()
+    load_checkpoint(model, args.checkpoint, device)
   
     window = ModelVisualizer(model, device, args.img_dir, args.hierarchy, args.config, args.input_size, args.conf_thresh, args.iou_thresh)
     window.show()

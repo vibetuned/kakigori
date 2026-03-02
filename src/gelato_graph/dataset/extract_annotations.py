@@ -4,6 +4,7 @@ from pathlib import Path
 import json
 import re
 import multiprocessing
+import math
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm import tqdm
 from PIL import Image
@@ -60,25 +61,82 @@ def get_defs_bboxes(root, ns):
                 pass
     return defs_bboxes
 
+def multiply_matrices(m1, m2):
+    """Multiplies two SVG transform matrices (a, b, c, d, e, f)."""
+    a1, b1, c1, d1, e1, f1 = m1
+    a2, b2, c2, d2, e2, f2 = m2
+
+    a = a1 * a2 + c1 * b2
+    b = b1 * a2 + d1 * b2
+    c = a1 * c2 + c1 * d2
+    d = b1 * c2 + d1 * d2
+    e = a1 * e2 + c1 * f2 + e1
+    f = b1 * e2 + d1 * f2 + f1
+    return (a, b, c, d, e, f)
+
+def apply_transform_to_bbox(matrix, xmin, xmax, ymin, ymax):
+    """Applies an affine transformation matrix to a bounding box."""
+    a, b, c, d, e, f = matrix
+    corners = [
+        (xmin, ymin),
+        (xmax, ymin),
+        (xmin, ymax),
+        (xmax, ymax)
+    ]
+    xs = [a * x + c * y + e for x, y in corners]
+    ys = [b * x + d * y + f for x, y in corners]
+    return min(xs), max(xs), min(ys), max(ys)
+
 def parse_transform_string(transform_str):
-    """Extracts translate and scale values from an SVG transform string."""
-    tx, ty = 0.0, 0.0
-    sx, sy = 1.0, 1.0
+    """Extracts the transformation matrix from an SVG transform string."""
+    matrix = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
     
     if not transform_str:
-        return tx, ty, sx, sy
+        return matrix
 
-    m_trans = re.search(r'translate\(([^,]+)(?:,\s*([^)]+))?\)', transform_str)
-    if m_trans:
-        tx = float(m_trans.group(1))
-        ty = float(m_trans.group(2)) if m_trans.group(2) else 0.0
+    commands = re.findall(r'(translate|scale|rotate|matrix)\s*\(([^)]+)\)', transform_str)
+    
+    for cmd, args_str in commands:
+        args = [float(val) for val in re.split(r'[, ]+', args_str.strip()) if val]
+        if not args:
+            continue
+            
+        if cmd == 'translate':
+            tx = args[0]
+            ty = args[1] if len(args) > 1 else 0.0
+            cmd_matrix = (1.0, 0.0, 0.0, 1.0, tx, ty)
+        elif cmd == 'scale':
+            sx = args[0]
+            sy = args[1] if len(args) > 1 else sx
+            cmd_matrix = (sx, 0.0, 0.0, sy, 0.0, 0.0)
+        elif cmd == 'rotate':
+            angle = args[0]
+            cx = args[1] if len(args) > 1 else 0.0
+            cy = args[2] if len(args) > 2 else 0.0
+            
+            rad = math.radians(angle)
+            cos_a = math.cos(rad)
+            sin_a = math.sin(rad)
+            
+            rot_m = (cos_a, sin_a, -sin_a, cos_a, 0.0, 0.0)
+            
+            if cx != 0.0 or cy != 0.0:
+                t1 = (1.0, 0.0, 0.0, 1.0, cx, cy)
+                t2 = (1.0, 0.0, 0.0, 1.0, -cx, -cy)
+                cmd_matrix = multiply_matrices(multiply_matrices(t1, rot_m), t2)
+            else:
+                cmd_matrix = rot_m
+        elif cmd == 'matrix':
+            if len(args) >= 6:
+                cmd_matrix = tuple(args[:6])
+            else:
+                continue
+        else:
+            continue
+            
+        matrix = multiply_matrices(matrix, cmd_matrix)
         
-    m_scale = re.search(r'scale\(([^,]+)(?:,\s*([^)]+))?\)', transform_str)
-    if m_scale:
-        sx = float(m_scale.group(1))
-        sy = float(m_scale.group(2)) if m_scale.group(2) else sx
-        
-    return tx, ty, sx, sy
+    return matrix
 
 def get_absolute_transform(element, parent_map):
     """Calculates the absolute transform of an element by traversing to root."""
@@ -88,19 +146,15 @@ def get_absolute_transform(element, parent_map):
         path_nodes.append(curr)
         curr = parent_map.get(curr)
         
-    sx, sy, tx, ty = 1.0, 1.0, 0.0, 0.0
+    matrix = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
     
     # Evaluate from root to element
     for node in reversed(path_nodes):
         transform_str = node.get('transform', '')
-        dtx, dty, dsx, dsy = parse_transform_string(transform_str)
-        # Apply local translate, then local scale
-        tx = sx * dtx + tx
-        ty = sy * dty + ty
-        sx = sx * dsx
-        sy = sy * dsy
+        local_matrix = parse_transform_string(transform_str)
+        matrix = multiply_matrices(matrix, local_matrix)
         
-    return tx, ty, sx, sy
+    return matrix
 
 def extract_from_svg(svg_path: Path, img_width: int, img_height: int) -> list:
     """Extracts semantic musical elements and their precise bounding boxes from a Verovio SVG."""
@@ -155,15 +209,9 @@ def extract_from_svg(svg_path: Path, img_width: int, img_height: int) -> list:
             if href not in defs_bboxes: continue
             
             b_xmin, b_xmax, b_ymin, b_ymax = defs_bboxes[href]
-            tx, ty, sx, sy = get_absolute_transform(use, parent_map)
+            matrix = get_absolute_transform(use, parent_map)
                 
-            use_xmin = tx + b_xmin * sx
-            use_xmax = tx + b_xmax * sx
-            use_ymin = ty + b_ymin * sy
-            use_ymax = ty + b_ymax * sy
-            
-            if use_xmin > use_xmax: use_xmin, use_xmax = use_xmax, use_xmin
-            if use_ymin > use_ymax: use_ymin, use_ymax = use_ymax, use_ymin
+            use_xmin, use_xmax, use_ymin, use_ymax = apply_transform_to_bbox(matrix, b_xmin, b_xmax, b_ymin, b_ymax)
 
             min_x = min(min_x, use_xmin)
             max_x = max(max_x, use_xmax)
@@ -185,16 +233,9 @@ def extract_from_svg(svg_path: Path, img_width: int, img_height: int) -> list:
                 p_ymax += stroke_width/2
                 
                 # Apply absolute transform to native path elements too
-                tx, ty, sx, sy = get_absolute_transform(path, parent_map)
+                matrix = get_absolute_transform(path, parent_map)
                 
-                # Apply scale then translate
-                p_xmin_trans = tx + p_xmin * sx
-                p_xmax_trans = tx + p_xmax * sx
-                p_ymin_trans = ty + p_ymin * sy
-                p_ymax_trans = ty + p_ymax * sy
-                
-                if p_xmin_trans > p_xmax_trans: p_xmin_trans, p_xmax_trans = p_xmax_trans, p_xmin_trans
-                if p_ymin_trans > p_ymax_trans: p_ymin_trans, p_ymax_trans = p_ymax_trans, p_ymin_trans
+                p_xmin_trans, p_xmax_trans, p_ymin_trans, p_ymax_trans = apply_transform_to_bbox(matrix, p_xmin, p_xmax, p_ymin, p_ymax)
                 
                 min_x = min(min_x, p_xmin_trans)
                 max_x = max(max_x, p_xmax_trans)
@@ -205,7 +246,7 @@ def extract_from_svg(svg_path: Path, img_width: int, img_height: int) -> list:
 
         # 3. Handle native <text> elements (tempo markings, lyrics, explicit text)
         for text_el in g.findall('.//svg:text', ns):
-            tx, ty, sx, sy = get_absolute_transform(text_el, parent_map)
+            matrix = get_absolute_transform(text_el, parent_map)
             
             # Walk every tspan descendant looking for actual text content
             all_elements = [text_el] + list(text_el.iter(f"{{{ns['svg']}}}tspan"))
@@ -274,13 +315,7 @@ def extract_from_svg(svg_path: Path, img_width: int, img_height: int) -> list:
                 min_t_y = t_y - height * 0.8  # Ascender approximation
                 max_t_y = t_y + height * 0.2  # Descender approximation
                 
-                p_xmin_trans = tx + min_t_x * sx
-                p_xmax_trans = tx + max_t_x * sx
-                p_ymin_trans = ty + min_t_y * sy
-                p_ymax_trans = ty + max_t_y * sy
-                
-                if p_xmin_trans > p_xmax_trans: p_xmin_trans, p_xmax_trans = p_xmax_trans, p_xmin_trans
-                if p_ymin_trans > p_ymax_trans: p_ymin_trans, p_ymax_trans = p_ymax_trans, p_ymin_trans
+                p_xmin_trans, p_xmax_trans, p_ymin_trans, p_ymax_trans = apply_transform_to_bbox(matrix, min_t_x, max_t_x, min_t_y, max_t_y)
                 
                 min_x = min(min_x, p_xmin_trans)
                 max_x = max(max_x, p_xmax_trans)

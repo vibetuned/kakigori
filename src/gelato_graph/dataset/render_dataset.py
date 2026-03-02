@@ -28,7 +28,7 @@ def render_mxl_to_svg(mxl_path: Path, output_dir: Path, img_dir: Path) -> bool:
         # Read MXL as zip first to capture zip defects and avoid segmentation
         with zipfile.ZipFile(mxl_path, 'r') as zf:
             # find the actual xml inside the mxl container
-            xml_name = next((name for name in zf.namelist() if name.endswith('.xml') and name != 'META-INF/container.xml'), None)
+            xml_name = next((name for name in zf.namelist() if (name.endswith('.xml') or name.endswith('.musicxml')) and name != 'META-INF/container.xml'), None)
             if not xml_name:
                 logger.debug(f"No valid XML found in {mxl_path.name}")
                 return False

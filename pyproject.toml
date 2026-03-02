@@ -24,6 +24,12 @@ dependencies = [
     "opencv-contrib-python>=4.13.0.92",
     "matplotlib>=3.10.8",
     "pyside6>=6.10.2",
+    "albumentationsx>=2.0.18",
+    "pyyaml>=6.0.3",
+    "pandas>=3.0.1",
+    "plotly>=6.5.2",
+    "nbformat>=5.10.4",
+    "music21>=9.1.0",
 ]
 
 [dependency-groups]
@@ -33,6 +39,8 @@ dev = [
     "tensorboard>=2.19.0",
     "setuptools",
     "six",
+    "ipykernel>=7.2.0",
+    "tabulate>=0.9.0",
 ]
 
 [build-system]
@@ -43,12 +51,12 @@ build-backend = "hatchling.build"
 source = "vcs"
 
 [tool.uv.sources]
-torch = [{ index = "pytorch-cu128" }]
-torchvision = [{ index = "pytorch-cu128" }]
+torch = [{ index = "pytorch-cu130" }]
+torchvision = [{ index = "pytorch-cu130" }]
 
 [[tool.uv.index]]
-name = "pytorch-cu128"
-url = "https://download.pytorch.org/whl/cu128"
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
 
@@ -57,9 +65,9 @@ render-dataset = "gelato_graph.dataset.render_dataset:main"
 extract-annotations = "gelato_graph.dataset.extract_annotations:main"
 extract-classes = "gelato_graph.dataset.extract_classes:main"
 visualize-dataset = "gelato_graph.dataset.visualize_dataset:main"
+synthetic-generator = "gelato_graph.dataset.synthetic_generator:main"
 train-model = "gelato_graph.model.train:main"
 eval-model = "gelato_graph.model.eval:main"
 infer-model = "gelato_graph.model.infer:main"
 visualize-model = "gelato_graph.model.visualize:main"
 calculate-areas = "gelato_graph.model.calculate_areas:main"
-

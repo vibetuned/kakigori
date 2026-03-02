@@ -1,0 +1,35 @@
+# Data args
+img_dir: "data/dataset-small-render/imgs"
+ann_dir: "data/dataset-small-render/annotations"
+synthetic_img_dir: "data/synthetic-small/imgs"
+synthetic_ann_dir: "data/synthetic-small/annotations"
+use_synthetic: true
+synthetic_ratio: 4
+config: "gelato_config.json"
+input_size: 640
+num_workers: 4
+
+# Model args
+use_bottom_up: false
+out_indices: [0, 1, 2]
+
+# Trainer args
+reg_weight: 7.5
+cls_weight: 1.0
+max_gamma: 4.5    # Final gamma for focal loss
+base_gamma: 2.0   # Initial gamma for focal loss
+scale_ranges: null
+
+# Training args
+output_dir: "checkpoints"
+logging_dir: "runs"
+epochs: 20
+batch_size: 4
+lr: 0.00025
+logging_steps: 50
+save_steps: 500
+max_steps: -1
+seed: 42
+resume: false
+resume_from_checkpoint: null
+fine_tune: "checkpoints/run_010/"
