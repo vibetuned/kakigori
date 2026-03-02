@@ -2,6 +2,7 @@ import argparse
 import logging
 from pathlib import Path
 import json
+import pprint
 import re
 import multiprocessing
 import math
@@ -23,6 +24,7 @@ def load_target_classes(config_path="gelato_config.json"):
     try:
         with open(config_path, 'r') as f:
             config = json.load(f)
+            pprint.pprint(config)
             return set(config.get("target_classes", []))
     except Exception as e:
         logger.warning(f"Could not load {config_path}: {e}. Falling back to default classes.")
@@ -32,7 +34,6 @@ def load_target_classes(config_path="gelato_config.json"):
             "barline", "beam", "tuplet"
         }
 
-TARGET_CLASSES = load_target_classes()
 
 def get_defs_bboxes(root, ns):
     """Parses SVG <defs> and returns a dictionary mapping glyph IDs to their geometric bounding boxes."""
@@ -156,7 +157,7 @@ def get_absolute_transform(element, parent_map):
         
     return matrix
 
-def extract_from_svg(svg_path: Path, img_width: int, img_height: int) -> list:
+def extract_from_svg(svg_path: Path, img_width: int, img_height: int, target_classes: set) -> list:
     """Extracts semantic musical elements and their precise bounding boxes from a Verovio SVG."""
     try:
         tree = ET.parse(svg_path)
@@ -196,7 +197,7 @@ def extract_from_svg(svg_path: Path, img_width: int, img_height: int) -> list:
         
         # Check if it has a class we care about
         classes = cls.split()
-        match = list(TARGET_CLASSES.intersection(classes))
+        match = list(target_classes.intersection(classes))
         if not match: continue
         label = match[0]
 
@@ -244,7 +245,53 @@ def extract_from_svg(svg_path: Path, img_width: int, img_height: int) -> list:
             except Exception:
                 pass
 
-        # 3. Handle native <text> elements (tempo markings, lyrics, explicit text)
+        # 3. Handle <rect> elements
+        for rect in g.findall('.//svg:rect', ns):
+            try:
+                x = float(rect.get('x', 0))
+                y = float(rect.get('y', 0))
+                w = float(rect.get('width', 0))
+                h = float(rect.get('height', 0))
+                
+                if w > 0 and h > 0:
+                    r_xmin, r_xmax = x, x + w
+                    r_ymin, r_ymax = y, y + h
+                    
+                    matrix = get_absolute_transform(rect, parent_map)
+                    r_xmin_trans, r_xmax_trans, r_ymin_trans, r_ymax_trans = apply_transform_to_bbox(matrix, r_xmin, r_xmax, r_ymin, r_ymax)
+                    
+                    min_x = min(min_x, r_xmin_trans)
+                    max_x = max(max_x, r_xmax_trans)
+                    min_y = min(min_y, r_ymin_trans)
+                    max_y = max(max_y, r_ymax_trans)
+            except Exception:
+                pass
+                
+        # 4. Handle <line> elements
+        for line in g.findall('.//svg:line', ns):
+            try:
+                x1 = float(line.get('x1', 0))
+                y1 = float(line.get('y1', 0))
+                x2 = float(line.get('x2', 0))
+                y2 = float(line.get('y2', 0))
+                
+                stroke_width = float(line.get('stroke-width', 0))
+                pad = stroke_width / 2
+                
+                l_xmin, l_xmax = min(x1, x2) - pad, max(x1, x2) + pad
+                l_ymin, l_ymax = min(y1, y2) - pad, max(y1, y2) + pad
+                
+                matrix = get_absolute_transform(line, parent_map)
+                l_xmin_trans, l_xmax_trans, l_ymin_trans, l_ymax_trans = apply_transform_to_bbox(matrix, l_xmin, l_xmax, l_ymin, l_ymax)
+                
+                min_x = min(min_x, l_xmin_trans)
+                max_x = max(max_x, l_xmax_trans)
+                min_y = min(min_y, l_ymin_trans)
+                max_y = max(max_y, l_ymax_trans)
+            except Exception:
+                pass
+
+        # 5. Handle native <text> elements (tempo markings, lyrics, explicit text)
         for text_el in g.findall('.//svg:text', ns):
             matrix = get_absolute_transform(text_el, parent_map)
             
@@ -340,7 +387,7 @@ def extract_from_svg(svg_path: Path, img_width: int, img_height: int) -> list:
 
     return annotations
 
-def process_single_file(svg_path: Path, img_path: Path, out_json: Path) -> bool:
+def process_single_file(svg_path: Path, img_path: Path, out_json: Path, target_classes: set) -> bool:
     """Processes a single SVG/PNG pair to extract annotations to JSON."""
     if not svg_path.exists() or not img_path.exists():
         return False
@@ -352,7 +399,7 @@ def process_single_file(svg_path: Path, img_path: Path, out_json: Path) -> bool:
         with Image.open(img_path) as im:
             img_w, img_h = im.size
             
-        anns = extract_from_svg(svg_path, img_w, img_h)
+        anns = extract_from_svg(svg_path, img_w, img_h, target_classes)
         if anns:
             with open(out_json, 'w', encoding='utf-8') as f:
                 json.dump({"image": img_path.name, "width": img_w, "height": img_h, "annotations": anns}, f, indent=2)
@@ -371,8 +418,7 @@ def main():
     parser.add_argument("--config", type=str, default="gelato_config.json", help="Path to config file for target classes")
     args = parser.parse_args()
 
-    global TARGET_CLASSES
-    TARGET_CLASSES = load_target_classes(args.config)
+    target_classes = load_target_classes(args.config)
 
     svg_dir = Path(args.svg_dir)
     img_dir = Path(args.img_dir)
@@ -404,7 +450,7 @@ def main():
             # Reconstruct the matching SVG path
             svg_file = svg_dir / f"{img_file.stem}.svg"
             out_json = out_dir / f"{img_file.stem}.json"
-            futures[executor.submit(process_single_file, svg_file, img_file, out_json)] = img_file
+            futures[executor.submit(process_single_file, svg_file, img_file, out_json, target_classes)] = img_file
             
         with tqdm(total=len(futures), desc="Extracting Bboxes", unit="file") as pbar:
             for future in as_completed(futures):

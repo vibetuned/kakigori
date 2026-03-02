@@ -1,12 +1,16 @@
+import copy
+import random
 import argparse
 import logging
 import zipfile
 import multiprocessing
-import random
-from concurrent.futures import ProcessPoolExecutor, as_completed
-from pathlib import Path
+import concurrent.futures
+
 from tqdm import tqdm
+from pathlib import Path
+from fractions import Fraction
 import xml.etree.ElementTree as ET
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 try:
     import music21
@@ -72,178 +76,171 @@ def is_safe_to_mutate(n):
         return False
     return True
 
-def mutate_score(score):
-    """
-    Applies synthetic mutations according to curriculum strategy,
-    ensuring resulting score remains valid (durations add up).
-    """
-    # 1. Tuplets overlap and Dense 16ths
+def is_safe_to_mutate(n):
+    """Returns False if node is part of a Tie or Spanner."""
+    if hasattr(n, 'tie') and n.tie is not None:
+        return False
+    if hasattr(n, 'getSpannerSites') and n.getSpannerSites():
+        return False
+    return True
 
+def apply_rhythmic_mutations(score):
+    """Safely injects tuplets and 16th notes by explicitly managing offsets."""
     for measure in score.recurse().getElementsByClass(music21.stream.Measure):
-        notes = list(measure.notes)
+        elements = list(measure.notes)
         
-        # Track (parent_stream, element) and (parent_stream, offset, element)
-        elements_to_remove = []
-        elements_to_add = []
-        
-        for n1 in notes:
-            # Injecting Dense 16th Notes:
-            if isinstance(n1, music21.note.Note) and n1.duration.quarterLength >= 1.0:
-                if random.random() < 0.10: 
-                    parent = n1.activeSite # Find the exact Voice this note belongs to
-                    if not parent: continue
-                    
-                    orig_offset = n1.offset
-                    qL = n1.duration.quarterLength
-                    
-                    elements_to_remove.append((parent, n1))
-                    num_16ths = int(qL / 0.25)
-                    
-                    for j in range(num_16ths):
-                        if random.random() < 0.20:
-                            new_elem = music21.note.Rest()
-                        else:
-                            new_elem = music21.note.Note(n1.pitch)
-                            
-                        new_elem.duration.quarterLength = 0.25
-                        elements_to_add.append((parent, orig_offset + (j * 0.25), new_elem))
-                        
-                    continue # Skip to next note so we don't double-mutate
+        for n1 in elements:
+            if not isinstance(n1, music21.note.Note) or not is_safe_to_mutate(n1):
+                continue
 
-            # Tuplet generation
-            if isinstance(n1, music21.note.Note) and n1.duration.quarterLength >= 0.5:
-                if random.random() < 0.15: 
-                    parent = n1.activeSite # Find the exact Voice
-                    if not parent: continue
-                    
-                    qL = n1.duration.quarterLength
-                    orig_offset = n1.offset
-                    
-                    elements_to_remove.append((parent, n1))
-                    
-                    # Written duration (e.g., 0.25 for a 16th note)
-                    written_qL = qL / 2.0 
-                    # ACTUAL timeline space each note takes (e.g., 0.1666)
-                    offset_step = qL / 3.0 
-                    
-                    # Tuplet generation
-                    tup_start = music21.duration.Tuplet(3, 2)
-                    tup_start.type = 'start'
-                    
-                    tup_mid = music21.duration.Tuplet(3, 2)
-                    # mid type is implicitly None/continue
-                    
-                    tup_stop = music21.duration.Tuplet(3, 2)
-                    tup_stop.type = 'stop'
-                    
-                    new_n1 = music21.note.Note(n1.pitch)
-                    new_n1.duration.quarterLength = written_qL
-                    new_n1.duration.appendTuplet(tup_start)
-                    
-                    new_n2 = music21.note.Note(n1.pitch)
-                    new_n2.duration.quarterLength = written_qL
-                    new_n2.duration.appendTuplet(tup_mid)
-                    
-                    new_n3 = music21.note.Note(n1.pitch)
-                    new_n3.duration.quarterLength = written_qL
-                    new_n3.duration.appendTuplet(tup_stop)
-                    
-                    # Use offset_step so they perfectly fit in the timeline!
-                    elements_to_add.append((parent, orig_offset, new_n1))
-                    elements_to_add.append((parent, orig_offset + offset_step, new_n2))
-                    elements_to_add.append((parent, orig_offset + (offset_step * 2), new_n3))
-                    
-                    continue
+            parent = n1.activeSite
+            if not parent: continue
 
-        # --- SAFELY APPLY MUTATIONS TO THEIR SPECIFIC PARENT STREAMS ---
-        for parent, elem in elements_to_remove:
-            try:
-                parent.remove(elem)
-            except (ValueError, AttributeError):
-                pass
+            # 1. Inject Dense 16ths
+            if n1.duration.quarterLength >= 1.0 and random.random() < 0.10:
+                qL = n1.duration.quarterLength
+                num_16ths = int(qL / 0.25)
+                orig_offset = n1.offset
                 
-        for parent, offset, elem in elements_to_add:
-            try:
-                parent.insert(offset, elem)
-            except (ValueError, AttributeError):
-                pass
-        
-    # 2. Add decorations (Zeroes)
-    for note in list(score.recurse().notes):
-        if isinstance(note, music21.note.Note):
-            # Spam the Zeroes: fing, trill, mordent, arpeg, harm, reh
-            has_ornament = False
-            if random.random() < 0.05:
-                # Add trill
-                trill = music21.expressions.Trill()
-                note.expressions.append(trill)
-                has_ornament = True
-            
-            if random.random() < 0.05:
-                # Add Turn
-                mordent = music21.expressions.Mordent()
-                note.expressions.append(mordent)
-                has_ornament = True
-
-            if not has_ornament and random.random() < 0.2:
-                # Add random fingering 1-5
-                fingering = music21.articulations.Fingering(random.randint(1, 5))
-                note.articulations.append(fingering)
-
-            # Create Chords and Arpeggios
-            if random.random() < 0.10 and is_safe_to_mutate(note) and note.duration.quarterLength >= 0.5:
-                # FIXED: Use 'note' instead of the leaked 'n1'
-                pitches = [note.pitch, note.pitch.transpose(5), note.pitch.transpose(9)]
-                if random.random() < 0.5:
-                    pitches.append(note.pitch.transpose(12)) 
-                    
-                new_chord = music21.chord.Chord(pitches)
-                new_chord.duration = note.duration
-                
-                has_accidental = any(p.accidental is not None for p in pitches)
-                if not has_accidental and random.random() < 0.5: 
-                    arpeg = music21.expressions.ArpeggioMark()
-                    new_chord.expressions.append(arpeg)
-                
-                # FIXED: Swap the note for the chord dynamically
                 try:
-                    parent_stream = note.activeSite
-                    if parent_stream:
-                        parent_stream.replace(note, new_chord)
-                        note = new_chord # Update reference
-                except (ValueError, AttributeError):
+                    parent.remove(n1)
+                    for i in range(num_16ths):
+                        if random.random() < 0.20:
+                            new_elem = music21.note.Rest(quarterLength=0.25)
+                        else:
+                            new_elem = music21.note.Note(n1.pitch, quarterLength=0.25)
+                        # Insert explicitly at the calculated offset
+                        parent.insert(orig_offset + (i * 0.25), new_elem)
+                except music21.exceptions21.StreamException:
+                    pass
+                continue 
+
+            # 2. Tuplet generation
+            if n1.duration.quarterLength >= 0.5 and random.random() < 0.15:
+                written_qL = Fraction(n1.duration.quarterLength) / 2 
+                orig_offset = n1.offset
+                
+                new_n1 = music21.note.Note(n1.pitch, quarterLength=written_qL)
+                new_n2 = music21.note.Note(n1.pitch, quarterLength=written_qL)
+                new_n3 = music21.note.Note(n1.pitch, quarterLength=written_qL)
+                
+                tup = music21.duration.Tuplet(3, 2)
+                tup_start = music21.duration.Tuplet(3, 2)
+                tup_start.type = 'start'
+                tup_stop = music21.duration.Tuplet(3, 2)
+                tup_stop.type = 'stop'
+                new_n1.duration.appendTuplet(tup_start)
+                new_n2.duration.appendTuplet(tup)
+                new_n3.duration.appendTuplet(tup_stop)
+                
+                # Use precise fraction math for timeline placement
+                offset_step = Fraction(n1.duration.quarterLength) / 3
+                
+                try:
+                    parent.remove(n1)
+                    parent.insert(orig_offset, new_n1)
+                    parent.insert(orig_offset + offset_step, new_n2)
+                    parent.insert(orig_offset + (offset_step * 2), new_n3)
+                except music21.exceptions21.StreamException:
                     pass
 
-            if random.random() < 0.1:
-                # Add arbitrary text to force "harm" or "verse" like elements
-                note.lyric = str(random.choice(['C', 'G7', 'Amin', 'F#dim']))
+    return score
+
+def apply_ornaments(score):
+    """Injects fingering, trills, mordents, and builds chords."""
+    for note in list(score.recurse().notes):
+        if not isinstance(note, music21.note.Note):
+            continue
+
+        has_ornament = False
+        if random.random() < 0.05:
+            note.expressions.append(music21.expressions.Trill())
+            has_ornament = True
+        
+        if random.random() < 0.05:
+            note.expressions.append(music21.expressions.Mordent())
+            has_ornament = True
+
+        if not has_ornament and random.random() < 0.2:
+            note.articulations.append(music21.articulations.Fingering(random.randint(1, 5)))
+
+        # Chords and Arpeggios
+        if random.random() < 0.10 and is_safe_to_mutate(note) and note.duration.quarterLength >= 0.5:
+            pitches = [note.pitch, note.pitch.transpose(5), note.pitch.transpose(9)]
+            if random.random() < 0.5:
+                pitches.append(note.pitch.transpose(12))
+
+            for p in pitches:
+                if p.accidental:
+                    p.accidental.displayStatus = False
                 
-            # Random string/word as a label or rehearsal mark
-            if random.random() < 0.02:
-                reh = music21.expressions.RehearsalMark(random.choice(['A', 'B', 'C', 'D']))
-                note.expressions.append(reh)
+            new_chord = music21.chord.Chord(pitches)
+            new_chord.duration = copy.deepcopy(note.duration)
+            
+            # Transfer existing expressions
+            new_chord.expressions = copy.deepcopy(note.expressions)
+            new_chord.articulations = copy.deepcopy(note.articulations)
+            
+            has_accidental = any(p.accidental is not None for p in pitches)
+            if not has_accidental and random.random() < 0.5: 
+                new_chord.expressions.append(music21.expressions.ArpeggioMark())
+            
+            parent = note.activeSite
+            if parent:
+                try:
+                    parent.replace(note, new_chord)
+                    note = new_chord # update reference for following text/stem logic
+                except music21.exceptions21.StreamException:
+                    pass
 
-            # Randomize stems to force tricky bounding boxes
-            if random.random() < 0.05 and note.duration.quarterLength >= 1.0:
-                note.stemDirection = 'up' if random.random() < 0.5 else 'down'
+        # Text and Rehearsal marks
+        if random.random() < 0.1:
+            note.lyric = random.choice(['C', 'G7', 'Amin', 'F#dim'])
+            
+        if random.random() < 0.02:
+            note.expressions.append(music21.expressions.RehearsalMark(random.choice(['A', 'B', 'C', 'D'])))
 
-    # Add Slurs spanning multiple notes
-    for measure in score.recurse().getElementsByClass(music21.stream.Measure):
-        notes_and_chords = list(measure.notesAndRests)
+        # Stems
+        if random.random() < 0.05 and note.duration.quarterLength >= 1.0:
+            note.stemDirection = 'up' if random.random() < 0.5 else 'down'
+
+    return score
+
+def apply_spanners(score):
+    """Safely adds slurs at the Part level, avoiding Measure corruption."""
+    for part in score.parts:
+        # Flatten the part to easily grab sequential notes across bar lines
+        notes_and_chords = list(part.recurse().notesAndRests)
         valid_targets = [n for n in notes_and_chords if not n.isRest]
         
         if len(valid_targets) >= 3 and random.random() < 0.3:
-            # Pick a random start and end point
             start_idx = random.randint(0, len(valid_targets) - 3)
             end_idx = random.randint(start_idx + 2, len(valid_targets) - 1)
             
             slur = music21.spanner.Slur()
             slur.addSpannedElements(valid_targets[start_idx], valid_targets[end_idx])
-            measure.insert(0, slur)
+            # Insert at the part level, NOT the measure level
+            part.insert(0, slur)
+            
+    return score
 
-    for n in score.recurse().notes:
-        if hasattr(n, 'beams') and n.beams:
-            n.beams.clear()
+def mutate_score(score):
+    """Master pipeline for orchestrating the mutations safely."""
+    score = apply_rhythmic_mutations(score)
+    score = apply_ornaments(score)
+    score = apply_spanners(score)
+    
+    # Safe cleanup: attempt to fix beams for the new rhythms.
+    try:
+        # makeBeams must be called on Parts or Measures, not the root Score
+        for part in score.parts:
+            part.makeBeams(inPlace=True)
+    except Exception as e:
+        logger.debug(f"Failed to generate beams natively, clearing them. {e}")
+        for n in score.recurse().notes:
+            if hasattr(n, 'beams') and n.beams:
+                # Your fix: directly empty the internal list
+                n.beams.beamsList = [] 
 
     return score
 
@@ -268,6 +265,10 @@ def process_file(mxl_path: Path, output_dir: Path) -> bool:
         logger.debug(f"Failed to process {mxl_path.name} with music21: {e}")
         return False
 
+def _process_file_worker(args):
+    mxl_path, output_dir = args
+    return process_file(mxl_path, output_dir)
+
 def main():
     parser = argparse.ArgumentParser(description="Generate synthetic dataset by coercing musicXML files.")
     parser.add_argument("input_dir", type=str, help="Input directory of MXL files")
@@ -285,43 +286,41 @@ def main():
     output_path.mkdir(parents=True, exist_ok=True)
     
     mxl_files = list(input_path.rglob("*.mxl"))
-    random.shuffle(mxl_files) # Shuffle to grab random subset
+    random.shuffle(mxl_files)
 
     logger.info(f"Found {len(mxl_files)} files to consider. Target: {args.num_files} successful generations.")
     
     success_count = 0
     error_count = 0
     
-    # Dump the mapping as a JSON so users can look at it later
+    # Dump mapping
     with open(output_path / "svg_music21_mapping.json", "w") as f:
         import json
         json.dump(SVG_TO_MUSIC21_MAPPING, f, indent=2)
 
-    with ProcessPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
-        # submit tasks
-        futures = {executor.submit(process_file, f, output_path): f for f in mxl_files}
+    # maxtasksperchild=10 is the magic bullet for music21 memory leaks. 
+    # It kills and restarts the worker process after every 10 files, freeing RAM.
+    with multiprocessing.Pool(
+        processes=multiprocessing.cpu_count(), 
+        maxtasksperchild=10
+    ) as pool:
+        
+        tasks = [(f, output_path) for f in mxl_files]
+        
+        # imap_unordered yields results as soon as they finish, keeping memory footprint tiny
+        results = pool.imap_unordered(_process_file_worker, tasks)
 
         with tqdm(total=args.num_files, desc="Generating files") as pbar:
-            for future in as_completed(futures):
-                try:
-                    if future.result():
-                        success_count += 1
-                        pbar.update(1)
-                    else:
-                        error_count += 1
-                except concurrent.futures.process.BrokenProcessPool:
-                    # FIXED: Catch the exact error that causes the cascading failure
-                    logger.debug("FATAL: A worker process crashed abruptly (likely Out-of-Memory). The process pool is dead. Halting.")
-                    break
-                except Exception as e:
-                    # CHANGED: Show the error so you know what failed
-                    logger.debug(f"Worker task failed unexpectedly: {repr(e)}")
+            for is_success in results:
+                if is_success:
+                    success_count += 1
+                    pbar.update(1)
+                else:
                     error_count += 1
 
                 if success_count >= args.num_files:
                     logger.info("Reached target number of generated files!")
-                    for f_unresolved in futures:
-                        f_unresolved.cancel()
+                    pool.terminate() # forcefully stop remaining workers immediately
                     break
 
     logger.info(f"Finished. Successfully generated {success_count} files (Failed: {error_count}).")

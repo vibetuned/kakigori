@@ -45,13 +45,15 @@ class OMRDataset(Dataset):
             
             self.scanner_pipeline = A.Compose([
                 A.RandomBrightnessContrast(brightness_limit=0.1, contrast_limit=0.15, p=0.5),
-                A.GaussNoise(var_limit=(4.0, 64.0), p=0.5),
+                A.GaussNoise(std_range=(2/255.0, 8/255.0), p=0.5),
                 A.CoarseDropout(
-                    max_holes=20, max_height=max_hole, max_width=max_hole,
-                    min_holes=5, min_height=min_hole, min_width=min_hole,
-                    fill_value=240, p=0.5
+                    num_holes_range=(5, 20),
+                    hole_height_range=(min_hole, max_hole),
+                    hole_width_range=(min_hole, max_hole),
+                    fill=240, 
+                    p=0.5
                 ),
-                A.ImageCompression(quality_lower=40, quality_upper=75, p=0.3)
+                A.ImageCompression(quality_range=(40, 75), p=0.3)
             ])
 
     def __len__(self) -> int:

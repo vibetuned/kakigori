@@ -1,0 +1,14 @@
+{
+    "target_classes": [
+        "arpeg",
+        "fing",
+        "mordent",
+        "octave",
+        "trill",
+        "artic",
+        "tupletNum",
+        "tuplet",
+        "pedal",
+        "turn"
+    ]
+}
