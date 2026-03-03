@@ -1,3 +1,4 @@
+# Standard library imports
 import sys
 import json
 import logging
@@ -5,20 +6,35 @@ import argparse
 import threading
 from pathlib import Path
 
+# Third party imports
 import numpy as np
 import torch
-from torchvision.ops import nms
 from PIL import Image, ImageDraw
+from PySide6.QtGui import QPen, QFont, QColor, QImage, QPixmap, QShortcut, QKeySequence
+from PySide6.QtCore import Qt, QRectF, Signal, QObject
+from torchvision.ops import nms
+from PySide6.QtWidgets import (
+    QLabel,
+    QSlider,
+    QWidget,
+    QCheckBox,
+    QSplitter,
+    QHBoxLayout,
+    QMainWindow,
+    QPushButton,
+    QScrollArea,
+    QVBoxLayout,
+    QApplication,
+    QButtonGroup,
+    QRadioButton,
+    QGraphicsView,
+    QGraphicsScene,
+    QGraphicsPixmapItem,
+)
 
-from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                               QHBoxLayout, QSplitter, QScrollArea, QLabel, 
-                               QPushButton, QCheckBox, QGraphicsView, QGraphicsScene,
-                               QRadioButton, QButtonGroup, QSlider, QGraphicsPixmapItem)
-from PySide6.QtGui import QPixmap, QColor, QPen, QFont, QImage, QShortcut, QKeySequence
-from PySide6.QtCore import Qt, QRectF, QObject, Signal
-
-from .model import MusicDetector
+# Local folder imports
 from .infer import preprocess
+from .model import MusicDetector
 from .utils import load_checkpoint, decode_model_outputs
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")

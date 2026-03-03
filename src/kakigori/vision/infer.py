@@ -8,19 +8,22 @@ Usage:
     infer-model --checkpoint checkpoints/my_run --pdf score.pdf --output-dir out/
 """
 
-import argparse
+# Standard library imports
 import json
 import logging
+import argparse
 from pathlib import Path
 
+# Third party imports
 import torch
 import torchvision.transforms.functional as TF
 from PIL import Image
 from tqdm import tqdm
 
+# Local folder imports
 from .model import MusicDetector
+from .utils import load_checkpoint, decode_model_outputs
 from .dataset import _letterbox
-from .utils import decode_model_outputs, load_checkpoint
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -33,6 +36,7 @@ logger = logging.getLogger(__name__)
 def pdf_to_pages(pdf_path: Path, dpi: int = 300) -> list[Image.Image]:
     """Render each page of a PDF to a PIL RGB image."""
     try:
+        # Third party imports
         import pypdfium2 as pdfium  # type: ignore
     except ImportError:
         raise ImportError(

@@ -1,3 +1,4 @@
+# Third party imports
 import torch
 import torch.nn as nn
 from torchvision.ops import MultiScaleRoIAlign
@@ -80,16 +81,21 @@ class GraphVisualExtractor(nn.Module):
 # Now pass it to the new extractor
 #node_visual_features = visual_extractor(features_dict, normalized_boxes, (640, 640))
 
+# Standard library imports
 import json
-import torch
 from pathlib import Path
-from PIL import Image
+
+# Third party imports
+import torch
 import torchvision.transforms.functional as TF
+from PIL import Image
 from torch_geometric.data import Data
 
-from .model import ScoreGraphReconstructor, GraphVisualExtractor
+# Local folder imports
+from .model import GraphVisualExtractor, ScoreGraphReconstructor
 from .heuristics import generate_axis_aware_edges, generate_text_candidate_edges
 from .serializer import HumdrumSerializer
+
 
 class OMRGraphInferencer:
     def __init__(self, gnn_checkpoint, roi_extractor_checkpoint, class_list, device="cpu"):
@@ -177,10 +183,12 @@ class OMRGraphInferencer:
 # inferencer = OMRGraphInferencer("gnn.pth", "roi.pth", ["clef", "notehead", "stem", ...])
 # kern_output = inferencer.process_system("system_01.png", "system_01.json")
 
+# Third party imports
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import GATv2Conv
+
 
 class ScoreGraphReconstructor(nn.Module):
     def __init__(self, node_in_dim, hidden_dim=256, num_edge_classes=5, num_heads=4, dropout=0.2):

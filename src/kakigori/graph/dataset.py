@@ -1,6 +1,8 @@
+# Third party imports
 import torch
-from torch_geometric.data import InMemoryDataset, Data
 from torch_geometric.nn import knn_graph
+from torch_geometric.data import Data, InMemoryDataset
+
 
 class PianoStaffDataset(InMemoryDataset):
     def __init__(self, root, transform=None, pre_transform=None):

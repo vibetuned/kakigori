@@ -1,7 +1,9 @@
+# Standard library imports
+import re
+import json
 import xml.etree.ElementTree as ET
 from pathlib import Path
-import json
-import re
+
 
 def extract_all_classes(svg_dir: str, output_json: str):
     svg_path = Path(svg_dir)
@@ -94,6 +96,7 @@ def extract_all_classes(svg_dir: str, output_json: str):
     print(f"Found {len(classes_list)} unique classes. Saved to {output_json}")
 
 def main():
+    # Standard library imports
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--svg_dir", type=str, default="data/output_svgs")

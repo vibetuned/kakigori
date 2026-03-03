@@ -1,4 +1,7 @@
-from .layers import SinusoidalTimeEmbedding, UNetBlock
+# Local folder imports
+from .layers import UNetBlock, SinusoidalTimeEmbedding
+
+
 class FlowMatchingUNet(nn.Module):
     def __init__(self, in_channels=3, base_dim=64):
         super().__init__()

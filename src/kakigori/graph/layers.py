@@ -1,4 +1,6 @@
+# Third party imports
 import networkx as nx
+
 
 class HumdrumSerializer:
     def __init__(self, nodes, edge_index, edge_predictions):
@@ -21,7 +23,9 @@ class HumdrumSerializer:
             if edge_type > 0:
                 self.G.add_edge(u, v, type=edge_type)
 
+# Third party imports
 import networkx as nx
+
 
 def _collapse_primitives(self, node_roles):
     """
@@ -142,7 +146,9 @@ def _resolve_semantics(self, super_node):
         
     return kern_token
 
+# Third party imports
 import torch
+
 
 def generate_text_candidate_edges(boxes, labels, class_to_idx):
     """

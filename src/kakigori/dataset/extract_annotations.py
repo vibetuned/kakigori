@@ -1,19 +1,24 @@
-import argparse
-import logging
-from pathlib import Path
-import json
+# Standard library imports
 import re
-import multiprocessing
+import json
 import math
+import logging
+import argparse
+import multiprocessing
+from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from tqdm import tqdm
+
+# Third party imports
 from PIL import Image
+from tqdm import tqdm
 
 try:
+    # Third party imports
     from svgpathtools import parse_path
 except ImportError:
     parse_path = None
 
+# Standard library imports
 import xml.etree.ElementTree as ET
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")

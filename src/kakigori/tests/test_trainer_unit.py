@@ -1,9 +1,15 @@
-import torch
-import torch.nn as nn
+# Standard library imports
 import unittest
 from unittest.mock import MagicMock
-from kakigori.vision.trainer import OMRTrainer
+
+# Third party imports
+import torch
+import torch.nn as nn
 from transformers import TrainingArguments
+
+# First party imports
+from kakigori.vision.trainer import OMRTrainer
+
 
 class DummyModel(nn.Module):
     def __init__(self):

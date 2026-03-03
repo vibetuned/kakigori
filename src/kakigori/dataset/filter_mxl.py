@@ -1,15 +1,19 @@
-import argparse
+# Standard library imports
 import json
-import logging
 import shutil
+import logging
 import zipfile
+import argparse
 import multiprocessing
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
+
+# Third party imports
 from tqdm import tqdm
 
 try:
+    # Third party imports
     import verovio
 except ImportError:
     logging.warning("verovio is not installed. Filtering will not work.")
@@ -138,6 +142,7 @@ def main():
     copied_count = 0
     checked_count = 0
 
+    # Standard library imports
     from concurrent.futures import ThreadPoolExecutor
     
     tasks = [(f, target_classes) for f in mxl_files]

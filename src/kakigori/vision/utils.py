@@ -1,6 +1,8 @@
+# Standard library imports
 import logging
 from pathlib import Path
 
+# Third party imports
 import torch
 from torchvision.ops import batched_nms
 from transformers.trainer_utils import get_last_checkpoint
@@ -94,6 +96,7 @@ def load_checkpoint(model, checkpoint_path: str, device: torch.device, eval: boo
         weights = (ckpt / name) if ckpt.is_dir() else ckpt
         if weights.exists():
             if weights.suffix == ".safetensors":
+                # Third party imports
                 from safetensors.torch import load_file
                 state = load_file(weights, device=str(device))
             else:

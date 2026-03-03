@@ -1,15 +1,27 @@
+# Standard library imports
 import sys
 import json
 import logging
 import argparse
 from pathlib import Path
 
-from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                               QHBoxLayout, QSplitter, QScrollArea, QLabel, 
-                               QPushButton, QCheckBox, QGraphicsView, QGraphicsScene)
-from PySide6.QtGui import QPixmap, QColor, QPen, QFont
-from PySide6.QtGui import QShortcut, QKeySequence
+# Third party imports
+from PySide6.QtGui import QPen, QFont, QColor, QPixmap, QShortcut, QKeySequence
 from PySide6.QtCore import Qt, QRectF
+from PySide6.QtWidgets import (
+    QLabel,
+    QWidget,
+    QCheckBox,
+    QSplitter,
+    QHBoxLayout,
+    QMainWindow,
+    QPushButton,
+    QScrollArea,
+    QVBoxLayout,
+    QApplication,
+    QGraphicsView,
+    QGraphicsScene,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)

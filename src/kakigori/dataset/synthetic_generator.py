@@ -1,18 +1,21 @@
+# Standard library imports
 import copy
 import random
-import argparse
 import logging
 import zipfile
+import argparse
 import multiprocessing
 import concurrent.futures
-
-from tqdm import tqdm
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from fractions import Fraction
-import xml.etree.ElementTree as ET
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
+# Third party imports
+from tqdm import tqdm
+
 try:
+    # Third party imports
     import music21
     from music21 import environment
     # Silencing some spammy warnings from music21
@@ -20,7 +23,9 @@ try:
 except ImportError:
     logging.warning("music21 is not installed. Please add it to your environment if you want to run this script.")
 
+# Standard library imports
 import warnings
+
 warnings.filterwarnings("ignore", message=".*we are out of midi channels.*")
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -312,6 +317,7 @@ def main():
     
     # Dump mapping
     with open(output_path / "svg_music21_mapping.json", "w") as f:
+        # Standard library imports
         import json
         json.dump(SVG_TO_MUSIC21_MAPPING, f, indent=2)
 

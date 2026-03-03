@@ -1,5 +1,7 @@
-import xml.etree.ElementTree as ET
+# Standard library imports
 import json
+import xml.etree.ElementTree as ET
+
 
 class GroundTruthGraphBuilder:
     def __init__(self, mei_file, json_file):
@@ -80,6 +82,7 @@ class GroundTruthGraphBuilder:
         candidate_edge_index: Shape (2, E)
         node_id_list: List of string IDs corresponding to the PyG node indices.
         """
+        # Third party imports
         import torch
         
         y = torch.zeros(candidate_edge_index.shape[1], dtype=torch.long)

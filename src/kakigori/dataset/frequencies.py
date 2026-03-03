@@ -4,10 +4,12 @@ Scans all annotation JSONs and outputs the exact frequency of every class.
 Optionally generates a pruned list of classes for your config file.
 """
 
-import argparse
+# Standard library imports
 import json
+import argparse
 from pathlib import Path
 from collections import Counter
+
 
 def main():
     parser = argparse.ArgumentParser(description="Count class frequencies in OMR annotations.")

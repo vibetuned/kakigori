@@ -1,10 +1,12 @@
 """Calculates the median normalized area of every class in the dataset."""
 
-import argparse
+# Standard library imports
 import json
+import argparse
 import statistics
 from pathlib import Path
 from collections import defaultdict
+
 
 def main():
     parser = argparse.ArgumentParser()

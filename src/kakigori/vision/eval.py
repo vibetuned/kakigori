@@ -1,24 +1,31 @@
-import argparse
+# Standard library imports
+import os
 import json
 import logging
-from pathlib import Path
+import argparse
 import multiprocessing as mp
 import concurrent.futures
-import torch
-from torch.utils.data import DataLoader
-from torchvision.ops import batched_nms
-from tqdm import tqdm
-from torchmetrics.detection.mean_ap import MeanAveragePrecision
-from torch.utils.tensorboard import SummaryWriter
+from pathlib import Path
 
+# Third party imports
+import torch
+from tqdm import tqdm
+from torchvision.ops import batched_nms
+from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
+from torchmetrics.detection.mean_ap import MeanAveragePrecision
+
+# Local folder imports
 from .model import MusicDetector
+from .utils import omr_collate_fn, load_checkpoint, decode_model_outputs
 from .dataset import OMRDataset
-from .utils import decode_model_outputs, load_checkpoint, omr_collate_fn
 
 logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
+# Third party imports
 import torch.multiprocessing
+
 torch.multiprocessing.set_sharing_strategy('file_system')
 
 def get_checkpoint_step(checkpoint_dir):
@@ -55,8 +62,10 @@ def format_ground_truth(targets_list, input_size, device):
             "labels": gt_labels
         })
     return batch_targets
+# Standard library imports
 import multiprocessing
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
 
 def _evaluate_target_func(q, class_idx, class_name, preds, targets):
     """
@@ -292,6 +301,9 @@ def main():
         logger.warning("No class-wise metrics were returned by the evaluator.")
 
     writer.close()
+
+    logger.info("Evaluation fully complete. Forcing clean OS exit.")
+    os._exit(0)
 
 if __name__ == "__main__":
     main()

@@ -1,14 +1,16 @@
 """OMR Dataset — loads rendered score images and their bounding-box annotations."""
+# Standard library imports
 import json
 import random
 from pathlib import Path
+
+# Third party imports
 import cv2
 import numpy as np
-
 import torch
-from torch.utils.data import Dataset
-from PIL import Image, ImageFile
 import torchvision.transforms.functional as TF
+from PIL import Image, ImageFile
+from torch.utils.data import Dataset
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
@@ -37,6 +39,7 @@ class OMRDataset(Dataset):
 
         # --- Initialize Albumentations conditionally ---
         if self.augment:
+            # Third party imports
             import albumentations as A
             
             # Dynamically calculate hole sizes based on the padded input_size

@@ -59,6 +59,19 @@ name = "pytorch-cu130"
 url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
+[tool.ruff.lint]
+select = ["I"]
+
+[tool.ruff.lint.isort]
+length-sort = true
+
+[tool.ruff.lint.isort.import-heading]
+future = "Future imports"
+standard-library = "Standard library imports"
+third-party = "Third party imports"
+first-party = "First party imports"
+local-folder = "Local folder imports"
+
 
 [project.scripts]
 render-dataset = "kakigori.dataset.render_dataset:main"

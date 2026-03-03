@@ -4,9 +4,12 @@ This module decouples the training logic and loss computation from the
 main loop, providing a cleaner, standard implementation.
 """
 
+# Third party imports
 import torch
 import torch.nn as nn
 from transformers import Trainer
+
+# Local folder imports
 from .losses import CIoULoss, DynamicFocalLoss
 
 

@@ -1,8 +1,12 @@
+# Standard library imports
 import math
+
+# Third party imports
+import timm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import timm
+
 
 class DepthwiseSeparableConv(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1):

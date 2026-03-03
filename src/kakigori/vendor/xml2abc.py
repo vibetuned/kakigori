@@ -15,7 +15,12 @@ See the Lesser GNU General Public License for more details. <http://www.gnu.org/
 
 try:    import xml.etree.cElementTree as E
 except: import xml.etree.ElementTree as E
-import os, sys, types, re, math
+# Standard library imports
+import os
+import re
+import sys
+import math
+import types
 
 VERSION = 174
 
@@ -1736,9 +1741,10 @@ def vertaal (xmltxt, **options_parm):
 # Main Program
 #----------------
 if __name__ == '__main__':
-    from optparse import OptionParser
+    # Standard library imports
     from glob import glob
-    from zipfile import ZipFile 
+    from zipfile import ZipFile
+    from optparse import OptionParser
     ustr = '%prog [-h] [-u] [-m] [-c C] [-d D] [-n CPL] [-b BPL] [-o DIR] [-v V]\n'
     ustr += '[-x] [-p PFMT] [-t] [-s] [-i] [--v1] [--noped] [--stems] <file1> [<file2> ...]'
     parser = OptionParser (usage=ustr, version=str(VERSION))

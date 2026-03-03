@@ -3,19 +3,23 @@
 Uses Hugging Face Transformers Trainer for robust, standard implementation.
 """
 
-import argparse
+# Standard library imports
+import os
 import json
 import logging
-import os
+import argparse
 from pathlib import Path
+
+# Third party imports
 import torch
 from transformers import TrainingArguments, set_seed
 from transformers.trainer_utils import get_last_checkpoint
 
+# Local folder imports
 from .model import MusicDetector
+from .utils import RatioSampler, omr_collate_fn, load_checkpoint
 from .dataset import OMRDataset
 from .trainer import OMRTrainer
-from .utils import load_checkpoint, RatioSampler, omr_collate_fn
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -28,6 +32,7 @@ def parse_args():
 
     yaml_defaults = {}
     if os.path.exists(conf_args.train_config):
+        # Third party imports
         import yaml
         with open(conf_args.train_config, "r") as f:
             yaml_defaults = yaml.safe_load(f) or {}

@@ -1,12 +1,17 @@
+# Standard library imports
 import logging
 import zipfile
-import cairosvg
 import argparse
 import multiprocessing
-from tqdm import tqdm
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# Third party imports
+import cairosvg
+from tqdm import tqdm
+
 try:
+    # Third party imports
     import verovio
 except ImportError:
     logging.warning("verovio is not installed.")

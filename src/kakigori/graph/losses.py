@@ -1,6 +1,8 @@
+# Third party imports
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 
 class EdgeFocalLoss(nn.Module):
     def __init__(self, alpha=None, gamma=2.0, reduction='mean'):

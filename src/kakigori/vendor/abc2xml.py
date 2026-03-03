@@ -13,10 +13,17 @@ without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
 See the Lesser GNU General Public License for more details. <http://www.gnu.org/licenses/lgpl.html>.
 '''
 
+# Standard library imports
 from functools import reduce
+
 try:    import xml.etree.cElementTree as E
 except: import xml.etree.ElementTree as E
-import types, sys, os, re, datetime
+# Standard library imports
+import os
+import re
+import sys
+import types
+import datetime
 
 VERSION = 268
 
@@ -2483,7 +2490,8 @@ def fixDoctype (elem):
     return '\n'.join (ys)
 
 def xml2mxl (pad, fnm, data):   # write xml data to compressed .mxl file
-    from zipfile import ZipFile, ZIP_DEFLATED
+    # Standard library imports
+    from zipfile import ZIP_DEFLATED, ZipFile
     fnmext = fnm + '.xml'       # file name with extension, relative to the root within the archive
     outfile = os.path.join (pad, fnm + '.mxl')
     meta  = '%s\n<container><rootfiles>\n' % xmlVersion
@@ -2578,9 +2586,10 @@ def getXmlDocs (abc_string, skip=0, num=1, rOpt=False, bOpt=False, fOpt=False, m
 # Main Program
 #----------------
 if __name__ == '__main__':
-    from optparse import OptionParser
-    from glob import glob
+    # Standard library imports
     import time
+    from glob import glob
+    from optparse import OptionParser
 
     parser = OptionParser (usage='%prog [-h] [-r] [-t] [-b] [-m SKIP NUM] [-o DIR] [-p PFMT] [-z MODE] [--meta MAP] <file1> [<file2> ...]', version='version %d' % VERSION)
     parser.add_option ("-o", action="store", help="store xml files in DIR", default='', metavar='DIR')

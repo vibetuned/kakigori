@@ -1,9 +1,12 @@
+# Third party imports
+import timm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import timm
 
-from .layers import PANetNeck, DecoupledHead    
+# Local folder imports
+from .layers import PANetNeck, DecoupledHead
+
 
 class MusicDetector(nn.Module):
     def __init__(self, num_classes=91, use_bottom_up=False, out_indices=(0, 1, 2)):
