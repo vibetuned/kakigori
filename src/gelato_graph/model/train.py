@@ -150,11 +150,27 @@ def main():
             augment=True,
         )
         synth_subset = torch.utils.data.Subset(synthetic_ds, range(len(synthetic_ds)))
-        train_dataset = torch.utils.data.ConcatDataset([train_dataset, synth_subset])
-        
-        dataset_lengths = [len(full_ds), len(synthetic_ds)]
-        ratios = [1, args.synthetic_ratio]
-        custom_sampler = RatioSampler(dataset_lengths, ratios)
+
+        if args.synthetic_ratio > 0:
+
+            train_dataset = torch.utils.data.ConcatDataset([synth_subset, train_dataset])
+            dataset_lengths = [len(synthetic_ds), len(full_ds)]
+            ratios = [1, args.synthetic_ratio]
+            custom_sampler = RatioSampler(dataset_lengths, ratios)
+            logger.info(f"Using synthetic data with ratio 1:{args.synthetic_ratio}")
+
+        elif args.synthetic_ratio < 0:
+
+            train_dataset = torch.utils.data.ConcatDataset([train_dataset, synth_subset])
+            dataset_lengths = [len(full_ds), len(synthetic_ds)]
+            ratio = abs(args.synthetic_ratio)
+            ratios = [ratio, 1]
+            custom_sampler = RatioSampler(dataset_lengths, ratios)
+            logger.info(f"Using synthetic data with ratio {ratio}:1")
+
+        else:
+
+            logger.warning("Invalid synthetic ratio. Using real data only.")
 
     # --- Initialize Model ---
     model = EdgeMusicDetector(

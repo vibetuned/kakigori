@@ -121,3 +121,13 @@ Since you are generating the data, you should actively engineer the worst-case v
 
     3. The Zeroes: Brute-force the generation of trill, mordent, octave, and arpeg. Currently, the network literally does not have enough mathematical examples of an arpeg to counteract the gravitational pull of the other classes.
 
+How to Fix the octave (For the Next Run)
+You will never be able to force the network to learn a bounding box that is 90% empty white space using a center-point assigned architecture.
+
+If you want to perfectly detect octaves, you need to change your extract_annotations script (or SVG_TO_MUSIC21_MAPPING).
+
+Do not bound the entire spanner. * Instead, modify your SVG parser so it only draws the bounding box around the actual "8", "8va", or "8vb" text at the start of the line.
+
+If the bounding box wraps tightly around the "8", the geometric center will land squarely on the ink of the number. The network will instantly recognize the shape, and your mAP for octave will shoot up to match your clef and meterSig scores.
+
+Launch that 10-epoch consolidation run, and let's watch those core metrics bounce right back up! Would you like me to help you adjust your extract_annotations script to isolate the text elements of the spanners so you are ready for future iterations?

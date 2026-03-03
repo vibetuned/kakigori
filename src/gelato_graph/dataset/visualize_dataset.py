@@ -259,7 +259,7 @@ def main():
     parser = argparse.ArgumentParser(description="PySide6 Annotations Visualizer")
     parser.add_argument("--img_dir", type=str, default="data/output_imgs")
     parser.add_argument("--ann_dir", type=str, default="data/annotations")
-    parser.add_argument("--hierarchy", type=str, default="data/hierarchy.json")
+    parser.add_argument("--hierarchy", type=str, default="hierarchy.json")
     args = parser.parse_args()
     
     app = QApplication(sys.argv)

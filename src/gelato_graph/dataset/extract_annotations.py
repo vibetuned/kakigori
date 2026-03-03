@@ -2,7 +2,6 @@ import argparse
 import logging
 from pathlib import Path
 import json
-import pprint
 import re
 import multiprocessing
 import math
@@ -24,7 +23,6 @@ def load_target_classes(config_path="gelato_config.json"):
     try:
         with open(config_path, 'r') as f:
             config = json.load(f)
-            pprint.pprint(config)
             return set(config.get("target_classes", []))
     except Exception as e:
         logger.warning(f"Could not load {config_path}: {e}. Falling back to default classes.")

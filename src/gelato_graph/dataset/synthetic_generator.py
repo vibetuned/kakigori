@@ -157,12 +157,18 @@ def apply_ornaments(score):
             note.expressions.append(music21.expressions.Trill())
             has_ornament = True
         
-        if random.random() < 0.05:
+        if not has_ornament and random.random() < 0.05:
             note.expressions.append(music21.expressions.Mordent())
             has_ornament = True
 
         if not has_ornament and random.random() < 0.2:
             note.articulations.append(music21.articulations.Fingering(random.randint(1, 5)))
+            has_ornament = True
+
+        if not has_ornament and random.random() < 0.05:
+            turn = music21.expressions.Turn()
+            note.expressions.append(turn)
+            has_ornament = True
 
         # Chords and Arpeggios
         if random.random() < 0.10 and is_safe_to_mutate(note) and note.duration.quarterLength >= 0.5:
@@ -212,15 +218,26 @@ def apply_spanners(score):
         # Flatten the part to easily grab sequential notes across bar lines
         notes_and_chords = list(part.recurse().notesAndRests)
         valid_targets = [n for n in notes_and_chords if not n.isRest]
+        part_changed = False
         
-        if len(valid_targets) >= 3 and random.random() < 0.3:
+        if not part_changed and len(valid_targets) >= 3 and random.random() < 0.3:
             start_idx = random.randint(0, len(valid_targets) - 3)
             end_idx = random.randint(start_idx + 2, len(valid_targets) - 1)
             
             slur = music21.spanner.Slur()
             slur.addSpannedElements(valid_targets[start_idx], valid_targets[end_idx])
-            # Insert at the part level, NOT the measure level
             part.insert(0, slur)
+            part_changed = True
+        
+        if not part_changed and len(valid_targets) >= 4 and random.random() < 0.15:
+            start_idx = random.randint(0, len(valid_targets) - 4)
+            end_idx = random.randint(start_idx + 3, len(valid_targets) - 1)
+            
+            shift_type = random.choice(['8va', '8vb'])
+            ottava = music21.spanner.Ottava(type=shift_type)
+            ottava.addSpannedElements(valid_targets[start_idx], valid_targets[end_idx])
+            part.insert(0, ottava)
+            part_changed = True
             
     return score
 

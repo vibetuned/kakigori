@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from torchvision.ops import nms
 from PIL import Image, ImageDraw
 
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
@@ -17,8 +18,8 @@ from PySide6.QtGui import QPixmap, QColor, QPen, QFont, QImage, QShortcut, QKeyS
 from PySide6.QtCore import Qt, QRectF, QObject, Signal
 
 from .model import EdgeMusicDetector
-from .infer import preprocess, decode_outputs, nms
-from .utils import load_checkpoint
+from .infer import preprocess
+from .utils import load_checkpoint, decode_model_outputs
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -312,10 +313,29 @@ class ModelVisualizer(QMainWindow):
         if path and path in self._cache and "raw_outputs" in self._cache[path]:
             cached = self._cache[path]
             # Recalculate the NMS and detections
-            cached["detections"] = nms(
-                decode_outputs(cached["raw_outputs"], cached["meta"], self.current_conf_thresh, self.class_list), 
-                self.iou_thresh
-            )
+            batch_preds = decode_model_outputs(cached["raw_outputs"], self.current_conf_thresh, self.iou_thresh, self.input_size)
+
+            detections_dict = batch_preds[0]
+
+            detections = [
+                {
+                    "class": self.class_list[int(c)],
+                    "score": round(float(s), 4),
+                    
+                    "bbox": [
+                        round(float(((bx1 - cached["meta"]["pad_x"]) / cached["meta"]["scale"]).clamp(min=0.0)), 1),
+                        round(float(((by1 - cached["meta"]["pad_y"]) / cached["meta"]["scale"]).clamp(min=0.0)), 1),
+                        round(float(((bx2 - cached["meta"]["pad_x"]) / cached["meta"]["scale"]).clamp(max=float(cached["meta"]["orig_w"]))), 1),
+                        round(float(((by2 - cached["meta"]["pad_y"]) / cached["meta"]["scale"]).clamp(max=float(cached["meta"]["orig_h"]))), 1),
+                    ]
+                }
+                for bx1, by1, bx2, by2, s, c in zip(
+                    detections_dict["boxes"][:, 0], detections_dict["boxes"][:, 1], 
+                    detections_dict["boxes"][:, 2], detections_dict["boxes"][:, 3], 
+                    detections_dict["scores"], detections_dict["labels"]
+                )
+            ]
+            cached["detections"] = detections
             # Rebuild the Qt graphics items based on the new detections
             self._update_bbox_items()
             
@@ -374,7 +394,29 @@ class ModelVisualizer(QMainWindow):
                     raw_outputs = self.model(tensor)
 
                 raw_cpu = [{"cls": out["cls"].detach().cpu(), "reg": out["reg"].detach().cpu()} for out in raw_outputs]
-                detections = nms(decode_outputs(raw_outputs, meta, self.current_conf_thresh, self.class_list), self.iou_thresh)
+                batch_preds = decode_model_outputs(raw_outputs, self.current_conf_thresh, self.iou_thresh, self.input_size)
+
+                detections_dict = batch_preds[0]
+
+                detections = [
+                {
+                    "class": self.class_list[int(c)],
+                    "score": round(float(s), 4),
+                    
+                    "bbox": [
+                        round(float(((bx1 - meta["pad_x"]) / meta["scale"]).clamp(min=0.0)), 1),
+                        round(float(((by1 - meta["pad_y"]) / meta["scale"]).clamp(min=0.0)), 1),
+                        round(float(((bx2 - meta["pad_x"]) / meta["scale"]).clamp(max=float(meta["orig_w"]))), 1),
+                        round(float(((by2 - meta["pad_y"]) / meta["scale"]).clamp(max=float(meta["orig_h"]))), 1),
+                    ]
+                }
+                for bx1, by1, bx2, by2, s, c in zip(
+                    detections_dict["boxes"][:, 0], detections_dict["boxes"][:, 1], 
+                    detections_dict["boxes"][:, 2], detections_dict["boxes"][:, 3], 
+                    detections_dict["scores"], detections_dict["labels"]
+                )
+                ]
+                
 
                 self._cache[path] = {
                     "raw_outputs": raw_cpu,
@@ -482,7 +524,7 @@ def main():
     parser.add_argument("--img_dir", type=str, default="data/output_imgs", help="Directory containing images")
     parser.add_argument("--checkpoint", type=str, required=True, help="Model checkpoint path")
     parser.add_argument("--config", type=str, default="gelato_config.json", help="Path to gelato_config.json")
-    parser.add_argument("--hierarchy", type=str, default="data/hierarchy.json", help="Path to hierarchy.json")
+    parser.add_argument("--hierarchy", type=str, default="hierarchy.json", help="Path to hierarchy.json")
     parser.add_argument("--input-size", type=int, default=640)
     parser.add_argument("--conf-thresh", type=float, default=0.3)
     parser.add_argument("--iou-thresh", type=float, default=0.5)

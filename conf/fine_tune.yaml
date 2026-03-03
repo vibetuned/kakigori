@@ -1,10 +1,10 @@
 # Data args
-img_dir: "data/dataset-small-render/imgs"
-ann_dir: "data/dataset-small-render/annotations"
+img_dir: "data/dataset-starving/imgs"
+ann_dir: "data/dataset-starving/annotations"
 synthetic_img_dir: "data/synthetic-small/imgs"
 synthetic_ann_dir: "data/synthetic-small/annotations"
 use_synthetic: true
-synthetic_ratio: 4
+synthetic_ratio: 3
 config: "gelato_config.json"
 input_size: 640
 num_workers: 4
@@ -32,4 +32,4 @@ max_steps: -1
 seed: 42
 resume: false
 resume_from_checkpoint: null
-fine_tune: "checkpoints/run_010/"
+fine_tune: "checkpoints/run_017/"
