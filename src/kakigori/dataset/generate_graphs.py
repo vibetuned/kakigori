@@ -17,7 +17,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 
-def generate_graph(mei_path: Path, json_paths: list, output_dir: Path) -> bool:
+def generate_graph(mei_path: Path, json_paths: list, output_dir: Path, node_roles: dict) -> bool:
     """Generate a ground truth graph from MEI and JSON annotations."""
     try:
         if not mei_path.exists() or not json_paths:
@@ -28,7 +28,7 @@ def generate_graph(mei_path: Path, json_paths: list, output_dir: Path) -> bool:
             return True
             
         # Parse the MEI XML and JSON annotations
-        builder = GroundTruthGraphBuilder(str(mei_path), [str(j) for j in json_paths])
+        builder = GroundTruthGraphBuilder(str(mei_path), [str(j) for j in json_paths], node_roles)
         gt_edges = builder.build_edges()
         
         # Determine unique nodes present in edges to form the graph
@@ -70,20 +70,20 @@ def generate_graph(mei_path: Path, json_paths: list, output_dir: Path) -> bool:
     return False
 
 
-def _generate_target_func(q, m_path, j_paths, o_dir):
+def _generate_target_func(q, m_path, j_paths, o_dir, node_roles):
     """Module-level target function for isolated process."""
-    success = generate_graph(m_path, j_paths, o_dir)
+    success = generate_graph(m_path, j_paths, o_dir, node_roles)
     q.put(success)
 
 
 def _generate_isolated(args):
     """Spawns an isolated OS process with auto-retry."""
-    mei_path, json_paths, output_dir = args
+    mei_path, json_paths, output_dir, node_roles = args
     
     for attempt in range(3):
         ctx = multiprocessing.get_context("spawn")
         q = ctx.Queue()
-        p = ctx.Process(target=_generate_target_func, args=(q, mei_path, json_paths, output_dir))
+        p = ctx.Process(target=_generate_target_func, args=(q, mei_path, json_paths, output_dir, node_roles))
         p.start()
         
         p.join(timeout=30) 
@@ -107,11 +107,13 @@ def main():
     parser.add_argument("mei_dir", type=str, help="Directory containing .mei files")
     parser.add_argument("json_dir", type=str, help="Directory containing annotation .json files")
     parser.add_argument("--out-dir", "--out_dir", dest="out_dir", type=str, default="data/output_graphs", help="Output directory for Graph .pt files")
+    parser.add_argument("--roles-file", "--roles_file", dest="roles_file", type=str, default="conf/structure.json", help="Path to JSON file containing node roles")
     args = parser.parse_args()
 
     mei_path = Path(args.mei_dir)
     json_path = Path(args.json_dir)
     out_path = Path(args.out_dir)
+    roles_file = Path(args.roles_file)
 
     if not mei_path.exists() or not mei_path.is_dir():
         logger.error(f"MEI directory does not exist: {mei_path}")
@@ -128,6 +130,10 @@ def main():
         logger.info(f"No .mei files found in {mei_path}")
         return
 
+    # Load node roles from JSON
+    with open(roles_file, 'r') as f:
+        node_roles = json.load(f)["node_roles"]
+
     # Match MEI files to ALL corresponding annotation JSON files (e.g., _page1, _page2)
     tasks = []
     for m_file in mei_files:
@@ -141,7 +147,7 @@ def main():
         if j_files:
             # Sort list so pages are processed iteratively safely
             j_files.sort()
-            tasks.append((m_file, j_files, out_path))
+            tasks.append((m_file, j_files, out_path, node_roles))
         else:
             logger.debug(f"Missing json annotation for MEI file: {m_file.name}")
 
