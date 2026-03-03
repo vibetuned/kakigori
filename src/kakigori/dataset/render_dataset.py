@@ -24,7 +24,11 @@ def render_mxl_to_svg(mxl_path: Path, output_dir: Path, img_dir: Path) -> bool:
     try:
         verovio.enableLog(False)
         tk = verovio.toolkit()
-        tk.setOptions({"svgViewBox": True})
+        tk.setOptions({
+            "svgViewBox": True,
+            "pageWidth": 2100, # Add this to ensure consistent page width
+            "xmlIdSeed": 42    # Add this for stable SVG IDs
+        })
         
         with zipfile.ZipFile(mxl_path, 'r') as zf:
             xml_name = next((name for name in zf.namelist() if (name.endswith('.xml') or name.endswith('.musicxml')) and name != 'META-INF/container.xml'), None)

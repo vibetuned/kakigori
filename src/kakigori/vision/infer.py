@@ -92,10 +92,10 @@ def main():
     parser.add_argument("--input-size", type=int, default=640)
     parser.add_argument("--conf-thresh", type=float, default=0.3)
     parser.add_argument("--iou-thresh", type=float, default=0.5)
-    parser.add_argument("--dpi", type=int, default=150, help="DPI for PDF page rendering.")
+    parser.add_argument("--dpi", type=int, default=300, help="DPI for PDF page rendering.")
     parser.add_argument("--use-bottom-up", action="store_true")
     parser.add_argument(
-        "--out-indices", type=int, nargs=3, default=[1, 2, 3],
+        "--out-indices", type=int, nargs=3, default=[0, 1, 2],
         help="Three backbone feature map indices to extract (default: 1 2 3).",
     )
     args = parser.parse_args()

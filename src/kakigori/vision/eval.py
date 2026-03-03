@@ -20,13 +20,23 @@ from .model import MusicDetector
 from .utils import omr_collate_fn, load_checkpoint, decode_model_outputs
 from .dataset import OMRDataset
 
-logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 # Third party imports
 import torch.multiprocessing
 
 torch.multiprocessing.set_sharing_strategy('file_system')
+
+# Standard library imports
+import warnings
+
+# Suppress the harmless leaked semaphore warning on exit
+warnings.filterwarnings(
+    "ignore", 
+    category=UserWarning, 
+    module="multiprocessing.resource_tracker"
+)
 
 def get_checkpoint_step(checkpoint_dir):
     """Extracts the step number from the checkpoint directory path."""

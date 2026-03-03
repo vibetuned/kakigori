@@ -75,7 +75,11 @@ local-folder = "Local folder imports"
 
 [project.scripts]
 render-dataset = "kakigori.dataset.render_dataset:main"
+export-dataset = "kakigori.dataset.export_dataset:main"
+generate-graphs = "kakigori.dataset.generate_graphs:main"
+visualize-graphs = "kakigori.dataset.visualize_graphs:main"
 extract-annotations = "kakigori.dataset.extract_annotations:main"
+inject-mids = "kakigori.dataset.inject_mxl_ids:main"
 extract-classes = "kakigori.dataset.extract_classes:main"
 visualize-dataset = "kakigori.dataset.visualize_dataset:main"
 synthetic-generator = "kakigori.dataset.synthetic_generator:main"

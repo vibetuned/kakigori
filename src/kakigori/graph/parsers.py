@@ -4,18 +4,24 @@ import xml.etree.ElementTree as ET
 
 
 class GroundTruthGraphBuilder:
-    def __init__(self, mei_file, json_file):
+    def __init__(self, mei_file, json_files):
         self.mei_tree = ET.parse(mei_file)
         self.mei_root = self.mei_tree.getroot()
         # MEI usually has a namespace
         self.ns = {'mei': 'http://www.music-encoding.org/ns/mei'} 
         
-        # Load spatial nodes
-        with open(json_file, 'r') as f:
-            self.spatial_nodes = json.load(f)
+        # Load spatial nodes from multiple files
+        self.spatial_nodes = []
+        if isinstance(json_files, str):
+            json_files = [json_files]
+            
+        for j_file in json_files:
+            with open(j_file, 'r') as f:
+                data = json.load(f)
+                self.spatial_nodes.extend(data.get('annotations', []))
             
         # Map IDs to their spatial node dicts for quick lookup
-        self.node_map = {node['id']: node for node in self.spatial_nodes}
+        self.node_map = {node['id']: node for node in self.spatial_nodes if 'id' in node}
         self.gt_edges = []
 
     def _get_id(self, element):
@@ -62,17 +68,30 @@ class GroundTruthGraphBuilder:
                     self.gt_edges.append((note_id, child_id, 2))
         
         # 3. Traverse syllables for Synchronization (Class 4) edges
+        # In MEI, <syl> is usually nested inside <verse>, which is inside <note> or <chord>
+        # Standard ElementTree doesn't support 'ancestor::', so we build a parent map beforehand
+        parent_map = {c: p for p in self.mei_root.iter() for c in p}
+        
         for syl in self.mei_root.findall('.//mei:syl', self.ns):
             syl_id = self._get_id(syl)
+            if not syl_id or syl_id not in self.node_map:
+                continue
+                
+            # Traverse parents upwards until we find a full note element
+            current = syl
+            parent_note = None
+            while current in parent_map:
+                parent = parent_map[current]
+                # Check tag (removing possible namespace)
+                if parent.tag.endswith('note'):
+                    parent_note = parent
+                    break
+                current = parent
             
-            # In MEI, <syl> is usually nested inside <verse>, which is inside <note> or <chord>
-            parent_note = syl.find('ancestor::mei:note', self.ns) 
-            # Note: XPath 'ancestor' requires lxml, standard ET needs parent tracking, 
-            # but conceptually, you link the parent note_id to the syl_id
-            
-            if parent_note is not None and syl_id in self.node_map:
+            if parent_note is not None:
                 parent_id = self._get_id(parent_note)
-                self.gt_edges.append((parent_id, syl_id, 4))
+                if parent_id and parent_id in self.node_map:
+                    self.gt_edges.append((parent_id, syl_id, 4))
 
         return self.gt_edges
 
