@@ -1,11 +1,11 @@
 # Data args
-img_dir: "data/dataset-starving/imgs"
-ann_dir: "data/dataset-starving/annotations"
+img_dir: "data/train-small/imgs"
+ann_dir: "data/train-small/annotations"
 synthetic_img_dir: "data/synthetic-small/imgs"
 synthetic_ann_dir: "data/synthetic-small/annotations"
 use_synthetic: true
 synthetic_ratio: 3
-config: "gelato_config.json"
+config: "conf/config.json"
 input_size: 640
 num_workers: 4
 

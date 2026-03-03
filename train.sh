@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Gelato Training Supervisor Script
+# Kakigori Training Supervisor Script
 # 
 # This script runs the training process and automatically relaunches it if it crashes
 # (e.g., due to a hardware error like a segmentation fault).
@@ -10,7 +10,7 @@
 #   ./supervise_train.sh
 # 
 # Or you can pass your own custom command:
-#   ./supervise_train.sh uv run gelato-train --custom_args...
+#   ./supervise_train.sh uv run kakigori-train --custom_args...
 
 if [ $# -eq 0 ]; then
     # Default command

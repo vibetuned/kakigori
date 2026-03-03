@@ -1,5 +1,5 @@
 [project]
-name = "gelato-graph"
+name = "kakigori"
 dynamic = ["version"]
 description = "Add your description here"
 readme = "README.md"
@@ -61,14 +61,14 @@ explicit = true
 
 
 [project.scripts]
-render-dataset = "gelato_graph.dataset.render_dataset:main"
-extract-annotations = "gelato_graph.dataset.extract_annotations:main"
-extract-classes = "gelato_graph.dataset.extract_classes:main"
-visualize-dataset = "gelato_graph.dataset.visualize_dataset:main"
-synthetic-generator = "gelato_graph.dataset.synthetic_generator:main"
-filter-mxl = "gelato_graph.dataset.filter_mxl:main"
-train-model = "gelato_graph.model.train:main"
-eval-model = "gelato_graph.model.eval:main"
-infer-model = "gelato_graph.model.infer:main"
-visualize-model = "gelato_graph.model.visualize:main"
-calculate-areas = "gelato_graph.model.calculate_areas:main"
+render-dataset = "kakigori.dataset.render_dataset:main"
+extract-annotations = "kakigori.dataset.extract_annotations:main"
+extract-classes = "kakigori.dataset.extract_classes:main"
+visualize-dataset = "kakigori.dataset.visualize_dataset:main"
+synthetic-generator = "kakigori.dataset.synthetic_generator:main"
+filter-mxl = "kakigori.dataset.filter_mxl:main"
+train-model = "kakigori.vision.train:main"
+eval-model = "kakigori.vision.eval:main"
+infer-model = "kakigori.vision.infer:main"
+visualize-model = "kakigori.vision.visualize:main"
+calculate-areas = "kakigori.vision.calculate_areas:main"

@@ -1,4 +1,4 @@
-"""PDF Inference Script for EdgeMusicDetector.
+"""PDF Inference Script for MusicDetector.
 
 Renders every page of a PDF, runs the trained model on each, and outputs:
   - page_NNNN.png  — raw rendered page image
@@ -18,7 +18,7 @@ import torchvision.transforms.functional as TF
 from PIL import Image
 from tqdm import tqdm
 
-from .model import EdgeMusicDetector
+from .model import MusicDetector
 from .dataset import _letterbox
 from .utils import decode_model_outputs, load_checkpoint
 
@@ -80,10 +80,10 @@ def preprocess(image: Image.Image, input_size: int, device: torch.device) -> tup
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="Run EdgeMusicDetector on a PDF score.")
+    parser = argparse.ArgumentParser(description="Run MusicDetector on a PDF score.")
     parser.add_argument("--pdf", type=str, required=True, help="Path to input PDF.")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to model checkpoint directory.")
-    parser.add_argument("--config", type=str, default="gelato_config.json")
+    parser.add_argument("--config", type=str, default="conf/config.json")
     parser.add_argument("--output-dir", type=str, default="inference_out")
     parser.add_argument("--input-size", type=int, default=640)
     parser.add_argument("--conf-thresh", type=float, default=0.3)
@@ -107,7 +107,7 @@ def main():
 
     # --- Load model ---
     logger.info(f"Loading model from {args.checkpoint}")
-    model = EdgeMusicDetector(num_classes=num_classes, use_bottom_up=args.use_bottom_up, out_indices=args.out_indices)
+    model = MusicDetector(num_classes=num_classes, use_bottom_up=args.use_bottom_up, out_indices=args.out_indices)
     load_checkpoint(model, args.checkpoint, device)
 
     # --- Render PDF ---

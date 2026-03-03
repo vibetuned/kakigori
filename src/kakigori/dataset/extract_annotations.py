@@ -19,7 +19,7 @@ import xml.etree.ElementTree as ET
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-def load_target_classes(config_path="gelato_config.json"):
+def load_target_classes(config_path="conf/config.json"):
     try:
         with open(config_path, 'r') as f:
             config = json.load(f)
@@ -31,6 +31,14 @@ def load_target_classes(config_path="gelato_config.json"):
             "artic", "dir", "dynam", "slur", "tie", "hairpin",
             "barline", "beam", "tuplet"
         }
+
+def load_smufl_mapping(mapping_path="conf/smufl_mapping.json"):
+    try:
+        with open(mapping_path, 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        logger.warning(f"Could not load {mapping_path}: {e}")
+        return {}
 
 
 def get_defs_bboxes(root, ns):
@@ -155,7 +163,7 @@ def get_absolute_transform(element, parent_map):
         
     return matrix
 
-def extract_from_svg(svg_path: Path, img_width: int, img_height: int, target_classes: set) -> list:
+def extract_from_svg(svg_path: Path, img_width: int, img_height: int, target_classes: set, smufl_mapping: dict) -> list:
     """Extracts semantic musical elements and their precise bounding boxes from a Verovio SVG."""
     try:
         tree = ET.parse(svg_path)
@@ -195,6 +203,45 @@ def extract_from_svg(svg_path: Path, img_width: int, img_height: int, target_cla
         
         # Check if it has a class we care about
         classes = cls.split()
+        
+        # Heuristic for barLine
+        if 'barLine' in classes:
+            paths = g.findall('.//svg:path', ns)
+            if len(paths) == 1:
+                if paths[0].get('stroke-dasharray'):
+                    classes.append('barlineDashed')
+                else:
+                    classes.append('barlineSingle')
+            elif len(paths) >= 2:
+                # Group paths by x-coordinate to properly handle multi-staff barlines
+                x_coords = {}
+                for p in paths:
+                    d = p.get('d', '')
+                    m = re.search(r'M([0-9.]+)', d)
+                    if m:
+                        x = round(float(m.group(1)), 1)
+                        if x not in x_coords:
+                            x_coords[x] = []
+                        x_coords[x].append(p)
+                
+                unique_xs = sorted(list(x_coords.keys()))
+                
+                if len(unique_xs) == 1:
+                    # It's actually a single barline spanning multiple staves
+                    # Check for dasharray on the first path
+                    if x_coords[unique_xs[0]][0].get('stroke-dasharray'):
+                        classes.append('barlineDashed')
+                    else:
+                        classes.append('barlineSingle')
+                elif len(unique_xs) == 2:
+                    # Double or Final
+                    sw1 = float(x_coords[unique_xs[0]][0].get('stroke-width', 1))
+                    sw2 = float(x_coords[unique_xs[1]][0].get('stroke-width', 1))
+                    if sw1 != sw2:
+                        classes.append('barlineFinal')
+                    else:
+                        classes.append('barlineDouble')
+
         match = list(target_classes.intersection(classes))
         if not match: continue
         label = match[0]
@@ -367,6 +414,28 @@ def extract_from_svg(svg_path: Path, img_width: int, img_height: int, target_cla
                 min_y = min(min_y, p_ymin_trans)
                 max_y = max(max_y, p_ymax_trans)
 
+        # 6. Handle <ellipse> elements
+        for ellipse in g.findall('.//svg:ellipse', ns):
+            try:
+                cx = float(ellipse.get('cx', 0))
+                cy = float(ellipse.get('cy', 0))
+                rx = float(ellipse.get('rx', 0))
+                ry = float(ellipse.get('ry', 0))
+                
+                if rx > 0 and ry > 0:
+                    e_xmin, e_xmax = cx - rx, cx + rx
+                    e_ymin, e_ymax = cy - ry, cy + ry
+                    
+                    matrix = get_absolute_transform(ellipse, parent_map)
+                    e_xmin_trans, e_xmax_trans, e_ymin_trans, e_ymax_trans = apply_transform_to_bbox(matrix, e_xmin, e_xmax, e_ymin, e_ymax)
+                    
+                    min_x = min(min_x, e_xmin_trans)
+                    max_x = max(max_x, e_xmax_trans)
+                    min_y = min(min_y, e_ymin_trans)
+                    max_y = max(max_y, e_ymax_trans)
+            except Exception:
+                pass
+
         if min_x != float('inf') and min_y != float('inf'):
             # Convert to final image coordinates
             ann = {
@@ -383,9 +452,60 @@ def extract_from_svg(svg_path: Path, img_width: int, img_height: int, target_cla
                 
             annotations.append(ann)
 
+    # 7. Global <use> elements for specific SMuFL classes
+    for use in root.findall('.//svg:use', ns):
+        href = use.get('{http://www.w3.org/1999/xlink}href', '').lstrip('#')
+        prefix = href.split('-')[0]
+        specific_label = smufl_mapping.get(prefix)
+        if not specific_label:
+            continue
+            
+        # Contextual override: if the mapping is an accidental but it's inside a keySig/keyAccid group
+        if specific_label.startswith('accidental'):
+            ancestor = parent_map.get(use)
+            in_keysig = False
+            while ancestor is not None:
+                classes = ancestor.get('class', '').split()
+                if 'keySig' in classes or 'keyAccid' in classes:
+                    in_keysig = True
+                    break
+                ancestor = parent_map.get(ancestor)
+                
+            if in_keysig:
+                specific_label = specific_label.replace('accidental', 'keyAccid')
+                
+        if specific_label not in target_classes:
+            continue
+            
+        if href not in defs_bboxes: continue
+        
+        b_xmin, b_xmax, b_ymin, b_ymax = defs_bboxes[href]
+        matrix = get_absolute_transform(use, parent_map)
+        use_xmin, use_xmax, use_ymin, use_ymax = apply_transform_to_bbox(matrix, b_xmin, b_xmax, b_ymin, b_ymax)
+
+        ann = {
+            "class": specific_label,
+            "bbox": [
+                use_xmin * scale_x,
+                use_ymin * scale_y,
+                use_xmax * scale_x,
+                use_ymax * scale_y
+            ]
+        }
+        
+        # Determine ID from parent
+        ancestor = parent_map.get(use)
+        while ancestor is not None:
+            if 'id' in ancestor.attrib and ancestor.get('class'):
+                ann["id"] = ancestor.attrib['id']
+                break
+            ancestor = parent_map.get(ancestor)
+            
+        annotations.append(ann)
+
     return annotations
 
-def process_single_file(svg_path: Path, img_path: Path, out_json: Path, target_classes: set) -> bool:
+def process_single_file(svg_path: Path, img_path: Path, out_json: Path, target_classes: set, smufl_mapping: dict) -> bool:
     """Processes a single SVG/PNG pair to extract annotations to JSON."""
     if not svg_path.exists() or not img_path.exists():
         return False
@@ -397,7 +517,7 @@ def process_single_file(svg_path: Path, img_path: Path, out_json: Path, target_c
         with Image.open(img_path) as im:
             img_w, img_h = im.size
             
-        anns = extract_from_svg(svg_path, img_w, img_h, target_classes)
+        anns = extract_from_svg(svg_path, img_w, img_h, target_classes, smufl_mapping)
         if anns:
             with open(out_json, 'w', encoding='utf-8') as f:
                 json.dump({"image": img_path.name, "width": img_w, "height": img_h, "annotations": anns}, f, indent=2)
@@ -413,10 +533,11 @@ def main():
     parser.add_argument("--svg_dir", type=str, default="data/output_svgs", help="Directory containing generated SVGs")
     parser.add_argument("--img_dir", type=str, default="data/output_imgs", help="Directory containing generated Images")
     parser.add_argument("--out_dir", type=str, default="data/annotations", help="Output directory for generated JSON annotations")
-    parser.add_argument("--config", type=str, default="gelato_config.json", help="Path to config file for target classes")
+    parser.add_argument("--config", type=str, default="conf/config.json", help="Path to config file for target classes")
     args = parser.parse_args()
 
     target_classes = load_target_classes(args.config)
+    smufl_mapping = load_smufl_mapping()
 
     svg_dir = Path(args.svg_dir)
     img_dir = Path(args.img_dir)
@@ -448,7 +569,7 @@ def main():
             # Reconstruct the matching SVG path
             svg_file = svg_dir / f"{img_file.stem}.svg"
             out_json = out_dir / f"{img_file.stem}.json"
-            futures[executor.submit(process_single_file, svg_file, img_file, out_json, target_classes)] = img_file
+            futures[executor.submit(process_single_file, svg_file, img_file, out_json, target_classes, smufl_mapping)] = img_file
             
         with tqdm(total=len(futures), desc="Extracting Bboxes", unit="file") as pbar:
             for future in as_completed(futures):

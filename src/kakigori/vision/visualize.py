@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
 from PySide6.QtGui import QPixmap, QColor, QPen, QFont, QImage, QShortcut, QKeySequence
 from PySide6.QtCore import Qt, QRectF, QObject, Signal
 
-from .model import EdgeMusicDetector
+from .model import MusicDetector
 from .infer import preprocess
 from .utils import load_checkpoint, decode_model_outputs
 
@@ -66,7 +66,7 @@ class ResizableGraphicsView(QGraphicsView):
 class ModelVisualizer(QMainWindow):
     def __init__(self, model, device, img_dir, hierarchy_path, config_path, input_size=640, conf_thresh=0.3, iou_thresh=0.5):
         super().__init__()
-        self.setWindowTitle("Gelato Graph — Model Output Visualizer (PySide6)")
+        self.setWindowTitle("Kakigori — Model Output Visualizer (PySide6)")
         self.resize(1400, 900)
         
         self.model = model
@@ -518,13 +518,13 @@ def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     parser = argparse.ArgumentParser(
-        description="Interactive model output visualizer for EdgeMusicDetector."
+        description="Interactive model output visualizer for MusicDetector."
     )
     parser.add_argument("--image", type=str, default=None, help="Path to a single image (alternative to --img_dir)")
     parser.add_argument("--img_dir", type=str, default="data/output_imgs", help="Directory containing images")
     parser.add_argument("--checkpoint", type=str, required=True, help="Model checkpoint path")
-    parser.add_argument("--config", type=str, default="gelato_config.json", help="Path to gelato_config.json")
-    parser.add_argument("--hierarchy", type=str, default="hierarchy.json", help="Path to hierarchy.json")
+    parser.add_argument("--config", type=str, default="conf/config.json", help="Path to conf/config.json")
+    parser.add_argument("--hierarchy", type=str, default="conf/hierarchy.json", help="Path to conf/hierarchy.json")
     parser.add_argument("--input-size", type=int, default=640)
     parser.add_argument("--conf-thresh", type=float, default=0.3)
     parser.add_argument("--iou-thresh", type=float, default=0.5)
@@ -542,7 +542,7 @@ def main():
 
     # --- Load model ---
     logger.info(f"Loading model from {args.checkpoint}")
-    model = EdgeMusicDetector(num_classes=num_classes, use_bottom_up=args.use_bottom_up)
+    model = MusicDetector(num_classes=num_classes, use_bottom_up=args.use_bottom_up)
     load_checkpoint(model, args.checkpoint, device)
   
     window = ModelVisualizer(model, device, args.img_dir, args.hierarchy, args.config, args.input_size, args.conf_thresh, args.iou_thresh)

@@ -108,7 +108,7 @@ def main():
     parser = argparse.ArgumentParser(description="Filter MXL files based on required classes.")
     parser.add_argument("--input_dir", type=str, required=True, help="Directory containing input .mxl files")
     parser.add_argument("--output_dir", type=str, required=True, help="Output directory for matched files")
-    parser.add_argument("--config", type=str, required=True, help="Path to config file (e.g., gelato_config.json)")
+    parser.add_argument("--config", type=str, required=True, help="Path to config file (e.g., conf/config.json)")
     parser.add_argument("--num_files", type=int, default=100, help="Maximum number of files to copy (default: 100)")
     args = parser.parse_args()
 

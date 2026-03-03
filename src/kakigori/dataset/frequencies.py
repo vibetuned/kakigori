@@ -1,4 +1,4 @@
-"""Class Frequency Counter for Gelato Dataset.
+"""Class Frequency Counter for Kakigori Dataset.
 
 Scans all annotation JSONs and outputs the exact frequency of every class.
 Optionally generates a pruned list of classes for your config file.
@@ -55,7 +55,7 @@ def main():
     kept_classes.sort()  # Sort alphabetically for a clean config file
 
     print(f"\n✅ Found {len(kept_classes)} classes with {args.min_count} or more occurrences.")
-    print(f"Copy the list below into your 'gelato_config.json' under 'target_classes':\n")
+    print(f"Copy the list below into your 'conf/config.json' under 'target_classes':\n")
     print(json.dumps(kept_classes, indent=4))
 
 if __name__ == "__main__":

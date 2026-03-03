@@ -1,4 +1,4 @@
-"""Modular Training Script for EdgeMusicDetector OMR model.
+"""Modular Training Script for MusicDetector OMR model.
 
 Uses Hugging Face Transformers Trainer for robust, standard implementation.
 """
@@ -12,7 +12,7 @@ import torch
 from transformers import TrainingArguments, set_seed
 from transformers.trainer_utils import get_last_checkpoint
 
-from .model import EdgeMusicDetector
+from .model import MusicDetector
 from .dataset import OMRDataset
 from .trainer import OMRTrainer
 from .utils import load_checkpoint, RatioSampler, omr_collate_fn
@@ -41,7 +41,7 @@ def parse_args():
     parser.add_argument("--synthetic-ann-dir", type=str, default="data/synthetic-small/annotations")
     parser.add_argument("--synthetic-ratio", type=int, default=4, help="ratio of synthetic to real (default 4)")
     parser.add_argument("--use-synthetic", action="store_true", help="use synthetic data merged with real data")
-    parser.add_argument("--config", type=str, default="gelato_config.json")
+    parser.add_argument("--config", type=str, default="conf/config.json")
     parser.add_argument("--input-size", type=int, default=640)
     parser.add_argument("--num-workers", type=int, default=4)
     
@@ -173,7 +173,7 @@ def main():
             logger.warning("Invalid synthetic ratio. Using real data only.")
 
     # --- Initialize Model ---
-    model = EdgeMusicDetector(
+    model = MusicDetector(
         num_classes=num_classes,
         use_bottom_up=args.use_bottom_up,
         out_indices=tuple(args.out_indices),

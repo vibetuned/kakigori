@@ -5,7 +5,7 @@ import timm
 
 from .layers import PANetNeck, DecoupledHead    
 
-class EdgeMusicDetector(nn.Module):
+class MusicDetector(nn.Module):
     def __init__(self, num_classes=91, use_bottom_up=False, out_indices=(0, 1, 2)):
         super().__init__()
         

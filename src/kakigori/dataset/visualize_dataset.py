@@ -24,7 +24,7 @@ class ResizableGraphicsView(QGraphicsView):
 class BBoxVisualizer(QMainWindow):
     def __init__(self, img_dir: str, ann_dir: str, hierarchy_path: str):
         super().__init__()
-        self.setWindowTitle("Gelato Graph - PySide6 Annotations Visualizer")
+        self.setWindowTitle("Kakigori - PySide6 Annotations Visualizer")
         self.resize(1400, 900)
         
         self.img_dir = Path(img_dir)
@@ -49,13 +49,13 @@ class BBoxVisualizer(QMainWindow):
             
     def load_target_classes(self) -> set:
         target = set()
-        if Path("gelato_config.json").exists():
+        if Path("conf/config.json").exists():
             try:
-                with open("gelato_config.json", 'r') as f:
+                with open("conf/config.json", 'r') as f:
                     data = json.load(f)
                     target = set(data.get("target_classes", []))
             except Exception as e:
-                logger.error(f"Failed to read gelato_config.json: {e}")
+                logger.error(f"Failed to read conf/config.json: {e}")
         return target
         
     def load_hierarchy(self) -> dict:
@@ -259,7 +259,7 @@ def main():
     parser = argparse.ArgumentParser(description="PySide6 Annotations Visualizer")
     parser.add_argument("--img_dir", type=str, default="data/output_imgs")
     parser.add_argument("--ann_dir", type=str, default="data/annotations")
-    parser.add_argument("--hierarchy", type=str, default="hierarchy.json")
+    parser.add_argument("--hierarchy", type=str, default="conf/hierarchy.json")
     args = parser.parse_args()
     
     app = QApplication(sys.argv)

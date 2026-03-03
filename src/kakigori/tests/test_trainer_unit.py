@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import unittest
 from unittest.mock import MagicMock
-from gelato_graph.model.trainer import OMRTrainer
+from kakigori.vision.trainer import OMRTrainer
 from transformers import TrainingArguments
 
 class DummyModel(nn.Module):

@@ -444,88 +444,6 @@ wheels = [
 ]
 
 [[package]]
-name = "gelato-graph"
-source = { editable = "." }
-dependencies = [
-    { name = "accelerate" },
-    { name = "albumentationsx" },
-    { name = "brotli" },
-    { name = "cairosvg" },
-    { name = "fonttools" },
-    { name = "matplotlib" },
-    { name = "music21" },
-    { name = "nbformat" },
-    { name = "numpy" },
-    { name = "opencv-contrib-python" },
-    { name = "pandas" },
-    { name = "pillow" },
-    { name = "plotly" },
-    { name = "pycocotools" },
-    { name = "pypdfium2" },
-    { name = "pyside6" },
-    { name = "pyyaml" },
-    { name = "svgpathtools" },
-    { name = "timm" },
-    { name = "torch" },
-    { name = "torchmetrics" },
-    { name = "torchvision" },
-    { name = "tqdm" },
-    { name = "transformers" },
-    { name = "verovio" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "ipykernel" },
-    { name = "ruff" },
-    { name = "setuptools" },
-    { name = "six" },
-    { name = "tabulate" },
-    { name = "tensorboard" },
-    { name = "ty" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "accelerate", specifier = ">=1.1.0" },
-    { name = "albumentationsx", specifier = ">=2.0.18" },
-    { name = "brotli", specifier = ">=1.2.0" },
-    { name = "cairosvg", specifier = ">=2.8.2" },
-    { name = "fonttools", specifier = ">=4.61.1" },
-    { name = "matplotlib", specifier = ">=3.10.8" },
-    { name = "music21", specifier = ">=9.1.0" },
-    { name = "nbformat", specifier = ">=5.10.4" },
-    { name = "numpy", specifier = ">=2.0.0" },
-    { name = "opencv-contrib-python", specifier = ">=4.13.0.92" },
-    { name = "pandas", specifier = ">=3.0.1" },
-    { name = "pillow", specifier = ">=11.0.0" },
-    { name = "plotly", specifier = ">=6.5.2" },
-    { name = "pycocotools", specifier = ">=2.0.11" },
-    { name = "pypdfium2", specifier = ">=4.30.0" },
-    { name = "pyside6", specifier = ">=6.10.2" },
-    { name = "pyyaml", specifier = ">=6.0.3" },
-    { name = "svgpathtools", specifier = ">=1.7.2" },
-    { name = "timm", specifier = ">=1.0.25" },
-    { name = "torch", specifier = ">=2.7.0", index = "https://download.pytorch.org/whl/cu130" },
-    { name = "torchmetrics", specifier = ">=1.8.2" },
-    { name = "torchvision", specifier = ">=0.22.0", index = "https://download.pytorch.org/whl/cu130" },
-    { name = "tqdm", specifier = ">=4.67.3" },
-    { name = "transformers", specifier = ">=4.48.3" },
-    { name = "verovio", specifier = ">=6.0.1" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "ipykernel", specifier = ">=7.2.0" },
-    { name = "ruff", specifier = ">=0.15.2" },
-    { name = "setuptools" },
-    { name = "six" },
-    { name = "tabulate", specifier = ">=0.9.0" },
-    { name = "tensorboard", specifier = ">=2.19.0" },
-    { name = "ty", specifier = ">=0.0.18" },
-]
-
-[[package]]
 name = "grpcio"
 version = "1.78.1"
 source = { registry = "https://pypi.org/simple" }
@@ -790,6 +708,88 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/02/49/9d1284d0dc65e2c757b74c6687b6d319b02f822ad039e5c512df9194d9dd/jupyter_core-5.9.1.tar.gz", hash = "sha256:4d09aaff303b9566c3ce657f580bd089ff5c91f5f89cf7d8846c3cdf465b5508", size = 89814, upload-time = "2025-10-16T19:19:18.444Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e7/e7/80988e32bf6f73919a113473a604f5a8f09094de312b9d52b79c2df7612b/jupyter_core-5.9.1-py3-none-any.whl", hash = "sha256:ebf87fdc6073d142e114c72c9e29a9d7ca03fad818c5d300ce2adc1fb0743407", size = 29032, upload-time = "2025-10-16T19:19:16.783Z" },
+]
+
+[[package]]
+name = "kakigori"
+source = { editable = "." }
+dependencies = [
+    { name = "accelerate" },
+    { name = "albumentationsx" },
+    { name = "brotli" },
+    { name = "cairosvg" },
+    { name = "fonttools" },
+    { name = "matplotlib" },
+    { name = "music21" },
+    { name = "nbformat" },
+    { name = "numpy" },
+    { name = "opencv-contrib-python" },
+    { name = "pandas" },
+    { name = "pillow" },
+    { name = "plotly" },
+    { name = "pycocotools" },
+    { name = "pypdfium2" },
+    { name = "pyside6" },
+    { name = "pyyaml" },
+    { name = "svgpathtools" },
+    { name = "timm" },
+    { name = "torch" },
+    { name = "torchmetrics" },
+    { name = "torchvision" },
+    { name = "tqdm" },
+    { name = "transformers" },
+    { name = "verovio" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "ipykernel" },
+    { name = "ruff" },
+    { name = "setuptools" },
+    { name = "six" },
+    { name = "tabulate" },
+    { name = "tensorboard" },
+    { name = "ty" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "accelerate", specifier = ">=1.1.0" },
+    { name = "albumentationsx", specifier = ">=2.0.18" },
+    { name = "brotli", specifier = ">=1.2.0" },
+    { name = "cairosvg", specifier = ">=2.8.2" },
+    { name = "fonttools", specifier = ">=4.61.1" },
+    { name = "matplotlib", specifier = ">=3.10.8" },
+    { name = "music21", specifier = ">=9.1.0" },
+    { name = "nbformat", specifier = ">=5.10.4" },
+    { name = "numpy", specifier = ">=2.0.0" },
+    { name = "opencv-contrib-python", specifier = ">=4.13.0.92" },
+    { name = "pandas", specifier = ">=3.0.1" },
+    { name = "pillow", specifier = ">=11.0.0" },
+    { name = "plotly", specifier = ">=6.5.2" },
+    { name = "pycocotools", specifier = ">=2.0.11" },
+    { name = "pypdfium2", specifier = ">=4.30.0" },
+    { name = "pyside6", specifier = ">=6.10.2" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
+    { name = "svgpathtools", specifier = ">=1.7.2" },
+    { name = "timm", specifier = ">=1.0.25" },
+    { name = "torch", specifier = ">=2.7.0", index = "https://download.pytorch.org/whl/cu130" },
+    { name = "torchmetrics", specifier = ">=1.8.2" },
+    { name = "torchvision", specifier = ">=0.22.0", index = "https://download.pytorch.org/whl/cu130" },
+    { name = "tqdm", specifier = ">=4.67.3" },
+    { name = "transformers", specifier = ">=4.48.3" },
+    { name = "verovio", specifier = ">=6.0.1" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "ipykernel", specifier = ">=7.2.0" },
+    { name = "ruff", specifier = ">=0.15.2" },
+    { name = "setuptools" },
+    { name = "six" },
+    { name = "tabulate", specifier = ">=0.9.0" },
+    { name = "tensorboard", specifier = ">=2.19.0" },
+    { name = "ty", specifier = ">=0.0.18" },
 ]
 
 [[package]]
