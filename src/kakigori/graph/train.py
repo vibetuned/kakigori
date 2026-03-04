@@ -9,9 +9,10 @@ from transformers import TrainingArguments, set_seed
 from transformers.trainer_utils import get_last_checkpoint
 
 # Import your components
-# from .gnn_trainer import GNNPhase2Model, GNNTrainer, compute_gnn_metrics
-# from .dataset import OMRFullPageDataset, omr_collate_fn
-# from .model import GraphVisualExtractor, ScoreGraphReconstructor
+from .trainer import GNNTrainer, compute_gnn_metrics
+from .dataset import OMRFullPageDataset
+from .utils import omr_collate_fn
+from .model import GraphVisualExtractor, ScoreGraphReconstructor
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
