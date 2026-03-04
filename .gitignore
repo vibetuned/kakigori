@@ -14,3 +14,5 @@ wheels/
 /runs/
 .rsyncignore
 /inference_out/
+/docs/_book/
+/docs/.quarto/

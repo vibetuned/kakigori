@@ -61,7 +61,7 @@ url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
 [tool.ruff.lint]
-select = ["I"]
+select = ["I", "E402"]
 
 [tool.ruff.lint.isort]
 length-sort = true
@@ -84,6 +84,7 @@ inject-mids = "kakigori.dataset.inject_mxl_ids:main"
 extract-classes = "kakigori.dataset.extract_classes:main"
 visualize-dataset = "kakigori.dataset.visualize_dataset:main"
 synthetic-generator = "kakigori.dataset.synthetic_generator:main"
+synthetic-writer = "kakigori.dataset.synthetic_writer:main"
 filter-mxl = "kakigori.dataset.filter_mxl:main"
 train-model = "kakigori.vision.train:main"
 eval-model = "kakigori.vision.eval:main"

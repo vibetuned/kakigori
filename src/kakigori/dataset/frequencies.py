@@ -12,9 +12,18 @@ from collections import Counter
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Count class frequencies in OMR annotations.")
-    parser.add_argument("--ann-dir", type=str, required=True, help="Path to the annotations directory.")
-    parser.add_argument("--min-count", type=int, default=50, help="Minimum occurrences required to include a class in the pruned config.")
+    parser = argparse.ArgumentParser(
+        description="Count class frequencies in OMR annotations."
+    )
+    parser.add_argument(
+        "--ann-dir", type=str, required=True, help="Path to the annotations directory."
+    )
+    parser.add_argument(
+        "--min-count",
+        type=int,
+        default=50,
+        help="Minimum occurrences required to include a class in the pruned config.",
+    )
     args = parser.parse_args()
 
     ann_dir = Path(args.ann_dir)
@@ -41,7 +50,9 @@ def main():
             print(f"Warning: Could not read {json_path.name} - {e}")
 
     # Print Global Stats
-    print(f"\nScanned {total_files} files containing {total_objects} total annotated objects.\n")
+    print(
+        f"\nScanned {total_files} files containing {total_objects} total annotated objects.\n"
+    )
     print("-" * 40)
     print(f"{'CLASS NAME':<25} | {'FREQUENCY'}")
     print("-" * 40)
@@ -53,12 +64,17 @@ def main():
     print("-" * 40)
 
     # Generate the pruned config list
-    kept_classes = [cls_name for cls_name, count in class_counts.items() if count >= args.min_count]
+    kept_classes = [
+        cls_name for cls_name, count in class_counts.items() if count >= args.min_count
+    ]
     kept_classes.sort()  # Sort alphabetically for a clean config file
 
-    print(f"\n✅ Found {len(kept_classes)} classes with {args.min_count} or more occurrences.")
+    print(
+        f"\n✅ Found {len(kept_classes)} classes with {args.min_count} or more occurrences."
+    )
     print(f"Copy the list below into your 'conf/config.json' under 'target_classes':\n")
     print(json.dumps(kept_classes, indent=4))
+
 
 if __name__ == "__main__":
     main()

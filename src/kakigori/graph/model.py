@@ -3,7 +3,26 @@ import torch
 import torch.nn as nn
 from torchvision.ops import MultiScaleRoIAlign
 
-
+class GNNPhase2Model(nn.Module):
+    """
+    Wraps the Vision Bridge (frozen) and Graph Network (training) 
+    into a single nn.Module for the Hugging Face Trainer.
+    """
+    def __init__(self, roi_extractor, gnn):
+        super().__init__()
+        self.roi_extractor = roi_extractor
+        self.gnn = gnn
+        
+        # Phase 2: Strictly freeze the vision backbone and RoI extractor
+        self.roi_extractor.eval()
+        for p in self.roi_extractor.parameters():
+            p.requires_grad = False
+            
+    def train(self, mode=True):
+        """Ensure the RoI extractor stays in eval mode even when Trainer calls model.train()"""
+        super().train(mode)
+        self.roi_extractor.eval()
+        
 class GraphVisualExtractor(nn.Module):
     def __init__(self, featmap_names=['0', '1', '2'], roi_size=(7, 7), in_channels=128, out_channels=256):
         super().__init__()

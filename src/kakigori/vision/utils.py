@@ -9,6 +9,7 @@ from transformers.trainer_utils import get_last_checkpoint
 
 logger = logging.getLogger(__name__)
 
+
 class RatioSampler(torch.utils.data.Sampler):
     """
     Samples from multiple datasets with specific ratios.
@@ -16,50 +17,54 @@ class RatioSampler(torch.utils.data.Sampler):
     For example, ratios=[9, 1] means 9 samples from dataset 0 for every 1 from dataset 1.
     Dataset 1 will be oversampled or subsampled to exactly match Dataset 0's needs.
     """
+
     def __init__(self, dataset_lengths, ratios):
         self.dataset_lengths = dataset_lengths
         self.ratios = ratios
-        
+
         self.offsets = [0]
         for i in range(len(dataset_lengths) - 1):
             self.offsets.append(self.offsets[-1] + dataset_lengths[i])
-            
+
         # Base length is strictly determined by the FIRST dataset (the anchor).
         # This guarantees 1 full pass of dataset 0. Other datasets follow the ratio.
         self.base_len = max(1, dataset_lengths[0] // ratios[0])
         self.total_size = sum([self.base_len * r for r in ratios])
-        
+
     def __iter__(self):
         iters = []
         for i, l in enumerate(self.dataset_lengths):
             if l == 0:
                 raise ValueError(f"Dataset at index {i} has length 0.")
-            
+
             num_samples = self.base_len * self.ratios[i]
-            
+
             if num_samples > l:
                 # Oversample: repeat the dataset enough times to satisfy the ratio
                 repeats = (num_samples // l) + 1
-                perm = torch.cat([torch.randperm(l) for _ in range(repeats)])[:num_samples]
+                perm = torch.cat([torch.randperm(l) for _ in range(repeats)])[
+                    :num_samples
+                ]
             else:
-                # Undersample: randomly pick the exact number of samples needed 
+                # Undersample: randomly pick the exact number of samples needed
                 # (Silently drops the remainder of this specific epoch)
                 perm = torch.randperm(l)[:num_samples]
-                
+
             iters.append(iter(perm.tolist()))
-            
+
         # Yield indices following the strict ratio sequence
         for _ in range(self.base_len):
             for i, r in enumerate(self.ratios):
                 for _ in range(r):
                     yield next(iters[i]) + self.offsets[i]
-                    
+
     def __len__(self):
         return self.total_size
 
+
 def omr_collate_fn(batch):
     """Collate images and targets into a dictionary for Trainer.
-    
+
     Returns:
         dict: {
             "pixel_values": (B, 3, H, W) float32 tensor
@@ -68,20 +73,19 @@ def omr_collate_fn(batch):
     """
     images, targets = zip(*batch)
     images = torch.stack(images, dim=0)
-    return {
-        "pixel_values": images,
-        "labels": list(targets)
-    }
+    return {"pixel_values": images, "labels": list(targets)}
 
 
-def load_checkpoint(model, checkpoint_path: str, device: torch.device, eval: bool = True):
+def load_checkpoint(
+    model, checkpoint_path: str, device: torch.device, eval: bool = True
+):
     """Resolve a checkpoint path and load weights into the model.
-    
+
     Handles:
       - HF Trainer output dirs (finds the last checkpoint-NNNN subdirectory)
       - Direct paths to model.safetensors or pytorch_model.bin
       - Single-run directories containing weight files
-    
+
     Args:
         eval: If True (default), sets the model to eval mode. Set to False for training.
     """
@@ -98,6 +102,7 @@ def load_checkpoint(model, checkpoint_path: str, device: torch.device, eval: boo
             if weights.suffix == ".safetensors":
                 # Third party imports
                 from safetensors.torch import load_file
+
                 state = load_file(weights, device=str(device))
             else:
                 state = torch.load(weights, map_location=device, weights_only=False)
@@ -111,34 +116,35 @@ def load_checkpoint(model, checkpoint_path: str, device: torch.device, eval: boo
     if eval:
         model.eval()
 
+
 def decode_model_outputs(outputs, conf_thresh, iou_thresh, input_size):
     """
     Decodes multi-scale raw model outputs into absolute pixel bounding boxes.
     Handles dynamic batch sizes and dynamic feature map resolutions.
-    
+
     Returns:
         list[dict]: A list of length BatchSize, containing dicts with "boxes", "scores", and "labels".
     """
     batch_size = outputs[0]["cls"].shape[0]
     device = outputs[0]["cls"].device
-    
+
     all_boxes = [[] for _ in range(batch_size)]
     all_scores = [[] for _ in range(batch_size)]
     all_labels = [[] for _ in range(batch_size)]
 
     for out in outputs:
-        cls_map = out["cls"].sigmoid()  
-        reg_map = out["reg"]            
-        
+        cls_map = out["cls"].sigmoid()
+        reg_map = out["reg"]
+
         B, _, H, W = reg_map.shape
 
-        max_scores, max_classes = cls_map.max(dim=1) 
+        max_scores, max_classes = cls_map.max(dim=1)
         mask = max_scores >= conf_thresh
         pos = mask.nonzero(as_tuple=False)
-        
+
         if pos.numel() == 0:
             continue
-            
+
         b_idx, y_idx, x_idx = pos[:, 0], pos[:, 1], pos[:, 2]
 
         scores = max_scores[b_idx, y_idx, x_idx]
@@ -163,12 +169,12 @@ def decode_model_outputs(outputs, conf_thresh, iou_thresh, input_size):
         y2 = cy + bh / 2
 
         boxes = torch.stack([x1, y1, x2, y2], dim=1)
-        
+
         for i in range(len(b_idx)):
             batch_item = b_idx[i].item()
-            all_boxes[batch_item].append(boxes[i:i+1])
-            all_scores[batch_item].append(scores[i:i+1])
-            all_labels[batch_item].append(cls_idx[i:i+1])
+            all_boxes[batch_item].append(boxes[i : i + 1])
+            all_scores[batch_item].append(scores[i : i + 1])
+            all_labels[batch_item].append(cls_idx[i : i + 1])
 
     batch_preds = []
     for b in range(batch_size):
@@ -178,17 +184,21 @@ def decode_model_outputs(outputs, conf_thresh, iou_thresh, input_size):
             b_labels = torch.cat(all_labels[b], dim=0)
 
             keep = batched_nms(b_boxes, b_scores, b_labels, iou_thresh)
-            
-            batch_preds.append({
-                "boxes": b_boxes[keep],
-                "scores": b_scores[keep],
-                "labels": b_labels[keep]
-            })
+
+            batch_preds.append(
+                {
+                    "boxes": b_boxes[keep],
+                    "scores": b_scores[keep],
+                    "labels": b_labels[keep],
+                }
+            )
         else:
-            batch_preds.append({
-                "boxes": torch.empty((0, 4), device=device),
-                "scores": torch.empty((0,), device=device),
-                "labels": torch.empty((0,), dtype=torch.long, device=device)
-            })
+            batch_preds.append(
+                {
+                    "boxes": torch.empty((0, 4), device=device),
+                    "scores": torch.empty((0,), device=device),
+                    "labels": torch.empty((0,), dtype=torch.long, device=device),
+                }
+            )
 
     return batch_preds

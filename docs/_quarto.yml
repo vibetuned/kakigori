@@ -1,0 +1,16 @@
+project:
+  type: book
+
+book:
+  title: "Kakigori Documentation"
+  author: "Kakigori Team"
+  chapters:
+    - index.md
+    - experiments/vision/hyperparameter.ipynb
+    - experiments/vision/finetuning.ipynb
+    - experiments/vision/expanding.ipynb
+
+format:
+  html:
+    theme: cosmo
+

@@ -1,8 +1,8 @@
 # Data args
 img_dir: "data/train-small/imgs"
 ann_dir: "data/train-small/annotations"
-synthetic_img_dir: "data/synthetic-small/imgs"
-synthetic_ann_dir: "data/synthetic-small/annotations"
+synthetic_img_dir: "data/synthetic-new/imgs"
+synthetic_ann_dir: "data/synthetic-new/annotations"
 use_synthetic: true
 synthetic_ratio: -9
 config: "conf/config.json"
@@ -32,4 +32,4 @@ max_steps: -1
 seed: 42
 resume: false
 resume_from_checkpoint: null
-fine_tune: "checkpoints/run_021/"
+fine_tune: "checkpoints/run_023/"

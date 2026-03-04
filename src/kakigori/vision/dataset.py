@@ -1,4 +1,5 @@
 """OMR Dataset — loads rendered score images and their bounding-box annotations."""
+
 # Standard library imports
 import json
 import random
@@ -13,6 +14,7 @@ from PIL import Image, ImageFile
 from torch.utils.data import Dataset
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
+
 
 class OMRDataset(Dataset):
     def __init__(
@@ -41,23 +43,27 @@ class OMRDataset(Dataset):
         if self.augment:
             # Third party imports
             import albumentations as A
-            
+
             # Dynamically calculate hole sizes based on the padded input_size
             max_hole = max(10, self.input_size // 20)
             min_hole = 5
-            
-            self.scanner_pipeline = A.Compose([
-                A.RandomBrightnessContrast(brightness_limit=0.1, contrast_limit=0.15, p=0.5),
-                A.GaussNoise(std_range=(2/255.0, 8/255.0), p=0.5),
-                A.CoarseDropout(
-                    num_holes_range=(5, 20),
-                    hole_height_range=(min_hole, max_hole),
-                    hole_width_range=(min_hole, max_hole),
-                    fill=240, 
-                    p=0.5
-                ),
-                A.ImageCompression(quality_range=(40, 75), p=0.3)
-            ])
+
+            self.scanner_pipeline = A.Compose(
+                [
+                    A.RandomBrightnessContrast(
+                        brightness_limit=0.1, contrast_limit=0.15, p=0.5
+                    ),
+                    A.GaussNoise(std_range=(2 / 255.0, 8 / 255.0), p=0.5),
+                    A.CoarseDropout(
+                        num_holes_range=(5, 20),
+                        hole_height_range=(min_hole, max_hole),
+                        hole_width_range=(min_hole, max_hole),
+                        fill=240,
+                        p=0.5,
+                    ),
+                    A.ImageCompression(quality_range=(40, 75), p=0.3),
+                ]
+            )
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -93,7 +99,11 @@ class OMRDataset(Dataset):
             labels.append(self.class_to_idx[cls_name])
 
         boxes = torch.tensor(boxes, dtype=torch.float32) if boxes else torch.zeros(0, 4)
-        labels = torch.tensor(labels, dtype=torch.long) if labels else torch.zeros(0, dtype=torch.long)
+        labels = (
+            torch.tensor(labels, dtype=torch.long)
+            if labels
+            else torch.zeros(0, dtype=torch.long)
+        )
 
         image, boxes = _letterbox(image, self.input_size, boxes)
 
@@ -141,7 +151,9 @@ class OMRDataset(Dataset):
                 grad = 1.0 - grad
 
             intensity = np.random.uniform(10, 35)
-            img = np.clip(img.astype(np.float32) + (grad - 0.5) * intensity, 0, 255).astype(np.uint8)
+            img = np.clip(
+                img.astype(np.float32) + (grad - 0.5) * intensity, 0, 255
+            ).astype(np.uint8)
 
         return Image.fromarray(img)
 
@@ -149,6 +161,7 @@ class OMRDataset(Dataset):
 # ---------------------------------------------------------------------------
 # Letterbox helper
 # ---------------------------------------------------------------------------
+
 
 def _letterbox(
     image: Image.Image,
@@ -182,12 +195,14 @@ def _letterbox(
         bw = boxes[:, 2] * new_w
         bh = boxes[:, 3] * new_h
         # Renormalise to canvas size
-        boxes = torch.stack([
-            cx / size,
-            cy / size,
-            bw / size,
-            bh / size,
-        ], dim=1)
+        boxes = torch.stack(
+            [
+                cx / size,
+                cy / size,
+                bw / size,
+                bh / size,
+            ],
+            dim=1,
+        )
 
     return canvas, boxes
-

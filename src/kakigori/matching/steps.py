@@ -15,7 +15,7 @@ def flow_matching_train_step(model, degraded_images, clean_images, optimizer):
     # 1. Sample random time steps 't' for each image in the batch
     # t is drawn from a uniform distribution between 0 and 1
     t = torch.rand((batch_size,), device=device)
-    
+
     # Reshape t so we can broadcast it across the image dimensions (B, 1, 1, 1)
     t_expanded = t.view(batch_size, 1, 1, 1)
 
@@ -39,22 +39,23 @@ def flow_matching_train_step(model, degraded_images, clean_images, optimizer):
 
     return loss.item()
 
+
 @torch.no_grad()
 def euler_sample(model, degraded_image, num_steps=10):
     device = degraded_image.device
     x_t = degraded_image.clone()
-    
+
     # Time step size
     dt = 1.0 / num_steps
-    
+
     for i in range(num_steps):
         # Current time t
         t = torch.tensor([i * dt], device=device).expand(x_t.shape[0])
-        
+
         # Predict velocity
         v_pred = model(x_t, t)
-        
+
         # Take a step in the direction of the velocity
         x_t = x_t + v_pred * dt
-        
+
     return x_t

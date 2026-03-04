@@ -37,18 +37,36 @@ from .infer import preprocess
 from .model import MusicDetector
 from .utils import load_checkpoint, decode_model_outputs
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger(__name__)
 
 _COLORS = [
-    "#e6194b", "#3cb44b", "#4363d8", "#f58231", "#911eb4",
-    "#42d4f4", "#f032e6", "#fabed4", "#469990", "#dcbeff",
-    "#9A6324", "#800000", "#aaffc3", "#808000", "#000075",
-    "#a9a9a9", "#e6beff", "#ffe119",
+    "#e6194b",
+    "#3cb44b",
+    "#4363d8",
+    "#f58231",
+    "#911eb4",
+    "#42d4f4",
+    "#f032e6",
+    "#fabed4",
+    "#469990",
+    "#dcbeff",
+    "#9A6324",
+    "#800000",
+    "#aaffc3",
+    "#808000",
+    "#000075",
+    "#a9a9a9",
+    "#e6beff",
+    "#ffe119",
 ]
+
 
 def _class_color(cls_name: str) -> QColor:
     return QColor(_COLORS[sum(ord(c) for c in cls_name) % len(_COLORS)])
+
 
 def _jet_rgba(data: np.ndarray, alpha: float = 0.65) -> np.ndarray:
     r = np.clip(1.5 - np.abs(data * 4 - 3), 0, 1)
@@ -56,6 +74,7 @@ def _jet_rgba(data: np.ndarray, alpha: float = 0.65) -> np.ndarray:
     b = np.clip(1.5 - np.abs(data * 4 - 1), 0, 1)
     a = np.where(data > 0.01, alpha, 0.0)
     return (np.stack([r, g, b, a], axis=-1) * 255).astype(np.uint8)
+
 
 def pil2qpixmap(pil_img: Image.Image) -> QPixmap:
     """Helper to convert PIL RGBA images to QPixmap for rendering."""
@@ -68,6 +87,7 @@ def pil2qpixmap(pil_img: Image.Image) -> QPixmap:
 
 class InferenceSignals(QObject):
     """Custom signals to communicate securely from the background thread to the UI."""
+
     finished = Signal(Path)
     error = Signal(Path, str)
 
@@ -80,11 +100,21 @@ class ResizableGraphicsView(QGraphicsView):
 
 
 class ModelVisualizer(QMainWindow):
-    def __init__(self, model, device, img_dir, hierarchy_path, config_path, input_size=640, conf_thresh=0.3, iou_thresh=0.5):
+    def __init__(
+        self,
+        model,
+        device,
+        img_dir,
+        hierarchy_path,
+        config_path,
+        input_size=640,
+        conf_thresh=0.3,
+        iou_thresh=0.5,
+    ):
         super().__init__()
         self.setWindowTitle("Kakigori — Model Output Visualizer (PySide6)")
         self.resize(1400, 900)
-        
+
         self.model = model
         self.device = device
         self.input_size = input_size
@@ -95,7 +125,11 @@ class ModelVisualizer(QMainWindow):
         self.hierarchy_path = Path(hierarchy_path)
         self.config_path = Path(config_path)
 
-        self.image_paths = sorted(list(self.img_dir.rglob("*.png")) + list(self.img_dir.rglob("*.jpg")) + list(self.img_dir.rglob("*.jpeg")))
+        self.image_paths = sorted(
+            list(self.img_dir.rglob("*.png"))
+            + list(self.img_dir.rglob("*.jpg"))
+            + list(self.img_dir.rglob("*.jpeg"))
+        )
         self.current_index = 0
 
         self.class_list = self._load_class_list()
@@ -114,9 +148,9 @@ class ModelVisualizer(QMainWindow):
 
         # UI State tracking
         self.class_checkboxes = {}
-        self.drawn_bboxes = []       # Stores [{class: 'name', items: [rect, text]}]
-        self.base_pixmap_item = None # The original image
-        self.overlay_pixmap_item = None # The heatmap/feature overlay
+        self.drawn_bboxes = []  # Stores [{class: 'name', items: [rect, text]}]
+        self.base_pixmap_item = None  # The original image
+        self.overlay_pixmap_item = None  # The heatmap/feature overlay
 
         self._register_hook()
         self._setup_ui()
@@ -142,21 +176,29 @@ class ModelVisualizer(QMainWindow):
             try:
                 with open(self.hierarchy_path) as f:
                     hierarchy = json.load(f)
-            except Exception: pass
+            except Exception:
+                pass
 
         assigned = {c for g in hierarchy.values() for c in g}
         missing = self.target_classes - assigned
-        if missing: hierarchy["Uncategorized"] = sorted(missing)
+        if missing:
+            hierarchy["Uncategorized"] = sorted(missing)
 
         return {
-            grp: [c for c in cls_list if c in self.target_classes or not self.target_classes]
+            grp: [
+                c
+                for c in cls_list
+                if c in self.target_classes or not self.target_classes
+            ]
             for grp, cls_list in hierarchy.items()
-            if any(c in self.target_classes for c in cls_list) or not self.target_classes
+            if any(c in self.target_classes for c in cls_list)
+            or not self.target_classes
         }
 
     def _register_hook(self):
         def _hook(module, inp, out):
             self._captured_features = [fm.detach().cpu() for fm in out]
+
         self._hook_handle = self.model.neck.register_forward_hook(_hook)
 
     # --- UI Setup ---
@@ -165,18 +207,22 @@ class ModelVisualizer(QMainWindow):
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
         main_layout.setContentsMargins(0, 0, 0, 0)
-        
+
         splitter = QSplitter(Qt.Horizontal)
         main_layout.addWidget(splitter)
-        
+
         # --- Sidebar ---
         sidebar_widget = QWidget()
         sidebar_layout = QVBoxLayout(sidebar_widget)
-        
+
         # Mode Selector
         sidebar_layout.addWidget(self._create_header("Visualization Mode"))
         self.mode_group = QButtonGroup(self)
-        self.mode_vars = {"bbox": QRadioButton("Bounding Boxes"), "heatmap": QRadioButton("Heatmaps"), "features": QRadioButton("Feature Maps")}
+        self.mode_vars = {
+            "bbox": QRadioButton("Bounding Boxes"),
+            "heatmap": QRadioButton("Heatmaps"),
+            "features": QRadioButton("Feature Maps"),
+        }
         self.mode_vars["bbox"].setChecked(True)
         for i, (val, rb) in enumerate(self.mode_vars.items()):
             self.mode_group.addButton(rb, i)
@@ -201,15 +247,17 @@ class ModelVisualizer(QMainWindow):
         sidebar_layout.addLayout(scale_layout)
 
         # Confidence Slider
-        sidebar_layout.addWidget(self._create_header("Confidence Threshold", top_margin=15))
+        sidebar_layout.addWidget(
+            self._create_header("Confidence Threshold", top_margin=15)
+        )
         conf_layout = QHBoxLayout()
         self.conf_slider = QSlider(Qt.Horizontal)
         self.conf_slider.setRange(1, 99)
         self.conf_slider.setValue(int(self.current_conf_thresh * 100))
         self.lbl_conf = QLabel(f"{self.current_conf_thresh:.2f}")
-        
+
         self.conf_slider.valueChanged.connect(self._on_conf_change)
-        
+
         conf_layout.addWidget(self.conf_slider)
         conf_layout.addWidget(self.lbl_conf)
         sidebar_layout.addLayout(conf_layout)
@@ -225,9 +273,11 @@ class ModelVisualizer(QMainWindow):
         for group_name, classes in self.hierarchy.items():
             grp_cb = QCheckBox(group_name)
             grp_cb.setChecked(True)
-            grp_cb.toggled.connect(lambda checked, cb=grp_cb, cl=classes: self._toggle_group(checked, cl))
+            grp_cb.toggled.connect(
+                lambda checked, cb=grp_cb, cl=classes: self._toggle_group(checked, cl)
+            )
             scroll_layout.addWidget(grp_cb)
-            
+
             for cls in classes:
                 cb = QCheckBox(cls)
                 cb.setChecked(True)
@@ -267,7 +317,7 @@ class ModelVisualizer(QMainWindow):
         nav_layout.addStretch()
         nav_layout.addWidget(btn_prev)
         nav_layout.addWidget(btn_next)
-        
+
         canvas_layout.addLayout(nav_layout)
         splitter.addWidget(canvas_container)
         splitter.setSizes([350, 1050])
@@ -295,13 +345,14 @@ class ModelVisualizer(QMainWindow):
         """Safely destroys old QGraphicsItems and draws new ones based on current cache."""
         # 1. Remove old Qt items from the scene to prevent memory leaks
         for ann in self.drawn_bboxes:
-            for item in ann['items']:
+            for item in ann["items"]:
                 self.scene.removeItem(item)
         self.drawn_bboxes.clear()
 
         path = self.image_paths[self.current_index]
         cached = self._cache.get(path)
-        if not cached: return
+        if not cached:
+            return
 
         # 2. Draw the new boxes based on the current confidence threshold
         for det in cached.get("detections", []):
@@ -310,26 +361,31 @@ class ModelVisualizer(QMainWindow):
             color = _class_color(cls)
             pen = QPen(color)
             pen.setWidth(max(1, int(self.original_w * 0.002)))
-            
-            rect_item = self.scene.addRect(QRectF(x1, y1, x2-x1, y2-y1), pen)
+
+            rect_item = self.scene.addRect(QRectF(x1, y1, x2 - x1, y2 - y1), pen)
             rect_item.setZValue(2)
-            
+
             text_item = self.scene.addText(f"{cls} {det.get('score', 0):.2f}")
             text_item.setDefaultTextColor(color)
             text_item.setPos(x1, max(0, y1 - 25))
             text_item.setZValue(2)
-            
-            self.drawn_bboxes.append({'class': cls, 'items': [rect_item, text_item]})
+
+            self.drawn_bboxes.append({"class": cls, "items": [rect_item, text_item]})
 
     def _on_conf_change(self, value):
         self.current_conf_thresh = value / 100.0
         self.lbl_conf.setText(f"{self.current_conf_thresh:.2f}")
-        
+
         path = self.image_paths[self.current_index] if self.image_paths else None
         if path and path in self._cache and "raw_outputs" in self._cache[path]:
             cached = self._cache[path]
             # Recalculate the NMS and detections
-            batch_preds = decode_model_outputs(cached["raw_outputs"], self.current_conf_thresh, self.iou_thresh, self.input_size)
+            batch_preds = decode_model_outputs(
+                cached["raw_outputs"],
+                self.current_conf_thresh,
+                self.iou_thresh,
+                self.input_size,
+            )
 
             detections_dict = batch_preds[0]
 
@@ -337,24 +393,58 @@ class ModelVisualizer(QMainWindow):
                 {
                     "class": self.class_list[int(c)],
                     "score": round(float(s), 4),
-                    
                     "bbox": [
-                        round(float(((bx1 - cached["meta"]["pad_x"]) / cached["meta"]["scale"]).clamp(min=0.0)), 1),
-                        round(float(((by1 - cached["meta"]["pad_y"]) / cached["meta"]["scale"]).clamp(min=0.0)), 1),
-                        round(float(((bx2 - cached["meta"]["pad_x"]) / cached["meta"]["scale"]).clamp(max=float(cached["meta"]["orig_w"]))), 1),
-                        round(float(((by2 - cached["meta"]["pad_y"]) / cached["meta"]["scale"]).clamp(max=float(cached["meta"]["orig_h"]))), 1),
-                    ]
+                        round(
+                            float(
+                                (
+                                    (bx1 - cached["meta"]["pad_x"])
+                                    / cached["meta"]["scale"]
+                                ).clamp(min=0.0)
+                            ),
+                            1,
+                        ),
+                        round(
+                            float(
+                                (
+                                    (by1 - cached["meta"]["pad_y"])
+                                    / cached["meta"]["scale"]
+                                ).clamp(min=0.0)
+                            ),
+                            1,
+                        ),
+                        round(
+                            float(
+                                (
+                                    (bx2 - cached["meta"]["pad_x"])
+                                    / cached["meta"]["scale"]
+                                ).clamp(max=float(cached["meta"]["orig_w"]))
+                            ),
+                            1,
+                        ),
+                        round(
+                            float(
+                                (
+                                    (by2 - cached["meta"]["pad_y"])
+                                    / cached["meta"]["scale"]
+                                ).clamp(max=float(cached["meta"]["orig_h"]))
+                            ),
+                            1,
+                        ),
+                    ],
                 }
                 for bx1, by1, bx2, by2, s, c in zip(
-                    detections_dict["boxes"][:, 0], detections_dict["boxes"][:, 1], 
-                    detections_dict["boxes"][:, 2], detections_dict["boxes"][:, 3], 
-                    detections_dict["scores"], detections_dict["labels"]
+                    detections_dict["boxes"][:, 0],
+                    detections_dict["boxes"][:, 1],
+                    detections_dict["boxes"][:, 2],
+                    detections_dict["boxes"][:, 3],
+                    detections_dict["scores"],
+                    detections_dict["labels"],
                 )
             ]
             cached["detections"] = detections
             # Rebuild the Qt graphics items based on the new detections
             self._update_bbox_items()
-            
+
         self._redraw()
 
     # --- Navigation & Background Inference ---
@@ -369,22 +459,25 @@ class ModelVisualizer(QMainWindow):
             self._load_image()
 
     def _load_image(self):
-        if not self.image_paths: return
-        
+        if not self.image_paths:
+            return
+
         path = self.image_paths[self.current_index]
-        self.lbl_info.setText(f"Image {self.current_index + 1} / {len(self.image_paths)} : {path.name}")
+        self.lbl_info.setText(
+            f"Image {self.current_index + 1} / {len(self.image_paths)} : {path.name}"
+        )
 
         # Reset Scene
         self.scene.clear()
         self.drawn_bboxes.clear()
-        
+
         pixmap = QPixmap(str(path))
         self.scene.setSceneRect(0, 0, pixmap.width(), pixmap.height())
         self.base_pixmap_item = self.scene.addPixmap(pixmap)
-        
+
         # Prepare overlay layer (empty initially)
         self.overlay_pixmap_item = self.scene.addPixmap(QPixmap())
-        self.overlay_pixmap_item.setZValue(1) # Ensure it renders above the base image
+        self.overlay_pixmap_item.setZValue(1)  # Ensure it renders above the base image
 
         self.original_w, self.original_h = pixmap.width(), pixmap.height()
         self.view.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio)
@@ -394,7 +487,9 @@ class ModelVisualizer(QMainWindow):
             self._redraw()
         else:
             self.lbl_status.setText("⏳ Running inference…")
-            threading.Thread(target=self._run_inference, args=(path,), daemon=True).start()
+            threading.Thread(
+                target=self._run_inference, args=(path,), daemon=True
+            ).start()
 
     def _run_inference(self, path):
         with self._inference_lock:
@@ -409,30 +504,67 @@ class ModelVisualizer(QMainWindow):
                 with torch.inference_mode():
                     raw_outputs = self.model(tensor)
 
-                raw_cpu = [{"cls": out["cls"].detach().cpu(), "reg": out["reg"].detach().cpu()} for out in raw_outputs]
-                batch_preds = decode_model_outputs(raw_outputs, self.current_conf_thresh, self.iou_thresh, self.input_size)
+                raw_cpu = [
+                    {"cls": out["cls"].detach().cpu(), "reg": out["reg"].detach().cpu()}
+                    for out in raw_outputs
+                ]
+                batch_preds = decode_model_outputs(
+                    raw_outputs,
+                    self.current_conf_thresh,
+                    self.iou_thresh,
+                    self.input_size,
+                )
 
                 detections_dict = batch_preds[0]
 
                 detections = [
-                {
-                    "class": self.class_list[int(c)],
-                    "score": round(float(s), 4),
-                    
-                    "bbox": [
-                        round(float(((bx1 - meta["pad_x"]) / meta["scale"]).clamp(min=0.0)), 1),
-                        round(float(((by1 - meta["pad_y"]) / meta["scale"]).clamp(min=0.0)), 1),
-                        round(float(((bx2 - meta["pad_x"]) / meta["scale"]).clamp(max=float(meta["orig_w"]))), 1),
-                        round(float(((by2 - meta["pad_y"]) / meta["scale"]).clamp(max=float(meta["orig_h"]))), 1),
-                    ]
-                }
-                for bx1, by1, bx2, by2, s, c in zip(
-                    detections_dict["boxes"][:, 0], detections_dict["boxes"][:, 1], 
-                    detections_dict["boxes"][:, 2], detections_dict["boxes"][:, 3], 
-                    detections_dict["scores"], detections_dict["labels"]
-                )
+                    {
+                        "class": self.class_list[int(c)],
+                        "score": round(float(s), 4),
+                        "bbox": [
+                            round(
+                                float(
+                                    ((bx1 - meta["pad_x"]) / meta["scale"]).clamp(
+                                        min=0.0
+                                    )
+                                ),
+                                1,
+                            ),
+                            round(
+                                float(
+                                    ((by1 - meta["pad_y"]) / meta["scale"]).clamp(
+                                        min=0.0
+                                    )
+                                ),
+                                1,
+                            ),
+                            round(
+                                float(
+                                    ((bx2 - meta["pad_x"]) / meta["scale"]).clamp(
+                                        max=float(meta["orig_w"])
+                                    )
+                                ),
+                                1,
+                            ),
+                            round(
+                                float(
+                                    ((by2 - meta["pad_y"]) / meta["scale"]).clamp(
+                                        max=float(meta["orig_h"])
+                                    )
+                                ),
+                                1,
+                            ),
+                        ],
+                    }
+                    for bx1, by1, bx2, by2, s, c in zip(
+                        detections_dict["boxes"][:, 0],
+                        detections_dict["boxes"][:, 1],
+                        detections_dict["boxes"][:, 2],
+                        detections_dict["boxes"][:, 3],
+                        detections_dict["scores"],
+                        detections_dict["labels"],
+                    )
                 ]
-                
 
                 self._cache[path] = {
                     "raw_outputs": raw_cpu,
@@ -465,86 +597,142 @@ class ModelVisualizer(QMainWindow):
         return hm_full.crop((pad_x, pad_y, pad_x + content_w, pad_y + content_h))
 
     def _redraw(self):
-        if not self.base_pixmap_item: return
-        
+        if not self.base_pixmap_item:
+            return
+
         path = self.image_paths[self.current_index]
         cached = self._cache.get(path)
-        if not cached: return
+        if not cached:
+            return
 
         mode_id = self.mode_group.checkedId()
         mode = "bbox" if mode_id == 0 else "heatmap" if mode_id == 1 else "features"
-        visible_classes = {cls for cls, cb in self.class_checkboxes.items() if cb.isChecked()}
+        visible_classes = {
+            cls for cls, cb in self.class_checkboxes.items() if cb.isChecked()
+        }
 
         # 1. Update BBox Visibility based on the class sidebar toggles
         for ann in self.drawn_bboxes:
-            is_visible = (mode == "bbox") and (ann['class'] in visible_classes)
-            for item in ann['items']:
+            is_visible = (mode == "bbox") and (ann["class"] in visible_classes)
+            for item in ann["items"]:
                 item.setVisible(is_visible)
 
         # 2. Update Overlay Visibility and Content
         if mode == "bbox":
             self.overlay_pixmap_item.setVisible(False)
             return
-            
+
         self.overlay_pixmap_item.setVisible(True)
         scale_idx = self.scale_group.checkedId()
-        indices = range(len(cached.get("raw_outputs", []))) if scale_idx == -1 else [scale_idx]
+        indices = (
+            range(len(cached.get("raw_outputs", [])))
+            if scale_idx == -1
+            else [scale_idx]
+        )
 
         combined = None
         if mode == "heatmap":
             for si in indices:
-                if si >= len(cached["raw_outputs"]): continue
+                if si >= len(cached["raw_outputs"]):
+                    continue
                 cls_probs = cached["raw_outputs"][si]["cls"].sigmoid()
                 for ci, cls_name in enumerate(self.class_list):
-                    if cls_name not in visible_classes: continue
+                    if cls_name not in visible_classes:
+                        continue
                     hm = cls_probs[0, ci].numpy()
-                    if combined is None: combined = np.zeros_like(hm)
+                    if combined is None:
+                        combined = np.zeros_like(hm)
                     if hm.shape != combined.shape:
-                        hm = np.array(Image.fromarray(hm).resize((combined.shape[1], combined.shape[0]), Image.Resampling.BILINEAR))
+                        hm = np.array(
+                            Image.fromarray(hm).resize(
+                                (combined.shape[1], combined.shape[0]),
+                                Image.Resampling.BILINEAR,
+                            )
+                        )
                     combined = np.maximum(combined, hm)
-                    
+
             if combined is not None:
                 combined = np.where(combined >= self.current_conf_thresh, combined, 0.0)
 
         elif mode == "features":
             for si in indices:
-                if si >= len(cached["feature_maps"]): continue
+                if si >= len(cached["feature_maps"]):
+                    continue
                 hm = torch.max(cached["feature_maps"][si].squeeze(0), dim=0)[0].numpy()
                 hm = (hm - hm.min()) / (hm.max() - hm.min() + 1e-8)
-                if combined is None: combined = hm
+                if combined is None:
+                    combined = hm
                 else:
-                    hm_resized = np.array(Image.fromarray(hm).resize((combined.shape[1], combined.shape[0]), Image.Resampling.BILINEAR))
+                    hm_resized = np.array(
+                        Image.fromarray(hm).resize(
+                            (combined.shape[1], combined.shape[0]),
+                            Image.Resampling.BILINEAR,
+                        )
+                    )
                     combined = np.maximum(combined, hm_resized)
 
         if combined is not None:
             hm_pil = Image.fromarray(combined)
             hm_cropped = self._crop_letterbox(hm_pil, cached["meta"])
-            
-            hm_display = hm_cropped.resize((self.original_w, self.original_h), Image.Resampling.BILINEAR)
-            
-            overlay_rgba = Image.fromarray(_jet_rgba(np.array(hm_display, dtype=np.float32), alpha=0.6 if mode=="features" else 0.65), "RGBA")
+
+            hm_display = hm_cropped.resize(
+                (self.original_w, self.original_h), Image.Resampling.BILINEAR
+            )
+
+            overlay_rgba = Image.fromarray(
+                _jet_rgba(
+                    np.array(hm_display, dtype=np.float32),
+                    alpha=0.6 if mode == "features" else 0.65,
+                ),
+                "RGBA",
+            )
             self.overlay_pixmap_item.setPixmap(pil2qpixmap(overlay_rgba))
         else:
             self.overlay_pixmap_item.setPixmap(QPixmap())
 
+
 def main():
     # Setup args, device, and load PyTorch model exactly as you had in your script...
     # For testing the UI layout immediately, you can replace the model load with `model = None`
-    
+
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     parser = argparse.ArgumentParser(
         description="Interactive model output visualizer for MusicDetector."
     )
-    parser.add_argument("--image", type=str, default=None, help="Path to a single image (alternative to --img_dir)")
-    parser.add_argument("--img_dir", type=str, default="data/output_imgs", help="Directory containing images")
-    parser.add_argument("--checkpoint", type=str, required=True, help="Model checkpoint path")
-    parser.add_argument("--config", type=str, default="conf/config.json", help="Path to conf/config.json")
-    parser.add_argument("--hierarchy", type=str, default="conf/hierarchy.json", help="Path to conf/hierarchy.json")
+    parser.add_argument(
+        "--image",
+        type=str,
+        default=None,
+        help="Path to a single image (alternative to --img_dir)",
+    )
+    parser.add_argument(
+        "--img_dir",
+        type=str,
+        default="data/output_imgs",
+        help="Directory containing images",
+    )
+    parser.add_argument(
+        "--checkpoint", type=str, required=True, help="Model checkpoint path"
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default="conf/config.json",
+        help="Path to conf/config.json",
+    )
+    parser.add_argument(
+        "--hierarchy",
+        type=str,
+        default="conf/hierarchy.json",
+        help="Path to conf/hierarchy.json",
+    )
     parser.add_argument("--input-size", type=int, default=640)
     parser.add_argument("--conf-thresh", type=float, default=0.3)
     parser.add_argument("--iou-thresh", type=float, default=0.5)
-    parser.add_argument("--use-bottom-up", action="store_true", help="Enable PANet bottom-up path")
+    parser.add_argument(
+        "--use-bottom-up", action="store_true", help="Enable PANet bottom-up path"
+    )
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -560,10 +748,20 @@ def main():
     logger.info(f"Loading model from {args.checkpoint}")
     model = MusicDetector(num_classes=num_classes, use_bottom_up=args.use_bottom_up)
     load_checkpoint(model, args.checkpoint, device)
-  
-    window = ModelVisualizer(model, device, args.img_dir, args.hierarchy, args.config, args.input_size, args.conf_thresh, args.iou_thresh)
+
+    window = ModelVisualizer(
+        model,
+        device,
+        args.img_dir,
+        args.hierarchy,
+        args.config,
+        args.input_size,
+        args.conf_thresh,
+        args.iou_thresh,
+    )
     window.show()
     sys.exit(app.exec())
+
 
 if __name__ == "__main__":
     main()

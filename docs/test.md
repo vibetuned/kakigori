@@ -647,3 +647,11 @@ target_classes
 | mAP_Class/tupletNum          | 0.36883     |
 | mAP_Class/verse              | 0.581608    |
 | mAP_Class/voltaBracket       | 0.398545    |
+
+uv run render-dataset data/validation-small/injected --img_dir data/validation-small/imgs --svg_dir data/validation-small/svgs
+
+uv run extract-annotations --img_dir data/validation-small/imgs --svg_dir data/validation-small/svgs --out_dir data/validation-small/annotations
+
+uv run export-dataset data/validation-small/injected --mei-dir data/validation-small/mei --krn-dir data/validation-small/krn
+
+uv run generate-graphs data/validation-small/mei data/validation-small/annotations --out-dir data/validation-small/graphs
