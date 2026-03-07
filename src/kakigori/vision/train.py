@@ -272,7 +272,7 @@ def main():
         lr_scheduler_type="cosine",
         warmup_ratio=0.1,  # Use the first 10% of training steps to warm up the LR
         # NEW: The Speed & VRAM Cheat Code
-        fp16=True,  # Change to bf16=True if you have an RTX 3000/4000 series GPU
+        bf16=True,  # Change to bf16=True if you have an RTX 3000/4000 series GPU
         dataloader_pin_memory=True,  # Speeds up CPU-to-GPU data transfer
     )
 

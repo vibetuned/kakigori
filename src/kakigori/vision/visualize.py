@@ -93,9 +93,27 @@ class InferenceSignals(QObject):
 
 
 class ResizableGraphicsView(QGraphicsView):
+    """Custom view that supports zooming and panning open images."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self._zoom = 0
+
+    def wheelEvent(self, event):
+        if event.angleDelta().y() > 0:
+            factor = 1.15
+            self._zoom += 1
+        else:
+            factor = 1 / 1.15
+            self._zoom -= 1
+        self.scale(factor, factor)
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if self.scene() and not self.scene().sceneRect().isEmpty():
+        if self.scene() and not self.scene().sceneRect().isEmpty() and self._zoom == 0:
             self.fitInView(self.scene().sceneRect(), Qt.KeepAspectRatio)
 
 

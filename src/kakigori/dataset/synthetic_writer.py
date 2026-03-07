@@ -9,9 +9,9 @@ from pathlib import Path
 from fractions import Fraction
 from dataclasses import dataclass
 
-# Third party imports
 import numpy as np
 from tqdm import tqdm
+import copy
 
 try:
     # Third party imports
@@ -28,205 +28,85 @@ import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 
 logger = logging.getLogger(__name__)
-# Major scale intervals in semitones: W-W-H-W-W-W-H
-# But in our grid, columns are white keys (C, D, E, F, G, A, B)
-# and row 1 is for accidentals (black keys)
-#
-# For our 2x52 grid representation:
-# - Column index = white key index (0=C, 1=D, 2=E, 3=F, 4=G, 5=A, 6=B per octave)
-# - Row 0 = natural (white key), Row 1 = accidental (black key on that column)
-#
-# Major scales with their patterns:
-# Each tuple is (column_offset_from_root, is_black)
-# Root is always (0, 0) for white key roots
-
-MAJOR_SCALES = {
-    # C Major: C D E F G A B (all white)
-    "C": [(0, 0), (1, 0), (2, 0), (3, 0), (4, 0), (5, 0), (6, 0)],
-    # G Major: G A B C D E F# (F# is black on column 3 of next position)
-    "G": [(0, 0), (1, 0), (2, 0), (3, 0), (4, 0), (5, 0), (6, 1)],  # F# = col 6, black
-    # D Major: D E F# G A B C#
-    "D": [(0, 0), (1, 0), (2, 1), (3, 0), (4, 0), (5, 0), (6, 1)],  # F#, C#
-    # A Major: A B C# D E F# G#
-    "A": [(0, 0), (1, 0), (2, 1), (3, 0), (4, 0), (5, 1), (6, 1)],  # C#, F#, G#
-    # E Major: E F# G# A B C# D#
-    "E": [(0, 0), (1, 1), (2, 1), (3, 0), (4, 0), (5, 1), (6, 1)],  # F#, G#, C#, D#
-    # B Major: B C# D# E F# G# A#
-    "B": [(0, 0), (1, 1), (2, 1), (3, 0), (4, 1), (5, 1), (6, 1)],  # C#, D#, F#, G#, A#
-    # F Major: F G A Bb C D E (Bb is black on column 6 of prev octave position)
-    "F": [(0, 0), (1, 0), (2, 0), (3, 1), (4, 0), (5, 0), (6, 0)],  # Bb
-    # Bb Major: Bb C D Eb F G A
-    "Bb": [(0, 1), (1, 0), (2, 0), (3, 1), (4, 0), (5, 0), (6, 0)],  # Bb, Eb
-    # Eb Major: Eb F G Ab Bb C D
-    "Eb": [(0, 1), (1, 0), (2, 0), (3, 1), (4, 1), (5, 0), (6, 0)],  # Eb, Ab, Bb
-    # Ab Major: Ab Bb C Db Eb F G
-    "Ab": [(0, 1), (1, 1), (2, 0), (3, 1), (4, 1), (5, 0), (6, 0)],  # Ab, Bb, Db, Eb
-    # Db Major: Db Eb F Gb Ab Bb C
-    "Db": [
-        (0, 1),
-        (1, 1),
-        (2, 0),
-        (3, 1),
-        (4, 1),
-        (5, 1),
-        (6, 0),
-    ],  # Db, Eb, Gb, Ab, Bb
-    # Gb Major: Gb Ab Bb Cb Db Eb F
-    "Gb": [
-        (0, 1),
-        (1, 1),
-        (2, 1),
-        (3, 1),
-        (4, 1),
-        (5, 1),
-        (6, 0),
-    ],  # Gb, Ab, Bb, Db, Eb, Cb
-}
-
-# Root positions for each scale (which white key column is the root)
-# In our grid: 0=C, 1=D, 2=E, 3=F, 4=G, 5=A, 6=B (repeating every 7 columns)
-SCALE_ROOTS = {
-    "C": 0,
-    "D": 1,
-    "E": 2,
-    "F": 3,
-    "G": 4,
-    "A": 5,
-    "B": 6,
-    "Bb": 6,
-    "Eb": 2,
-    "Ab": 5,
-    "Db": 1,
-    "Gb": 4,
-}
-
 # Classical 2-octave fingerings for major scales
 # Fingers: 1=thumb, 2=index, 3=middle, 4=ring, 5=pinky
 # RH = Right Hand (ascending), LH = Left Hand (ascending)
-# These are the standard fingerings taught in classical piano
 SCALE_FINGERINGS = {
     # White key scales - standard pattern
-    "C": {
-        "RH": [1, 2, 3, 1, 2, 3, 4, 1, 2, 3, 1, 2, 3, 4, 5],
-        "LH": [5, 4, 3, 2, 1, 3, 2, 1, 4, 3, 2, 1, 3, 2, 1],
-    },
-    "G": {
-        "RH": [1, 2, 3, 1, 2, 3, 4, 1, 2, 3, 1, 2, 3, 4, 5],
-        "LH": [5, 4, 3, 2, 1, 3, 2, 1, 4, 3, 2, 1, 3, 2, 1],
-    },
-    "D": {
-        "RH": [1, 2, 3, 1, 2, 3, 4, 1, 2, 3, 1, 2, 3, 4, 5],
-        "LH": [5, 4, 3, 2, 1, 3, 2, 1, 4, 3, 2, 1, 3, 2, 1],
-    },
-    "A": {
-        "RH": [1, 2, 3, 1, 2, 3, 4, 1, 2, 3, 1, 2, 3, 4, 5],
-        "LH": [5, 4, 3, 2, 1, 3, 2, 1, 4, 3, 2, 1, 3, 2, 1],
-    },
-    "E": {
-        "RH": [1, 2, 3, 1, 2, 3, 4, 1, 2, 3, 1, 2, 3, 4, 5],
-        "LH": [5, 4, 3, 2, 1, 3, 2, 1, 4, 3, 2, 1, 3, 2, 1],
-    },
-    # B major - different LH pattern
-    "B": {
-        "RH": [1, 2, 3, 1, 2, 3, 4, 1, 2, 3, 1, 2, 3, 4, 5],
-        "LH": [4, 3, 2, 1, 4, 3, 2, 1, 3, 2, 1, 4, 3, 2, 1],
-    },
-    # F# / Gb - starts on black key
-    "Gb": {
-        "RH": [2, 3, 4, 1, 2, 3, 1, 2, 3, 4, 1, 2, 3, 1, 2],
-        "LH": [4, 3, 2, 1, 3, 2, 1, 4, 3, 2, 1, 3, 2, 1, 4],
-    },
-    # F major - thumb crosses to 4th
-    "F": {
-        "RH": [1, 2, 3, 4, 1, 2, 3, 1, 2, 3, 4, 1, 2, 3, 4],
-        "LH": [5, 4, 3, 2, 1, 3, 2, 1, 4, 3, 2, 1, 3, 2, 1],
-    },
-    # Bb major - starts with 2
-    "Bb": {
-        "RH": [2, 1, 2, 3, 1, 2, 3, 4, 1, 2, 3, 1, 2, 3, 4],
-        "LH": [3, 2, 1, 4, 3, 2, 1, 3, 2, 1, 4, 3, 2, 1, 3],
-    },
-    # Eb major - starts with 3
-    "Eb": {
-        "RH": [3, 1, 2, 3, 4, 1, 2, 3, 1, 2, 3, 4, 1, 2, 3],
-        "LH": [3, 2, 1, 4, 3, 2, 1, 3, 2, 1, 4, 3, 2, 1, 3],
-    },
-    # Ab major - starts with 3-4
-    "Ab": {
-        "RH": [3, 4, 1, 2, 3, 1, 2, 3, 4, 1, 2, 3, 1, 2, 3],
-        "LH": [3, 2, 1, 4, 3, 2, 1, 3, 2, 1, 4, 3, 2, 1, 3],
-    },
-    # Db major - starts with 2-3
-    "Db": {
-        "RH": [2, 3, 1, 2, 3, 4, 1, 2, 3, 1, 2, 3, 4, 1, 2],
-        "LH": [3, 2, 1, 4, 3, 2, 1, 3, 2, 1, 4, 3, 2, 1, 3],
-    },
+    "C": {"RH": [1, 2, 3, 1, 2, 3, 4, 1, 2, 3, 1, 2, 3, 4, 5], "LH": [5, 4, 3, 2, 1, 3, 2, 1, 4, 3, 2, 1, 3, 2, 1]},
+    "G": {"RH": [1, 2, 3, 1, 2, 3, 4, 1, 2, 3, 1, 2, 3, 4, 5], "LH": [5, 4, 3, 2, 1, 3, 2, 1, 4, 3, 2, 1, 3, 2, 1]},
+    "D": {"RH": [1, 2, 3, 1, 2, 3, 4, 1, 2, 3, 1, 2, 3, 4, 5], "LH": [5, 4, 3, 2, 1, 3, 2, 1, 4, 3, 2, 1, 3, 2, 1]},
+    "A": {"RH": [1, 2, 3, 1, 2, 3, 4, 1, 2, 3, 1, 2, 3, 4, 5], "LH": [5, 4, 3, 2, 1, 3, 2, 1, 4, 3, 2, 1, 3, 2, 1]},
+    "E": {"RH": [1, 2, 3, 1, 2, 3, 4, 1, 2, 3, 1, 2, 3, 4, 5], "LH": [5, 4, 3, 2, 1, 3, 2, 1, 4, 3, 2, 1, 3, 2, 1]},
+    "B": {"RH": [1, 2, 3, 1, 2, 3, 4, 1, 2, 3, 1, 2, 3, 4, 5], "LH": [4, 3, 2, 1, 4, 3, 2, 1, 3, 2, 1, 4, 3, 2, 1]},
+    "F-": {"RH": [2, 3, 4, 1, 2, 3, 1, 2, 3, 4, 1, 2, 3, 1, 2], "LH": [4, 3, 2, 1, 3, 2, 1, 4, 3, 2, 1, 3, 2, 1, 4]}, # Gb
+    "F": {"RH": [1, 2, 3, 4, 1, 2, 3, 1, 2, 3, 4, 1, 2, 3, 4], "LH": [5, 4, 3, 2, 1, 3, 2, 1, 4, 3, 2, 1, 3, 2, 1]},
+    "B-": {"RH": [2, 1, 2, 3, 1, 2, 3, 4, 1, 2, 3, 1, 2, 3, 4], "LH": [3, 2, 1, 4, 3, 2, 1, 3, 2, 1, 4, 3, 2, 1, 3]}, # Bb
+    "E-": {"RH": [3, 1, 2, 3, 4, 1, 2, 3, 1, 2, 3, 4, 1, 2, 3], "LH": [3, 2, 1, 4, 3, 2, 1, 3, 2, 1, 4, 3, 2, 1, 3]}, # Eb
+    "A-": {"RH": [3, 4, 1, 2, 3, 1, 2, 3, 4, 1, 2, 3, 1, 2, 3], "LH": [3, 2, 1, 4, 3, 2, 1, 3, 2, 1, 4, 3, 2, 1, 3]}, # Ab
+    "D-": {"RH": [2, 3, 1, 2, 3, 4, 1, 2, 3, 1, 2, 3, 4, 1, 2], "LH": [3, 2, 1, 4, 3, 2, 1, 3, 2, 1, 4, 3, 2, 1, 3]}, # Db
 }
 
-# =============================================================================
-# Circle of Fifths
-# =============================================================================
-
-# Circle of fifths with sharp (clockwise) and flat (counter-clockwise) neighbors
-# Also includes relative minor for each major key
-CIRCLE_OF_FIFTHS = {
-    "C": {"sharp": "G", "flat": "F", "relative_minor": "Am"},
-    "G": {"sharp": "D", "flat": "C", "relative_minor": "Em"},
-    "D": {"sharp": "A", "flat": "G", "relative_minor": "Bm"},
-    "A": {"sharp": "E", "flat": "D", "relative_minor": "F#m"},
-    "E": {"sharp": "B", "flat": "A", "relative_minor": "C#m"},
-    "B": {"sharp": "F#", "flat": "E", "relative_minor": "G#m"},
-    "F#": {"sharp": "C#", "flat": "B", "relative_minor": "D#m"},
-    "C#": {"sharp": "G#", "flat": "F#", "relative_minor": "A#m"},
-    "F": {"sharp": "C", "flat": "Bb", "relative_minor": "Dm"},
-    "Bb": {"sharp": "F", "flat": "Eb", "relative_minor": "Gm"},
-    "Eb": {"sharp": "Bb", "flat": "Ab", "relative_minor": "Cm"},
-    "Ab": {"sharp": "Eb", "flat": "Db", "relative_minor": "Fm"},
-    "Db": {"sharp": "Ab", "flat": "Gb", "relative_minor": "Bbm"},
-    "Gb": {"sharp": "Db", "flat": "Cb", "relative_minor": "Ebm"},
+# Classical 2-octave fingerings for harmonic minor scales
+HARMONIC_MINOR_FINGERINGS = {
+    "A":  {"RH": [1, 2, 3, 1, 2, 3, 4, 1, 2, 3, 1, 2, 3, 4, 5], "LH": [5, 4, 3, 2, 1, 3, 2, 1, 4, 3, 2, 1, 3, 2, 1]},
+    "E":  {"RH": [1, 2, 3, 1, 2, 3, 4, 1, 2, 3, 1, 2, 3, 4, 5], "LH": [5, 4, 3, 2, 1, 3, 2, 1, 4, 3, 2, 1, 3, 2, 1]},
+    "B":  {"RH": [1, 2, 3, 1, 2, 3, 4, 1, 2, 3, 1, 2, 3, 4, 5], "LH": [4, 3, 2, 1, 4, 3, 2, 1, 3, 2, 1, 4, 3, 2, 1]},
+    "D":  {"RH": [1, 2, 3, 1, 2, 3, 4, 1, 2, 3, 1, 2, 3, 4, 5], "LH": [5, 4, 3, 2, 1, 3, 2, 1, 4, 3, 2, 1, 3, 2, 1]},
+    "G":  {"RH": [1, 2, 3, 1, 2, 3, 4, 1, 2, 3, 1, 2, 3, 4, 5], "LH": [5, 4, 3, 2, 1, 3, 2, 1, 4, 3, 2, 1, 3, 2, 1]},
+    "C":  {"RH": [1, 2, 3, 1, 2, 3, 4, 1, 2, 3, 1, 2, 3, 4, 5], "LH": [5, 4, 3, 2, 1, 3, 2, 1, 4, 3, 2, 1, 3, 2, 1]},
+    "F":  {"RH": [1, 2, 3, 4, 1, 2, 3, 1, 2, 3, 4, 1, 2, 3, 4], "LH": [5, 4, 3, 2, 1, 3, 2, 1, 4, 3, 2, 1, 3, 2, 1]},
+    "F#": {"RH": [2, 3, 1, 2, 3, 4, 1, 2, 3, 1, 2, 3, 4, 1, 2], "LH": [4, 3, 2, 1, 3, 2, 1, 4, 3, 2, 1, 3, 2, 1, 4]},
+    "C#": {"RH": [3, 4, 1, 2, 3, 1, 2, 3, 4, 1, 2, 3, 1, 2, 3], "LH": [3, 2, 1, 4, 3, 2, 1, 3, 2, 1, 4, 3, 2, 1, 3]},
 }
 
-# Chromatic note to semitone offset from C
-NOTE_TO_SEMITONE = {
-    "C": 0,
-    "C#": 1,
-    "Db": 1,
-    "D": 2,
-    "D#": 3,
-    "Eb": 3,
-    "E": 4,
-    "Fb": 4,
-    "E#": 5,
-    "F": 5,
-    "F#": 6,
-    "Gb": 6,
-    "G": 7,
-    "G#": 8,
-    "Ab": 8,
-    "A": 9,
-    "A#": 10,
-    "Bb": 10,
-    "B": 11,
-    "Cb": 11,
-    "B#": 0,
-}
+class CircleOfFifths:
+    def __init__(self):
+        self.majors = ['C', 'G', 'D', 'A', 'E', 'B', 'Gb', 'Db', 'Ab', 'Eb', 'Bb', 'F']
+        self.minors = ['Am', 'Em', 'Bm', 'F#m', 'C#m', 'G#m', 'Ebm', 'Bbm', 'Fm', 'Cm', 'Gm', 'Dm']
+        self.diminisheds = ['C°', 'G°', 'D°', 'A°', 'E°', 'B°', 'Gb°', 'Db°', 'Ab°', 'Eb°', 'Bb°', 'F°']
+    def get_neighbors(self, chord):
+        """
+        Auto-detects the chord type, finds its parent major key, 
+        and returns the 6 diatonic neighbors.
+        """
+        # 1. Auto-detect chord and find its parent Major index
+        if chord in self.diminisheds:
+            dim_index = self.diminisheds.index(chord)
+            parent_major_index = (dim_index - 5) % 12
+        elif chord in self.minors:
+            parent_major_index = self.minors.index(chord)
+        elif chord in self.majors:
+            parent_major_index = self.majors.index(chord)
+        else:
+            raise ValueError(f"Chord {chord} not recognized.")
 
-# Semitone to (white_key_column_in_octave, is_black)
-# Column layout: C=0, D=1, E=2, F=3, G=4, A=5, B=6
-SEMITONE_TO_GRID = {
-    0: (0, 0),  # C
-    1: (0, 1),  # C#/Db
-    2: (1, 0),  # D
-    3: (1, 1),  # D#/Eb
-    4: (2, 0),  # E
-    5: (3, 0),  # F
-    6: (3, 1),  # F#/Gb
-    7: (4, 0),  # G
-    8: (4, 1),  # G#/Ab
-    9: (5, 0),  # A
-    10: (5, 1),  # A#/Bb
-    11: (6, 0),  # B
-}
+        # 2. Gather all 7 diatonic chords for that key cluster
+        left = (parent_major_index - 1) % 12
+        right = (parent_major_index + 1) % 12
+        dim_index = (parent_major_index + 5) % 12
+
+        all_diatonic_chords = {
+            'I': self.majors[parent_major_index],
+            'IV': self.majors[left],
+            'V': self.majors[right],
+            'vi': self.minors[parent_major_index],
+            'ii': self.minors[left],
+            'iii': self.minors[right],
+            'vii°': self.diminisheds[dim_index]
+        }
+
+        # 3. Filter out the current chord so we strictly return the 6 neighbors
+        neighbors = {role: name for role, name in all_diatonic_chords.items() if name != chord}
+        
+        return neighbors
+
+    def get_random_neighbor(self, chord):
+        neighbors_dict = self.get_neighbors(chord)
+        if not neighbors_dict:
+            raise ValueError(f"Chord {chord} not recognized.")
+            
+        return random.choice(list(neighbors_dict.values()))
 
 # =============================================================================
 # Chord Types and Intervals
@@ -271,7 +151,7 @@ DIATONIC_CHORDS_DEGREES = [
 ROMAN_NUMERALS = ["I", "ii", "iii", "IV", "V", "vi", "vii°"]
 
 # =============================================================================
-# Advanced Music Generation
+# Advanced Music Generation (Native Music21)
 # =============================================================================
 
 
@@ -284,6 +164,7 @@ class ArpeggioPattern(Enum):
 
 # User starting keys
 STARTING_KEYS = ["C", "G", "D", "F", "Bb", "A", "E", "Eb", "Ab"]
+MINOR_STARTING_KEYS = ["A", "E", "B", "D", "G", "C", "F", "F#", "C#"]
 TIME_SIGNATURES = [
     "1/4",
     "2/4",
@@ -300,9 +181,9 @@ TIME_SIGNATURES = [
 ]
 FAILING_ARTICULATIONS = [
     music21.articulations.Staccato,
-    music21.articulations.Tenuto,
     music21.articulations.Accent,
     music21.articulations.Staccatissimo,
+    music21.articulations.Tenuto,
     music21.articulations.StrongAccent,  # Marcato
 ]
 FAILING_ORNAMENTS = [
@@ -398,259 +279,559 @@ def choose_best_inversion(
     return best_inv, best_pitches
 
 
-class MusicGenerator:
-    """Generates a complete musical Part containing block chords or arpeggios."""
 
-    def __init__(
-        self,
-        key_str: str,
-        total_bars: int,
-        beats_per_bar: int,
-        is_bass: bool = False,
-        gen_type: str = "block",
-    ):
-        self.key_str = key_str
-        self.total_bars = total_bars
-        self.beats_per_bar = beats_per_bar
-        self.is_bass = is_bass
-        self.gen_type = gen_type  # 'block', 'arpeggio', 'mixed'
+def _get_fingering_key(key_obj: music21.key.Key, fingering_dict: dict = None) -> str:
+    """Map a music21 Key to a fingering dictionary key.
 
-        self.target_octave = 2 if is_bass else 4
-        self.diatonic = DIATONIC_CHORDS_DEGREES
+    Handles enharmonic lookup (e.g. Bb -> B-, F# -> enharmonic Gb -> F-).
+    Falls back to 'C' (or 'A' for minor dicts) if no match is found.
+    """
+    if fingering_dict is None:
+        fingering_dict = SCALE_FINGERINGS
+    tonic_name = key_obj.tonic.name
+    if tonic_name in fingering_dict:
+        return tonic_name
+    enharmonic = key_obj.tonic.getEnharmonic().name
+    if enharmonic in fingering_dict:
+        return enharmonic
+    # Fallback to first key in dict
+    return next(iter(fingering_dict))
 
-    def generate_part(self) -> music21.stream.Part:
-        part = music21.stream.Part()
 
-        # Decide initial and changing clefs strictly based on register
-        if self.is_bass:
-            current_clef = music21.clef.BassClef()
-            clef_pool = [
-                music21.clef.BassClef,
-                music21.clef.BassClef,
-                music21.clef.AltoClef,
-                music21.clef.TenorClef,
-            ]
+def _build_scale_pitches(key_obj: music21.key.Key, hand: str) -> List[music21.pitch.Pitch]:
+    """Build a 2-octave ascending + descending scale for the given hand.
+
+    RH (treble): starts at octave 4 (middle C region), goes up 2 octaves then back.
+    LH (bass):   starts at octave 2, goes up 2 octaves then back.
+    """
+    scale = music21.scale.MajorScale(key_obj.tonic)
+    start_octave = 4 if hand == "RH" else 2
+
+    # Get ascending pitches for 2 octaves (15 notes: degree 1 to 15)
+    ascending: List[music21.pitch.Pitch] = []
+    for i in range(1, 16):  # 15 scale degrees = 2 full octaves
+        p = scale.pitchFromDegree(i)
+        # Assign correct octave
+        octave_offset = (i - 1) // 7
+        degree_in_octave = ((i - 1) % 7) + 1
+        p.octave = start_octave + octave_offset
+        # Fix: pitchFromDegree may give a pitch in wrong octave relative to tonic
+        # Ensure monotonically ascending
+        if ascending and p.midi <= ascending[-1].midi:
+            p.octave += 1
+        ascending.append(p)
+
+    # Descending = reverse of ascending, skip the top note (already played)
+    descending = list(reversed(ascending[:-1]))
+
+    return ascending + descending
+
+
+def _build_harmonic_minor_pitches(key_obj: music21.key.Key, hand: str) -> List[music21.pitch.Pitch]:
+    """Build a 2-octave ascending + descending harmonic minor scale.
+
+    Uses music21.scale.HarmonicMinorScale (raised 7th degree).
+    """
+    scale = music21.scale.HarmonicMinorScale(key_obj.tonic)
+    start_octave = 4 if hand == "RH" else 2
+
+    ascending: List[music21.pitch.Pitch] = []
+    for i in range(1, 16):
+        p = scale.pitchFromDegree(i)
+        octave_offset = (i - 1) // 7
+        p.octave = start_octave + octave_offset
+        if ascending and p.midi <= ascending[-1].midi:
+            p.octave += 1
+        ascending.append(p)
+
+    descending = list(reversed(ascending[:-1]))
+    return ascending + descending
+
+
+def _build_melodic_minor_pitches(key_obj: music21.key.Key, hand: str) -> List[music21.pitch.Pitch]:
+    """Build a 2-octave melodic minor scale.
+
+    Ascending: raised 6th and 7th (MelodicMinorScale).
+    Descending: natural minor (MinorScale) — the classical convention.
+    """
+    asc_scale = music21.scale.MelodicMinorScale(key_obj.tonic)
+    desc_scale = music21.scale.MinorScale(key_obj.tonic)  # natural minor
+    start_octave = 4 if hand == "RH" else 2
+
+    # Ascending with raised 6+7
+    ascending: List[music21.pitch.Pitch] = []
+    for i in range(1, 16):
+        p = asc_scale.pitchFromDegree(i)
+        octave_offset = (i - 1) // 7
+        p.octave = start_octave + octave_offset
+        if ascending and p.midi <= ascending[-1].midi:
+            p.octave += 1
+        ascending.append(p)
+
+    # Descending with natural 6+7
+    desc_full: List[music21.pitch.Pitch] = []
+    for i in range(1, 16):
+        p = desc_scale.pitchFromDegree(i)
+        octave_offset = (i - 1) // 7
+        p.octave = start_octave + octave_offset
+        if desc_full and p.midi <= desc_full[-1].midi:
+            p.octave += 1
+        desc_full.append(p)
+
+    descending = list(reversed(desc_full[:-1]))
+    return ascending + descending
+
+
+def _build_chromatic_pitches(key_obj: music21.key.Key, hand: str) -> List[music21.pitch.Pitch]:
+    """Build a 2-octave ascending + descending chromatic scale.
+
+    25 notes ascending (24 semitones), then 24 notes descending.
+    """
+    start_octave = 4 if hand == "RH" else 2
+    start_pitch = music21.pitch.Pitch(key_obj.tonic.name)
+    start_pitch.octave = start_octave
+
+    ascending: List[music21.pitch.Pitch] = []
+    for i in range(25):  # 2 octaves = 24 semitones + start
+        p = start_pitch.transpose(i)
+        ascending.append(p)
+
+    descending = list(reversed(ascending[:-1]))
+    return ascending + descending
+
+
+def _get_fingerings_for_hand(fing_key: str, hand: str, fingering_dict: dict = None) -> List[int]:
+    """Return the full ascending + descending fingering pattern for a hand.
+
+    The dict stores 15 ascending fingers. Descending is the reverse
+    (skip the top note since it was already played ascending).
+    """
+    if fingering_dict is None:
+        fingering_dict = SCALE_FINGERINGS
+    asc = fingering_dict[fing_key][hand]
+    desc = list(reversed(asc[:-1]))
+    return asc + desc
+
+
+def _get_chromatic_fingerings(pitches: List[music21.pitch.Pitch], hand: str) -> List[int]:
+    """Compute chromatic scale fingerings based on pitch class.
+
+    Standard rule: thumb (1) on C and F (pitch classes 0 and 5),
+    finger 3 on all other notes.
+    """
+    return [1 if p.pitchClass in (0, 5) else 3 for p in pitches]
+
+
+def _choose_note_duration(bar_length: float) -> float:
+    """Pick a random note duration that fits within a single bar."""
+    candidates = [4.0, 2.0, 1.0, 0.5, 0.25]
+    weights = [0.10, 0.15, 0.35, 0.25, 0.15]
+    # Filter out durations that exceed the bar length
+    valid = [(d, w) for d, w in zip(candidates, weights) if d <= bar_length]
+    if not valid:
+        return bar_length  # fallback: one note fills the whole bar
+    durations, wts = zip(*valid)
+    return random.choices(durations, weights=wts, k=1)[0]
+
+
+def _inject_ornaments_on_note(note_obj: music21.note.Note, measure_idx: int):
+    """Randomly attach failing-class ornaments, articulations, and dynamics."""
+    # Ornaments (trill, mordent, turn) — keep rate moderate for scales
+    if random.random() < 0.06:
+        orn = random.choice(FAILING_ORNAMENTS)
+        note_obj.expressions.append(orn())
+
+    # Articulations (staccato, accent, etc.)
+    if random.random() < 0.12:
+        art = random.choice(FAILING_ARTICULATIONS)
+        note_obj.articulations.append(art())
+
+
+def _inject_dynamics(measure: music21.stream.Measure, offset: float):
+    """Inject a dynamic marking at the given offset."""
+    dyn_symbol = random.choice(FAILING_DYNAMICS)
+    dyn = music21.dynamics.Dynamic(dyn_symbol)
+    measure.insert(offset, dyn)
+
+
+def _maybe_add_tie(
+    prev_note: Optional[music21.note.Note],
+    curr_note: music21.note.Note,
+) -> bool:
+    """Randomly tie two adjacent notes of the same pitch. Returns True if tied."""
+    if prev_note is None:
+        return False
+    if prev_note.pitch.midi != curr_note.pitch.midi:
+        return False
+    if random.random() < 0.15:
+        prev_note.tie = music21.tie.Tie("start")
+        curr_note.tie = music21.tie.Tie("stop")
+        return True
+    return False
+
+
+def _build_measures_from_pitches(
+    pitches: List[music21.pitch.Pitch],
+    fingerings: List[int],
+    time_sig_str: str,
+    key_obj: music21.key.Key,
+    hand: str,
+) -> List[music21.stream.Measure]:
+    """Pack scale pitches into measures with fingering, ornaments, and dynamics."""
+    # Parse time signature to know beats per measure
+    ts = music21.meter.TimeSignature(time_sig_str)
+    bar_length = ts.barDuration.quarterLength
+
+    measures: List[music21.stream.Measure] = []
+    note_duration = _choose_note_duration(bar_length)
+
+    current_measure = music21.stream.Measure(number=1)
+    current_measure.timeSignature = copy.deepcopy(ts)
+    current_measure.keySignature = music21.key.KeySignature(key_obj.sharps)
+    # Add clef
+    if hand == "RH":
+        current_measure.clef = music21.clef.TrebleClef()
+    else:
+        current_measure.clef = music21.clef.BassClef()
+
+    current_offset = 0.0
+    measure_count = 1
+    prev_note = None
+    first_note_in_measure = True
+
+    for i, (pitch, finger) in enumerate(zip(pitches, fingerings)):
+        n = music21.note.Note(pitch, quarterLength=note_duration)
+        n.articulations.append(music21.articulations.Fingering(finger))
+
+        # Ornaments
+        _inject_ornaments_on_note(n, measure_count)
+
+        # Ties (at turning point of scale where same pitch repeats)
+        _maybe_add_tie(prev_note, n)
+
+        # Dynamics at start of some measures
+        if first_note_in_measure and random.random() < 0.20:
+            _inject_dynamics(current_measure, current_offset)
+            first_note_in_measure = False
+
+        # Check if note fits in current measure
+        if current_offset + note_duration > bar_length + 0.001:
+            # Finalize current measure, start new one
+            measures.append(current_measure)
+            measure_count += 1
+            current_measure = music21.stream.Measure(number=measure_count)
+            current_offset = 0.0
+            first_note_in_measure = True
+
+            if first_note_in_measure and random.random() < 0.20:
+                _inject_dynamics(current_measure, 0.0)
+                first_note_in_measure = False
+
+        current_measure.insert(current_offset, n)
+        current_offset += note_duration
+        prev_note = n
+
+    # Append the last measure (pad with rest if needed)
+    remaining = bar_length - current_offset
+    if remaining > 0.001:
+        rest = music21.note.Rest(quarterLength=remaining)
+        current_measure.insert(current_offset, rest)
+    measures.append(current_measure)
+
+    return measures
+
+
+def _add_slurs(part: music21.stream.Part, density: float = 0.15):
+    """Add slur spanners over random groups of adjacent notes."""
+    all_notes = [n for n in part.recurse().notes if not n.isRest]
+    if len(all_notes) < 4:
+        return
+
+    i = 0
+    while i < len(all_notes) - 2:
+        if random.random() < density:
+            span_len = random.randint(2, min(6, len(all_notes) - i))
+            slur = music21.spanner.Slur()
+            slur.addSpannedElements(all_notes[i], all_notes[i + span_len - 1])
+            part.insert(0, slur)
+            i += span_len  # skip past the slurred notes
         else:
-            current_clef = music21.clef.TrebleClef()
-            clef_pool = [
-                music21.clef.TrebleClef,
-                music21.clef.TrebleClef,
-                music21.clef.AltoClef,
-                music21.clef.Treble8vbClef,
-            ]
-
-        # Rules state chord every 2 beats
-        beat = 0
-        total_beats = self.total_bars * self.beats_per_bar
-        prev_pitches = []
-
-        m_idx = 1
-        m = music21.stream.Measure(number=m_idx)
-        m.append(current_clef)
-        m.append(music21.key.Key(self.key_str))
-        m.append(music21.meter.TimeSignature(f"{self.beats_per_bar}/4"))
-
-        current_bar_beats = 0
-
-        while beat < total_beats:
-            chord_duration = 2
-
-            # Select chord
-            # Rule 3: Mix progressions, bias to I, IV, V
-            deg_idx = random.choices(
-                range(7), weights=[0.25, 0.12, 0.10, 0.18, 0.20, 0.12, 0.03], k=1
-            )[0]
-
-            if beat == 0 or beat >= total_beats - 2:
-                deg_idx = 0  # Force I at start and end
-
-            degree, quality = self.diatonic[deg_idx]
-
-            # Rule 5: 7th on V
-            if deg_idx == 4 and random.random() < 0.5:
-                quality = "dom7"
-
-            # Rule 6: Sus4 resolution
-            if random.random() < 0.1 and quality == "major":
-                # Inject sus4 then resolve
-                sus_inv, sus_pitches = choose_best_inversion(
-                    self.key_str, prev_pitches, degree, "sus4", self.target_octave
-                )
-                self._add_to_measure(m, sus_pitches, 1.0, self.gen_type)
-                prev_pitches = sus_pitches
-                current_bar_beats += 1
-                beat += 1
-                chord_duration = 1
-
-            # Fetch voice led pitches
-            inv, next_pitches = choose_best_inversion(
-                self.key_str, prev_pitches, degree, quality, self.target_octave
-            )
-
-            # Add to measure
-            self._add_to_measure(m, next_pitches, float(chord_duration), self.gen_type)
-            prev_pitches = next_pitches
-
-            current_bar_beats += chord_duration
-            beat += chord_duration
-
-            # Measure boundary handling
-            while current_bar_beats >= self.beats_per_bar:
-                part.append(m)
-                m_idx += 1
-                m = music21.stream.Measure(number=m_idx)
-                current_bar_beats -= self.beats_per_bar
-
-                # Active clef changes based on register and random injection
-                if current_bar_beats == 0 and m_idx <= self.total_bars:
-                    if random.random() < 0.15:
-                        c_type = random.choice(clef_pool)
-                        if not isinstance(current_clef, c_type):
-                            current_clef = c_type()
-                            m.append(current_clef)
-                            # Adjust target octave to match the new clef naturally
-                            if c_type == music21.clef.TrebleClef:
-                                self.target_octave = 4
-                            elif c_type == music21.clef.BassClef:
-                                self.target_octave = 2
-                            elif c_type == music21.clef.AltoClef:
-                                self.target_octave = 3
-                            elif c_type == music21.clef.TenorClef:
-                                self.target_octave = 3
-                            elif c_type == music21.clef.Treble8vbClef:
-                                self.target_octave = 3
-
-        # Final append if anything remains
-        if len(m.notesAndRests) > 0:
-            part.append(m)
-
-        return part
-
-    def _add_to_measure(
-        self,
-        m: music21.stream.Measure,
-        pitches: List[music21.pitch.Pitch],
-        duration: float,
-        gen_type: str,
-    ):
-        actual_type = gen_type
-        if gen_type == "mixed":
-            actual_type = random.choice(["block", "arpeggio"])
-
-        if actual_type == "block":
-            c = music21.chord.Chord(pitches, quarterLength=duration)
-            if random.random() < 0.3:
-                c.expressions.append(music21.expressions.ArpeggioMark())
-            self._inject_failing_classes(c)
-            m.append(c)
-
-        elif actual_type == "arpeggio":
-            notes_per_beat = random.choice([2, 4])
-            note_len = 1.0 / notes_per_beat
-            num_notes = int(duration / note_len)
-
-            pattern = random.choice(list(ArpeggioPattern))
-            # Expand pitches across 2 octaves for broken/ascending patterns
-            expanded = pitches + [p.transpose(12) for p in pitches]
-            expanded = sorted(expanded)
-
-            seq = []
-            if pattern == ArpeggioPattern.ASCENDING:
-                seq = expanded[:num_notes]
-                while len(seq) < num_notes:
-                    seq.extend(expanded[: num_notes - len(seq)])
-            elif pattern == ArpeggioPattern.DESCENDING:
-                seq = list(reversed(expanded))[:num_notes]
-                while len(seq) < num_notes:
-                    seq.extend(list(reversed(expanded))[: num_notes - len(seq)])
-            elif pattern == ArpeggioPattern.BROKEN:
-                orders = [0, 2, 1, 3] if len(expanded) > 3 else [0, 1, 0, 1]
-                seq = [expanded[orders[i % len(orders)]] for i in range(num_notes)]
-            else:
-                orders = [0, 2, 1, 2] if len(pitches) >= 3 else [0, 1, 0, 1]
-                seq = [pitches[orders[i % len(orders)]] for i in range(num_notes)]
-
-            for p in seq[:num_notes]:
-                n = music21.note.Note(p, quarterLength=note_len)
-                self._inject_failing_classes(n)
-                m.append(n)
-
-    def _inject_failing_classes(self, obj):
-        if random.random() < 0.15:
-            obj.articulations.append(random.choice(FAILING_ARTICULATIONS)())
-        if random.random() < 0.10:
-            obj.expressions.append(random.choice(FAILING_ORNAMENTS)())
-        if random.random() < 0.05:
-            obj.articulations.append(
-                music21.articulations.Fingering(random.randint(1, 5))
-            )
+            i += 1
 
 
-def generate_score(min_measures, max_measures, min_parts, max_parts):
+# =============================================================================
+# Chord Progression Generator (Circle of Fifths)
+# =============================================================================
+
+COF = CircleOfFifths()
+
+
+def _chord_name_to_root_and_quality(chord_name: str) -> Tuple[str, str]:
+    """Parse a CircleOfFifths chord name into (root, quality).
+
+    Examples: 'C' -> ('C', 'major'), 'Am' -> ('A', 'minor'),
+              'G°' -> ('G', 'dim'), 'F#m' -> ('F#', 'minor')
+    """
+    if chord_name.endswith('°'):
+        return chord_name[:-1], 'dim'
+    elif chord_name.endswith('m'):
+        return chord_name[:-1], 'minor'
+    else:
+        return chord_name, 'major'
+
+
+def _build_chord_voicing(
+    root_name: str, quality: str, octave: int
+) -> music21.chord.Chord:
+    """Build a music21 Chord from root name + quality at given octave."""
+    intervals = CHORD_INTERVALS.get(quality, [0, 4, 7])  # fallback to major triad
+    root_pitch = music21.pitch.Pitch(root_name)
+    root_pitch.octave = octave
+
+    pitches = [root_pitch.transpose(iv) for iv in intervals]
+    return music21.chord.Chord(pitches)
+
+
+def _chord_fingering(chord_obj: music21.chord.Chord) -> List[int]:
+    """Assign fingering to a chord based on root pitch class.
+
+    Black-key root (pitch class in {1,3,6,8,10}) -> [2,3,5]
+    White-key root -> random choice of [1,3,5] or [1,2,4]
+    For 4-note chords, extend with finger 5 or 4.
+    """
+    root_pc = chord_obj.pitches[0].pitchClass
+    n_notes = len(chord_obj.pitches)
+
+    if root_pc in (1, 3, 6, 8, 10):  # black key
+        base = [2, 3, 5]
+    else:
+        base = random.choice([[1, 3, 5], [1, 2, 4]])
+
+    # Extend for 4+ note chords
+    while len(base) < n_notes:
+        base.append(min(base[-1] + 1, 5))
+    return base[:n_notes]
+
+
+def _build_chord_progression(key_str: str, num_chords: int) -> List[str]:
+    """Generate a chord progression walking the circle of fifths.
+
+    Starts from the given major key's I chord and navigates through
+    diatonic neighbors, occasionally repeating chords for ties.
+    """
+    current = key_str  # start on the I chord (major)
+    progression: List[str] = [current]
+
+    for _ in range(num_chords - 1):
+        # Sometimes repeat the current chord (for ties)
+        if random.random() < 0.20:
+            progression.append(current)
+        else:
+            try:
+                current = COF.get_random_neighbor(current)
+            except ValueError:
+                current = key_str  # fallback to tonic
+            progression.append(current)
+
+    return progression
+
+
+def _build_measures_from_chords(
+    progression: List[str],
+    time_sig_str: str,
+    key_obj: music21.key.Key,
+    hand: str,
+) -> List[music21.stream.Measure]:
+    """Pack a chord progression into measures with fingering, arpeggios, and ties."""
+    ts = music21.meter.TimeSignature(time_sig_str)
+    bar_length = ts.barDuration.quarterLength
+    chord_duration = _choose_note_duration(bar_length)
+    octave = 4 if hand == "RH" else 3
+
+    measures: List[music21.stream.Measure] = []
+    current_measure = music21.stream.Measure(number=1)
+    current_measure.timeSignature = copy.deepcopy(ts)
+    current_measure.keySignature = music21.key.KeySignature(key_obj.sharps)
+    current_measure.clef = (
+        music21.clef.TrebleClef() if hand == "RH" else music21.clef.BassClef()
+    )
+
+    current_offset = 0.0
+    measure_count = 1
+    prev_chord = None
+    first_in_measure = True
+
+    for chord_name in progression:
+        root, quality = _chord_name_to_root_and_quality(chord_name)
+        c = _build_chord_voicing(root, quality, octave)
+        c.quarterLength = chord_duration
+
+        # Fingering on each note of the chord
+        fingers = _chord_fingering(c)
+        for pitch_obj, finger in zip(c.pitches, fingers):
+            c.articulations.append(music21.articulations.Fingering(finger))
+
+        # Arpeggio mark (~25%)
+        if random.random() < 0.25:
+            c.expressions.append(music21.expressions.ArpeggioMark())
+
+        # Ornaments / articulations on the chord
+        if random.random() < 0.08:
+            art = random.choice(FAILING_ARTICULATIONS)
+            c.articulations.append(art())
+
+        # New measure if needed — BEFORE tie logic to prevent cross-barline ties
+        if current_offset + chord_duration > bar_length + 0.001:
+            measures.append(current_measure)
+            measure_count += 1
+            current_measure = music21.stream.Measure(number=measure_count)
+            current_offset = 0.0
+            first_in_measure = True
+            prev_chord = None  # prevent ties across barlines
+            if first_in_measure and random.random() < 0.20:
+                _inject_dynamics(current_measure, 0.0)
+                first_in_measure = False
+
+        # Tie some repeated chords (~30%) — only within same measure
+        if prev_chord is not None and chord_name == getattr(prev_chord, '_cof_name', None):
+            if random.random() < 0.30:
+                prev_chord.tie = music21.tie.Tie('start')
+                c.tie = music21.tie.Tie('stop')
+
+        # Dynamics
+        if first_in_measure and random.random() < 0.20:
+            _inject_dynamics(current_measure, current_offset)
+            first_in_measure = False
+
+        current_measure.insert(current_offset, c)
+        current_offset += chord_duration
+        c._cof_name = chord_name  # tag for tie detection
+        prev_chord = c
+
+    # Pad last measure
+    remaining = bar_length - current_offset
+    if remaining > 0.001:
+        current_measure.insert(current_offset, music21.note.Rest(quarterLength=remaining))
+    measures.append(current_measure)
+
+    return measures
+
+
+def _equalize_measures(
+    rh_measures: List[music21.stream.Measure],
+    lh_measures: List[music21.stream.Measure],
+) -> Tuple[List[music21.stream.Measure], List[music21.stream.Measure]]:
+    """Repeat each hand's measures so both have the same total length.
+
+    Uses LCM: if RH has 3 measures and LH has 2, RH is repeated 2×
+    (6 total) and LH is repeated 3× (6 total).
+    """
+    import math
+
+    n_rh, n_lh = len(rh_measures), len(lh_measures)
+    if n_rh == n_lh:
+        return rh_measures, lh_measures
+
+    target = math.lcm(n_rh, n_lh)
+    # Cap to avoid unreasonably long scores from coprime counts
+    MAX_MEASURES = 64
+    if target > MAX_MEASURES:
+        target = max(n_rh, n_lh)
+
+    rh_reps = max(1, target // n_rh)
+    lh_reps = max(1, target // n_lh)
+
+    def _repeat(measures: List[music21.stream.Measure], target_len: int):
+        result = list(measures)
+        while len(result) < target_len:
+            for m in measures:
+                if len(result) >= target_len:
+                    break
+                new_m = copy.deepcopy(m)
+                new_m.number = len(result) + 1
+                result.append(new_m)
+        return result
+
+    final_target = max(n_rh * rh_reps, n_lh * lh_reps)
+    return _repeat(rh_measures, final_target), _repeat(lh_measures, final_target)
+
+
+def generate_score(min_measures, max_measures):
+    """Generate a piano score with scale exercises or chord progressions.
+
+    Randomly picks one of: major, harmonic_minor, melodic_minor, chromatic,
+    or chord_progression. Creates a 2-staff piano layout (Treble RH + Bass LH).
+    Both parts are equalized to the same number of measures via LCM repetition.
+    """
     score = music21.stream.Score()
 
-    num_parts = random.randint(min_parts, max_parts)
-    num_measures = random.randint(min_measures, max_measures)
+    scale_type = random.choice([
+        "major", "harmonic_minor", "melodic_minor", "chromatic",
+        "chord_progression",
+    ])
 
-    key_str = random.choice(STARTING_KEYS)
-    # Use standard beats per bar for generator logic, but display complex signatures
-    # We will pick a signature where numerator is beats_per_bar so the math maps easily
-    beats_per_bar = random.choice([2, 3, 4, 6])
+    # Pick key based on scale type
+    if scale_type in ("harmonic_minor", "melodic_minor"):
+        key_str = random.choice(MINOR_STARTING_KEYS)
+        key_obj = music21.key.Key(key_str, "minor")
+    else:
+        key_str = random.choice(STARTING_KEYS)
+        key_obj = music21.key.Key(key_str)
 
-    # Generate parts using the advanced generator
-    for p_idx in range(num_parts):
-        # Top parts are usually Treble/Alto, bottom are Bass
-        is_bass_register = p_idx >= (num_parts / 2.0)
+    time_sig_str = random.choice(TIME_SIGNATURES)
 
-        # Mix styles within parts
-        gen_type = random.choice(["block", "arpeggio", "mixed"])
+    # Build measures for both hands first
+    hands_measures: Dict[str, List[music21.stream.Measure]] = {}
 
-        gen = MusicGenerator(
-            key_str=key_str,
-            total_bars=num_measures,
-            beats_per_bar=beats_per_bar,
-            is_bass=is_bass_register,
-            gen_type=gen_type,
-        )
-        part = gen.generate_part()
+    if scale_type == "chord_progression":
+        num_chords = random.randint(8, 16)
+        progression = _build_chord_progression(key_str, num_chords)
+        for hand in ["RH", "LH"]:
+            hands_measures[hand] = _build_measures_from_chords(
+                progression, time_sig_str, key_obj, hand
+            )
+    else:
+        for hand in ["RH", "LH"]:
+            if scale_type == "major":
+                pitches = _build_scale_pitches(key_obj, hand)
+                fing_key = _get_fingering_key(key_obj)
+                fingerings = _get_fingerings_for_hand(fing_key, hand)
+            elif scale_type == "harmonic_minor":
+                pitches = _build_harmonic_minor_pitches(key_obj, hand)
+                fing_key = _get_fingering_key(key_obj, HARMONIC_MINOR_FINGERINGS)
+                fingerings = _get_fingerings_for_hand(fing_key, hand, HARMONIC_MINOR_FINGERINGS)
+            elif scale_type == "melodic_minor":
+                pitches = _build_melodic_minor_pitches(key_obj, hand)
+                fing_key = _get_fingering_key(key_obj, HARMONIC_MINOR_FINGERINGS)
+                fingerings = _get_fingerings_for_hand(fing_key, hand, HARMONIC_MINOR_FINGERINGS)
+            else:  # chromatic
+                pitches = _build_chromatic_pitches(key_obj, hand)
+                fingerings = _get_chromatic_fingerings(pitches, hand)
 
-        # Override the time signature randomly with visually complex ones for the model
-        valid_ts = [
-            t
-            for t in TIME_SIGNATURES
-            if str(beats_per_bar) in t.split("/")[0]
-            or (beats_per_bar == 4 and t in ["C", "cut"])
-        ]
-        if not valid_ts:
-            valid_ts = TIME_SIGNATURES
+            hands_measures[hand] = _build_measures_from_pitches(
+                pitches, fingerings, time_sig_str, key_obj, hand
+            )
 
-        display_ts = music21.meter.TimeSignature(random.choice(valid_ts))
-        for m in part.getElementsByClass("Measure"):
-            # Swap out the TS
-            tss = m.getElementsByClass("TimeSignature")
-            if tss:
-                m.replace(tss[0], display_ts)
+    # Equalize lengths by repeating shorter part
+    hands_measures["RH"], hands_measures["LH"] = _equalize_measures(
+        hands_measures["RH"], hands_measures["LH"]
+    )
 
-            # Inject dynamics natively on measure boundaries
-            if random.random() < 0.15:
-                dyn = music21.dynamics.Dynamic(random.choice(FAILING_DYNAMICS))
-                m.insert(0, dyn)
+    # Assemble parts
+    for hand in ["RH", "LH"]:
+        part = music21.stream.Part()
+        inst = music21.instrument.Piano()
+        part.insert(0, inst)
 
-        # Inject Spanners (8va / Slurs)
-        notes_and_chords = list(part.recurse().notes)
-        if len(notes_and_chords) > 5 and random.random() < 0.3:
-            s_idx = random.randint(0, len(notes_and_chords) - 4)
-            e_idx = random.randint(s_idx + 2, len(notes_and_chords) - 1)
-            ottava = music21.spanner.Ottava(type=random.choice(["8va", "8vb"]))
-            ottava.addSpannedElements(notes_and_chords[s_idx], notes_and_chords[e_idx])
-            part.insert(0, ottava)
+        for m in hands_measures[hand]:
+            part.append(m)
 
-        if len(notes_and_chords) > 3 and random.random() < 0.4:
-            s_idx = random.randint(0, len(notes_and_chords) - 3)
-            e_idx = random.randint(s_idx + 1, len(notes_and_chords) - 1)
-            slur = music21.spanner.Slur()
-            slur.addSpannedElements(notes_and_chords[s_idx], notes_and_chords[e_idx])
-            part.insert(0, slur)
+        _add_slurs(part)
+
+        try:
+            part = part.makeBeams(inPlace=False)
+        except Exception:
+            pass
 
         score.insert(0, part)
 
@@ -658,14 +839,56 @@ def generate_score(min_measures, max_measures, min_parts, max_parts):
 
 
 def process_file(args_tuple) -> bool:
-    file_idx, output_dir, min_m, max_m, min_p, max_p = args_tuple
+    file_idx, output_dir, min_m, max_m = args_tuple
     try:
         out_path = output_dir / f"synthetic_score_{file_idx:06d}.mxl"
         if out_path.exists():
             return True
+        
+        score = generate_score(min_m, max_m)
+        # Collect intentional tie pairs BEFORE makeNotation mangles them.
+        tie_pairs: list = []  # [(start_id, stop_id), ...]
+        all_elements = list(score.recurse())
+        for i, el in enumerate(all_elements):
+            if hasattr(el, 'tie') and el.tie is not None and el.tie.type == 'start':
+                # Find the matching 'stop' after it
+                for j in range(i + 1, len(all_elements)):
+                    el2 = all_elements[j]
+                    if hasattr(el2, 'tie') and el2.tie is not None and el2.tie.type == 'stop':
+                        tie_pairs.append((id(el), id(el2)))
+                        break
 
-        score = generate_score(min_m, max_m, min_p, max_p)
-        score.write("musicxml", fp=out_path)
+        # 1. Run makeNotation to handle complex durations & beaming.
+        score.makeNotation(inPlace=True)
+        # 2. Split any remaining complex durations at the measure level.
+        for measure in score.recurse().getElementsByClass('Measure'):
+            measure.splitAtDurations()
+        # 3. Strip ALL ties unconditionally — including notes inside chords.
+        for el in score.recurse():
+            if hasattr(el, 'tie') and el.tie is not None:
+                el.tie = None
+            # Also clear ties on individual notes inside Chord objects
+            if isinstance(el, music21.chord.Chord):
+                for n in el.notes:
+                    if n.tie is not None:
+                        n.tie = None
+        # 4. Re-apply only our intentional tie pairs.
+        id_to_el = {id(el): el for el in score.recurse()}
+        for start_id, stop_id in tie_pairs:
+            if start_id in id_to_el and stop_id in id_to_el:
+                start_el = id_to_el[start_id]
+                stop_el = id_to_el[stop_id]
+                start_el.tie = music21.tie.Tie('start')
+                stop_el.tie = music21.tie.Tie('stop')
+                # Also set on inner notes for Chord objects
+                if isinstance(start_el, music21.chord.Chord):
+                    for n in start_el.notes:
+                        n.tie = music21.tie.Tie('start')
+                if isinstance(stop_el, music21.chord.Chord):
+                    for n in stop_el.notes:
+                        n.tie = music21.tie.Tie('stop')
+        # 5. Write without a second makeNotation pass.
+        score.write('musicxml', fp=out_path, makeNotation=False)
         return True
     except Exception as e:
         logger.error(f"Failed to generate score {file_idx}: {e}", exc_info=True)
@@ -677,46 +900,22 @@ def main():
         level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
     )
 
-    parser = argparse.ArgumentParser(
-        description="Generate synthetic dataset prioritizing failing classes."
-    )
-    parser.add_argument(
-        "output_dir", type=str, help="Output directory for generated MXL files"
-    )
+    parser = argparse.ArgumentParser(description="Generate synthetic dataset prioritizing failing classes.")
+    parser.add_argument("output_dir", type=str, help="Output directory for generated MXL files")
     parser.add_argument("num_files", type=int, help="Number of files to generate")
-    parser.add_argument(
-        "--min_measures", type=int, default=12, help="Min measures per file"
-    )
-    parser.add_argument(
-        "--max_measures", type=int, default=32, help="Max measures per file"
-    )
-    parser.add_argument(
-        "--min_parts", type=int, default=2, help="Min parts (instruments) per file"
-    )
-    parser.add_argument(
-        "--max_parts", type=int, default=3, help="Max parts (instruments) per file"
-    )
-
+    parser.add_argument("--min_measures", type=int, default=12, help="Min measures per file")
+    parser.add_argument("--max_measures", type=int, default=32, help="Max measures per file")
+    
     args = parser.parse_args()
     output_path = Path(args.output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-
+    
     logger.info(f"Generating {args.num_files} synthetic files in {output_path}...")
-
+    
     success_count = 0
     error_count = 0
-
-    tasks = [
-        (
-            i,
-            output_path,
-            args.min_measures,
-            args.max_measures,
-            args.min_parts,
-            args.max_parts,
-        )
-        for i in range(args.num_files)
-    ]
+    
+    tasks = [(i, output_path, args.min_measures, args.max_measures) for i in range(args.num_files)]
 
     with multiprocessing.Pool(
         processes=max(1, multiprocessing.cpu_count() - 1), maxtasksperchild=10

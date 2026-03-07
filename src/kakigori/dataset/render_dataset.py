@@ -168,7 +168,7 @@ def main():
 
     # We use ThreadPoolExecutor to manage the lightweight threads,
     # while the threads handle the heavy, unstable multiprocessing.
-    with ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
+    with ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()-2) as executor:
         futures = [executor.submit(_render_isolated, task) for task in tasks]
 
         with tqdm(total=len(mxl_files), desc="Rendering MXL", unit="file") as pbar:

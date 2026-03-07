@@ -493,15 +493,26 @@ def extract_from_svg(
                 pass
 
         if min_x != float("inf") and min_y != float("inf"):
-            # Convert to final image coordinates
+            # 1. Calculate the scaled coordinates
+            x1 = min_x * scale_x
+            y1 = min_y * scale_y
+            x2 = max_x * scale_x
+            y2 = max_y * scale_y
+
+            # 2. Clip strictly to the image boundaries
+            x1 = max(0.0, min(float(img_width), x1))
+            y1 = max(0.0, min(float(img_height), y1))
+            x2 = max(0.0, min(float(img_width), x2))
+            y2 = max(0.0, min(float(img_height), y2))
+
+            # 3. Filter out zero-area or invisible slivers
+            if (x2 - x1) < 0.5 or (y2 - y1) < 0.5:
+                continue
+
+            # Append clean coordinates
             ann = {
                 "class": label,
-                "bbox": [
-                    min_x * scale_x,
-                    min_y * scale_y,
-                    max_x * scale_x,
-                    max_y * scale_y,
-                ],
+                "bbox": [x1, y1, x2, y2],
             }
             if "id" in g.attrib:
                 ann["id"] = g.attrib["id"]
@@ -542,14 +553,25 @@ def extract_from_svg(
             matrix, b_xmin, b_xmax, b_ymin, b_ymax
         )
 
+        # 1. Scale coordinates
+        x1 = use_xmin * scale_x
+        y1 = use_ymin * scale_y
+        x2 = use_xmax * scale_x
+        y2 = use_ymax * scale_y
+
+        # 2. Clip to boundaries
+        x1 = max(0.0, min(float(img_width), x1))
+        y1 = max(0.0, min(float(img_height), y1))
+        x2 = max(0.0, min(float(img_width), x2))
+        y2 = max(0.0, min(float(img_height), y2))
+
+        # 3. Filter out invalid boxes
+        if (x2 - x1) < 0.5 or (y2 - y1) < 0.5:
+            continue
+
         ann = {
             "class": specific_label,
-            "bbox": [
-                use_xmin * scale_x,
-                use_ymin * scale_y,
-                use_xmax * scale_x,
-                use_ymax * scale_y,
-            ],
+            "bbox": [x1, y1, x2, y2],
         }
 
         # Determine ID from parent

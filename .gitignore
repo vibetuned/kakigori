@@ -11,7 +11,9 @@ wheels/
 
 /data/
 /checkpoints/
+/checkpoints_gnn/
 /runs/
+/runs_gnn/
 .rsyncignore
 /inference_out/
 /docs/_book/

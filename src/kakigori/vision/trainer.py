@@ -191,8 +191,9 @@ class OMRTrainer(Trainer):
                 pred_cy = (pred_pos[:, 1].sigmoid() + r_idx) / fh
 
                 # THE FIX: Apply exponential to guarantee strictly positive width/height
-                pred_w = torch.exp(pred_pos[:, 2])
-                pred_h = torch.exp(pred_pos[:, 3])
+                # Clamp to prevent overflow with fp16
+                pred_w = torch.exp(pred_pos[:, 2].clamp(max=10.0))
+                pred_h = torch.exp(pred_pos[:, 3].clamp(max=10.0))
 
                 tgt_cx = (tgt_pos[:, 0] + c_idx) / fw
                 tgt_cy = (tgt_pos[:, 1] + r_idx) / fh

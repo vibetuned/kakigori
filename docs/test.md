@@ -579,7 +579,7 @@ Remove the generic classes from
 target_classes
 : clef, accid, keyAccid, notehead, flag, rest, meterSig, barLine, dynam, artic. Add the new specific classes: clefG, clefF, clefC, noteheadWhole, noteheadHalf, noteheadBlack, accidentalFlat, accidentalNatural, accidentalSharp, accidentalDoubleSharp, accidentalDoubleFlat, flag8thUp, flag8thDown, flag16thUp, flag16thDown, restQuarter, rest8th, timeSig0..timeSig9, timeSigCommon, timeSigCutCommon, barlineSingle, barlineDouble, barlineFinal, barlineDashed, dynamicPiano, dynamicMezzo, dynamicForte, dynamicSforzando, dynamicZ, articStaccatoAbove, articTenutoAbove, articAccentAbove, articStaccatissimoAbove, articMarcatoAbove. Add dots.
 
-| Metric                       |     run_020 |
+| Metric                       |     run_001 |
 |:-----------------------------|------------:|
 | mAP/IoU_0.50                 | 0.511778    |
 | mAP/IoU_0.50_0.95            | 0.419181    |

@@ -137,3 +137,106 @@ class FullPageOMRPipeline:
             full_page_kern.append(system_kern_string)
 
         return "\n".join(full_page_kern)
+# Assuming 'fused_features' is the list [P3, P4, P5] from your PANetNeck
+#features_dict = {str(i): feat for i, feat in enumerate(fused_features)}
+
+# Now pass it to the new extractor
+#node_visual_features = visual_extractor(features_dict, normalized_boxes, (640, 640))
+
+# Standard library imports
+import json
+from pathlib import Path
+
+# Third party imports
+import torch
+import torchvision.transforms.functional as TF
+from PIL import Image
+from torch_geometric.data import Data
+
+# Local folder imports
+#from .model import GraphVisualExtractor, ScoreGraphReconstructor
+from .heuristics import generate_axis_aware_edges, generate_text_candidate_edges
+from .serializer import HumdrumSerializer
+
+
+class OMRGraphInferencer:
+    def __init__(self, gnn_checkpoint, roi_extractor_checkpoint, class_list, device="cpu"):
+        self.device = torch.device(device)
+        self.class_to_idx = {c: i for i, c in enumerate(class_list)}
+        
+        # 1. Load the RoI Extractor (The bridge from pixels to node features)
+        self.roi_extractor = GraphVisualExtractor().to(self.device)
+        self.roi_extractor.load_state_dict(torch.load(roi_extractor_checkpoint, map_location=self.device))
+        self.roi_extractor.eval()
+        
+        # 2. Load the GATv2 Edge Classifier
+        # Node input dim = RoI features (256) + BBox coords (4) + Class Embedding (e.g., 32)
+        node_in_dim = 256 + 4 + 32 
+        self.gnn = ScoreGraphReconstructor(node_in_dim=node_in_dim).to(self.device)
+        self.gnn.load_state_dict(torch.load(gnn_checkpoint, map_location=self.device))
+        self.gnn.eval()
+        
+        # 3. Class Embedding lookup (translates class ID into a trainable vector)
+        self.class_embedding = torch.nn.Embedding(len(class_list), 32).to(self.device)
+
+    def _build_pyg_data(self, image_tensor, annotations):
+        """Converts raw JSON annotations and the image into a PyTorch Geometric graph."""
+        nodes_meta = []
+        boxes = []
+        labels = []
+        
+        for i, ann in enumerate(annotations):
+            boxes.append(ann["bbox"]) # Assuming absolute [x1, y1, x2, y2] relative to the system crop
+            labels.append(self.class_to_idx[ann["class"]])
+            nodes_meta.append({"id": i, "class": ann["class"], "bbox": ann["bbox"]})
+            
+        boxes_tensor = torch.tensor(boxes, dtype=torch.float32, device=self.device)
+        labels_tensor = torch.tensor(labels, dtype=torch.long, device=self.device)
+        
+        # --- A. Node Features (x) ---
+        with torch.no_grad():
+            # 1. Extract visual features from the raw image using the bounding boxes
+            # We pass a dummy feature map here assuming RoI extractor handles a raw image directly for inference
+            # (Or you pass the MobileNet backbone here if doing end-to-end)
+            roi_features = self.roi_extractor(image_tensor.unsqueeze(0), [boxes_tensor])
+            
+            # 2. Get class embeddings
+            class_embeds = self.class_embedding(labels_tensor)
+            
+            # 3. Concatenate to create the final node feature vector 'x'
+            x = torch.cat([roi_features, boxes_tensor, class_embeds], dim=1)
+            
+        # --- B. Candidate Edges (edge_index) ---
+        # Run the X/Y axis sorting and the Vertical Raycasting for text
+        structural_edges = generate_axis_aware_edges(boxes_tensor, labels_tensor, self.class_to_idx)
+        text_edges = generate_text_candidate_edges(boxes_tensor, labels_tensor, self.class_to_idx)
+        
+        if text_edges.numel() > 0:
+            edge_index = torch.cat([structural_edges, text_edges], dim=1)
+        else:
+            edge_index = structural_edges
+            
+        return Data(x=x, edge_index=edge_index), nodes_meta
+
+    @torch.inference_mode()
+    def process_system(self, image_path, json_path):
+        """Runs the GNN on a single system and outputs the **kern string."""
+        # 1. Load Data
+        image = Image.open(image_path).convert("RGB")
+        image_tensor = TF.to_tensor(image).to(self.device)
+        
+        with open(json_path) as f:
+            data = json.load(f)
+        
+        # 2. Build the Graph
+        pyg_data, nodes_meta = self._build_pyg_data(image_tensor, data["annotations"])
+        
+        # 3. Predict Edges
+        edge_logits = self.gnn(pyg_data.x, pyg_data.edge_index)
+        edge_predictions = torch.argmax(edge_logits, dim=1) # 0, 1, 2, 3, or 4
+        
+        # 4. Serialize to Humdrum
+        serializer = HumdrumSerializer(nodes_meta, pyg_data.edge_index, edge_predictions)
+        kern_matrix = serializer.generate_kern_matrix()
+        
+        return kern_matrix

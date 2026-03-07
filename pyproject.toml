@@ -31,6 +31,8 @@ dependencies = [
     "plotly>=6.5.2",
     "nbformat>=5.10.4",
     "music21>=9.1.0",
+    "scikit-learn>=1.8.0",
+    "torch-geometric>=2.7.0"
 ]
 
 [dependency-groups]
@@ -74,6 +76,7 @@ first-party = "First party imports"
 local-folder = "Local folder imports"
 
 
+
 [project.scripts]
 render-dataset = "kakigori.dataset.render_dataset:main"
 export-dataset = "kakigori.dataset.export_dataset:main"
@@ -85,9 +88,11 @@ extract-classes = "kakigori.dataset.extract_classes:main"
 visualize-dataset = "kakigori.dataset.visualize_dataset:main"
 synthetic-generator = "kakigori.dataset.synthetic_generator:main"
 synthetic-writer = "kakigori.dataset.synthetic_writer:main"
+synthetic-arranger = "kakigori.dataset.synthetic_arranger:main"
 filter-mxl = "kakigori.dataset.filter_mxl:main"
 train-model = "kakigori.vision.train:main"
 eval-model = "kakigori.vision.eval:main"
 infer-model = "kakigori.vision.infer:main"
 visualize-model = "kakigori.vision.visualize:main"
 calculate-areas = "kakigori.vision.calculate_areas:main"
+train-gnn = "kakigori.graph.train:main"

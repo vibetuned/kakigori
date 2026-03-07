@@ -1,0 +1,28 @@
+# Default Configuration for GNN Phase 2 Trainer
+# This file is passed via --train-config to the training script
+
+# --- Data Arguments ---
+img_dir: "data/validation-small/imgs"
+ann_dir: "data/validation-small/annotations"
+graph_dir: "data/validation-small/graphs"
+config: "conf/config.json"
+
+# --- Pre-trained Vision Backbone Arguments ---
+# This is required! You must provide the path to your RoI Extractor weights.
+detector_checkpoint: "checkpoints/run_022" # Update this path!
+
+# --- Trainer Arguments ---
+output_dir: "checkpoints_gnn"
+logging_dir: "runs_gnn"
+epochs: 30
+batch_size: 2  # 2 is standard for full-page graphs
+lr: 0.001      # 1e-3 is ideal for GATv2 initialization
+logging_steps: 10
+save_steps: 500
+max_steps: -1
+seed: 42
+
+# --- Checkpoint Resumption (Optional overrides) ---
+# resume: true                     # Uncomment to auto-resume from latest in output_dir
+# resume_from_checkpoint: "path"   # Uncomment to resume from a specific folder
+# fine_tune: "path"                # Uncomment to load weights but start a fresh run

@@ -6,19 +6,126 @@ from sklearn.metrics import classification_report
 # Import your custom modules
 from .losses import MultiClassEdgeFocalLoss
 from .heuristics import generate_axis_aware_edges, map_gt_to_candidates
-from .topology import GraphTopologyEvaluator
+from .metrics import GraphTopologyEvaluator
+from .utils import split_into_systems
 
 
 
 
 class GNNTrainer(Trainer):
-    def __init__(self, alpha_weights, *args, **kwargs):
+    def __init__(self, alpha_weights, class_list, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # Initialize the multi-class focal loss
         self.loss_fn = MultiClassEdgeFocalLoss(alpha_weights=alpha_weights)
         self.topology_evaluator = GraphTopologyEvaluator()
+        self.class_list = class_list
 
-def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        images = inputs["images"]
+        boxes_list = inputs["boxes"]
+        labels_list = inputs["labels"]
+        edges_list = inputs["edges"]
+        
+        device = self.args.device
+        
+        # FIX 1: Initialize as a standard float, not an isolated tensor
+        total_loss = 0.0 
+        
+        all_logits = []
+        all_targets = []
+        valid_systems = 0
+        
+        class_to_idx = {c: i for i, c in enumerate(self.class_list)} 
+        
+        for i in range(len(images)):
+            img = images[i].to(device)
+            abs_boxes = boxes_list[i].to(device)
+            labels = labels_list[i].to(device)
+            page_edges = edges_list[i].to(device)
+            
+            # We only need at least 2 boxes to form an edge.
+            if len(abs_boxes) < 2:
+                continue
+            
+            # --- 1. VISION DOMAIN: Full Page Extraction (Strictly Frozen) ---
+            with torch.no_grad():
+                features = model.detector.backbone(img.unsqueeze(0))
+                fused_features = model.detector.neck(features)
+                feat_dict = {str(idx): feat for idx, feat in enumerate(fused_features)}
+
+            # --- 2. BRIDGE: Isolate Systems ---
+            system_groups = split_into_systems(abs_boxes, labels, page_edges, class_to_idx)
+            
+            for sys_data in system_groups:
+                sys_abs_boxes = sys_data['abs_boxes']
+                sys_labels = sys_data['labels']
+                sys_gt_targets = sys_data['edge_targets']
+                sx1, sy1, sx2, sy2 = sys_data['system_bbox']
+                
+                if len(sys_abs_boxes) < 2:
+                    continue
+                
+                # FIX 2: Removed torch.no_grad() here! The RoI Extractor MUST train in Phase 2.
+                roi_feats = model.roi_extractor(feat_dict, [sys_abs_boxes], img.shape[-2:])
+                
+                sys_rel_boxes = sys_abs_boxes.clone()
+                sys_rel_boxes[:, 0] -= sx1
+                sys_rel_boxes[:, 1] -= sy1
+                sys_rel_boxes[:, 2] -= sx1
+                sys_rel_boxes[:, 3] -= sy1
+                
+                class_embeds = model.gnn.class_embedding(sys_labels)
+                x = torch.cat([roi_feats, sys_rel_boxes, class_embeds], dim=1)
+                
+                # FIX 3: Passed class_to_idx to heuristics
+                candidate_edge_index = generate_axis_aware_edges(sys_rel_boxes, sys_labels, class_to_idx)
+                
+                # FIX 4: Prevent NaN loss if heuristics found absolutely zero candidate edges
+                if candidate_edge_index.shape[1] == 0:
+                    continue
+                    
+                y_targets = map_gt_to_candidates(candidate_edge_index, sys_gt_targets)
+                
+                # GNN Forward Pass
+                edge_logits = model.gnn(x, candidate_edge_index)
+                
+                loss = self.loss_fn(edge_logits, y_targets)
+                total_loss = total_loss + loss
+                valid_systems += 1
+                
+                if return_outputs or not model.training:
+                    all_logits.append(edge_logits)
+                    all_targets.append(y_targets)
+                    
+                    if not model.training:
+                        preds = torch.argmax(edge_logits, dim=1)
+                        self.topology_evaluator.update(
+                            edge_index=candidate_edge_index,
+                            gt_edges=y_targets,
+                            pred_edges=preds,
+                            num_nodes=len(sys_abs_boxes)
+                        )
+        
+        # FIX 5: The "Dummy Loss Trick" 
+        # If no valid systems were found, we multiply 0.0 by the sum of all model parameters.
+        # This creates a valid computational graph with 0.0 gradients, preventing the AMP crash.
+        if valid_systems > 0:
+            total_loss = total_loss / valid_systems
+        else:
+            total_loss = sum(p.sum() for p in model.parameters() if p.requires_grad) * 0.0
+            
+        if return_outputs:
+            if all_logits:
+                concat_logits = torch.cat(all_logits, dim=0)
+                concat_targets = torch.cat(all_targets, dim=0)
+                outputs = {"logits": concat_logits, "labels": concat_targets}
+            else:
+                outputs = {"logits": torch.empty((0, 5), device=device), "labels": torch.empty(0, device=device)}
+            return total_loss, outputs
+            
+        return total_loss
+
+    def compute_loss2(self, model, inputs, return_outputs=False, **kwargs):
         """
         Intercepts batched pages, extracts full-page vision features, 
         slices the data into independent system graphs, and accumulates the loss.
@@ -37,7 +144,7 @@ def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         
         # We need the class-to-index mapping to find the 'system' bounding boxes
         # Assuming you passed class_list to the Trainer or can access it globally
-        class_to_idx = {c: i for i, c in enumerate(model.class_list)} 
+        class_to_idx = {c: i for i, c in enumerate(self.class_list)} 
         
         for i in range(len(images)):
             img = images[i].to(device)
