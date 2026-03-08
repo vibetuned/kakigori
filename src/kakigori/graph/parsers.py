@@ -2,14 +2,11 @@
 import json
 import xml.etree.ElementTree as ET
 
-
 class GroundTruthGraphBuilder:
     def __init__(self, mei_file, json_files, node_roles):
         self.mei_tree = ET.parse(mei_file)
         self.mei_root = self.mei_tree.getroot()
         self.ns = {"mei": "http://www.music-encoding.org/ns/mei"}
-
-        # Store the dynamic roles from structure.json
         self.roles = node_roles
 
         self.spatial_nodes = []
@@ -21,22 +18,40 @@ class GroundTruthGraphBuilder:
                 data = json.load(f)
                 self.spatial_nodes.extend(data.get("annotations", []))
 
-        self.node_map = {
-            node["id"]: node for node in self.spatial_nodes if "id" in node
-        }
-        self.gt_edges = []
+        self.node_map = {}
+        self.gt_edges = [] # Initialize early so we can add fallback edgess
+
+        for node in self.spatial_nodes:
+            if "id" in node:
+                base_id = node["id"]
+                
+                if base_id in self.node_map:
+                    # ID Collision! Create a unique pseudo-ID for this sub-glyph
+                    pseudo_id = f"{base_id}_{node['class']}_{len(self.node_map)}"
+                    node["id"] = pseudo_id 
+                    self.node_map[pseudo_id] = node
+                    
+                    # Automatically link this SMuFL glyph to its parent structural box
+                    self.gt_edges.append((base_id, pseudo_id, 1))
+                else:
+                    self.node_map[base_id] = node
 
     def _get_id(self, element):
         return element.attrib.get("{http://www.w3.org/XML/1998/namespace}id")
 
+    def _is_inside(self, inner_bbox, outer_bbox):
+        """Checks if the center of the inner_bbox is contained within the outer_bbox."""
+        cx = (inner_bbox[0] + inner_bbox[2]) / 2.0
+        cy = (inner_bbox[1] + inner_bbox[3]) / 2.0
+        return (outer_bbox[0] <= cx <= outer_bbox[2]) and (outer_bbox[1] <= cy <= outer_bbox[3])
+
     def build_edges(self):
-        """Dynamically traverses the MEI and spatial boxes to build ground truth edges."""
         temporal = set(self.roles["temporal_anchors"])
         modifier = set(self.roles["modifiers"])
         sync = set(self.roles["synchronization_text"])
         context = set(self.roles["context_globals"])
 
-        # 1. Temporal Edges (Class 3) - Left-to-Right sequence
+        # 1. Temporal Edges (Class 3) - Left-to-Right sequence within layers
         for layer in self.mei_root.findall('.//mei:layer', self.ns):
             events = layer.findall('./*') 
             valid_sequence = []
@@ -51,89 +66,54 @@ class GroundTruthGraphBuilder:
             for i in range(len(valid_sequence) - 1):
                 self.gt_edges.append((valid_sequence[i], valid_sequence[i+1], 3))
 
-        # 2. Relational Edges (Parent-Child Hierarchy from MEI)
+        # 2. Strict XML Hierarchy (Class 1, 2, 4)
+        # This guarantees Measure -> Staff -> Layer -> Note regardless of bounding box overlaps
+        # (Inside GroundTruthGraphBuilder.build_edges)
         parent_map = {c: p for p in self.mei_root.iter() for c in p}
 
         for child_el in self.mei_root.iter():
             child_id = self._get_id(child_el)
-            if not child_id or child_id not in self.node_map: 
-                continue
+            if not child_id or child_id not in self.node_map: continue
             
             child_class = self.node_map[child_id]['class']
-            
-            # Walk up to find the nearest visual parent
-            curr = child_el
-            parent_id = None
-            parent_class = None
+            curr, parent_id = child_el, None
             
             while curr in parent_map:
                 p_el = parent_map[curr]
                 p_id = self._get_id(p_el)
                 if p_id and p_id in self.node_map:
                     parent_id = p_id
-                    parent_class = self.node_map[p_id]['class']
                     break
                 curr = p_el
                 
-            if parent_id and parent_class:
-                # Class 2 for Modifier (note -> accid)
-                if child_class in modifier:
-                    self.gt_edges.append((parent_id, child_id, 2))
-                # Class 4 for Sync (note -> syl)
-                elif child_class in sync:
-                    self.gt_edges.append((parent_id, child_id, 4))
-                # Class 1 for Structural Layout (measure -> staff -> layer -> note -> stem)
-                else:
-                    self.gt_edges.append((parent_id, child_id, 1))
+            if parent_id:
+                if child_class in modifier: self.gt_edges.append((parent_id, child_id, 2))
+                elif child_class in sync: self.gt_edges.append((parent_id, child_id, 4))
+                else: self.gt_edges.append((parent_id, child_id, 1))
 
-        # 3. Macro-Layout System Linking (Spatial Fallback)
-        # Because MEI uses <sb> milestones, systems don't enclose measures in the XML tree.
-        # We link systems to measures using their bounding box geometry.
+        # Spatial Fallback for System -> Measure
         systems = [n for n in self.spatial_nodes if n.get('class') == 'system']
-        measures = [n for n in self.spatial_nodes if n.get('class') == 'measure']
-        
-        for measure in measures:
-            mx1, my1, mx2, my2 = measure['bbox']
-            m_cy = (my1 + my2) / 2
-            
+        for measure in [n for n in self.spatial_nodes if n.get('class') == 'measure']:
+            m_cy = (measure['bbox'][1] + measure['bbox'][3]) / 2
             for sys in systems:
-                sx1, sy1, sx2, sy2 = sys['bbox']
-                # If the measure's center Y falls within the system's vertical bounds
-                if sy1 <= m_cy <= sy2:
+                if sys['bbox'][1] <= m_cy <= sys['bbox'][3]:
                     self.gt_edges.append((sys['id'], measure['id'], 1))
-                    break # A measure only belongs to one system
+                    break 
 
-        # Deduplicate edges just in case MEI traversal hit redundancies
-        # 4. Macro-Layout Context Linking (Orphaned Clefs and Signatures)
+        # Spatial Fallback for Staff -> Clefs/KeySigs
         staves = [n for n in self.spatial_nodes if n.get('class') == 'staff']
-        
+        existing_children = {child for parent, child, edge_class in self.gt_edges}
         for node in self.spatial_nodes:
-            if node.get('class') in context:
-                node_id = node['id']
-                
-                # Check if it was already linked during the MEI traversal
-                has_parent = any(child == node_id for parent, child, edge_class in self.gt_edges)
-                
-                if not has_parent:
-                    # Spatial Fallback: Link to the staff it physically sits on
-                    nx1, ny1, nx2, ny2 = node['bbox']
-                    n_cy = (ny1 + ny2) / 2.0
-                    
-                    for staff in staves:
-                        sx1, sy1, sx2, sy2 = staff['bbox']
-                        
-                        # If the clef/signature's Y-center is within the staff's vertical bounds
-                        if sy1 <= n_cy <= sy2:
-                            # Class 1: Structural edge from Staff -> Context Marker
-                            self.gt_edges.append((staff['id'], node_id, 1))
-                            break
-                        
-        self.gt_edges = list(set(self.gt_edges))
+            if node['class'] in context and node['id'] not in existing_children:
+                n_cy = (node['bbox'][1] + node['bbox'][3]) / 2.0
+                for st in staves:
+                    if st['bbox'][1] <= n_cy <= st['bbox'][3]:
+                        self.gt_edges.append((st['id'], node['id'], 1))
+                        break
+
         return self.gt_edges
 
     def get_pyg_labels(self, candidate_edge_index, node_id_list):
-        # ... (Keep your existing get_pyg_labels logic here) ...
-        # Third party imports
         import torch
 
         y = torch.zeros(candidate_edge_index.shape[1], dtype=torch.long)

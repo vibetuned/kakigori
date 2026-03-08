@@ -1,8 +1,8 @@
 # Data args
 img_dir: "data/train-small/imgs"
 ann_dir: "data/train-small/annotations"
-synthetic_img_dir: "data/synthetic-small/imgs"
-synthetic_ann_dir: "data/synthetic-small/annotations"
+synthetic_img_dir: "data/synthetic-new/imgs"
+synthetic_ann_dir: "data/synthetic-new/annotations"
 use_synthetic: false
 synthetic_ratio: 4
 config: "conf/config.json"

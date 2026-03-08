@@ -11,10 +11,7 @@
         "rest8th",
         "restQuarter",
         "restHalf",
-        "restWhole",
-        "restDoubleWhole",
-        "restLonga",
-        "restMaxima"
+        "restWhole"
     ],
     "Staff_and_Measures": [
         "staff",
@@ -78,7 +75,6 @@
     "Pitch_and_Harmony": [
         "octave",
         "harm",
-        "fig",
         "accidentalFlat",
         "accidentalNatural",
         "accidentalSharp",
@@ -98,7 +94,6 @@
     "Text_and_Labels": [
         "label",
         "labelAbbr",
-        "mNum",
         "pgHead"
     ],
     "Structure_and_Repeats": [

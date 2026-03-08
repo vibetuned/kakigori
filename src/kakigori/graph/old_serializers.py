@@ -1,0 +1,558 @@
+class ContextTracker:
+    def __init__(self):
+        # Global State
+        self.active_clef = "treble"
+        self.key_signature = {}  # e.g., {'f': '#', 'c': '#'}
+
+        # Local State (Resets every measure)
+        self.measure_accidentals = {}  # e.g., {'g': '#'}
+
+        # Spatial Anchors
+        self.staff_y_top = 0.0
+        self.staff_y_bottom = 0.0
+
+    def process_context_node(self, node, super_node=None, calculated_pitch=None):
+        """
+        Updates the running state based on the node class.
+        """
+        node_class = node["class"]
+
+        # 1. Handle Structural Anchors
+        if node_class.startswith("barLine"):
+            self._handle_barline(node)
+
+        elif node_class.startswith("clef"):
+            self._handle_clef(node)
+
+        # 2. Handle Global Modifiers
+        elif node_class.startswith("keySig"):
+            self._handle_key_signature(node_class)
+
+        # 3. Handle Local Modifiers (Inline Accidentals)
+        elif super_node and calculated_pitch:
+            modifiers = [m["class"] for m in super_node["modifiers"]]
+            for mod in modifiers:
+                if mod.startswith("accid"):
+                    self._handle_inline_accidental(mod, calculated_pitch)
+
+    def _handle_barline(self, barline_node):
+        """Resets local measure state and recalibrates vertical spatial anchors."""
+        self.measure_accidentals.clear()
+
+        _, y1, _, y2 = barline_node["bbox"]
+        self.staff_y_top = y1
+        self.staff_y_bottom = y2
+
+    def _handle_clef(self, clef_node):
+        """Updates the active clef and acts as a spatial anchor."""
+        clef_identity = clef_node["class"].split("-")[-1]  # e.g., 'G', 'F', 'C'
+
+        clef_map = {
+            "G": "treble",
+            "F": "bass",
+            "C": "alto",  # Or tenor, depending on Y-position, but 'alto' is a safe default
+        }
+        self.active_clef = clef_map.get(clef_identity, "treble")
+
+        _, y1, _, y2 = clef_node["bbox"]
+        self.staff_y_top = y1
+        self.staff_y_bottom = y2
+
+    def _handle_key_signature(self, key_class):
+        """
+        Translates key signatures (e.g., 'keySig-3s' or 'keySig-2f')
+        into a dictionary of active accidentals based on the Circle of Fifths.
+        """
+        self.key_signature.clear()
+
+        if "-" not in key_class:
+            return  # C Major / A Minor
+
+        identity = key_class.split("-")[-1]
+        count = int(identity[:-1])  # Extract the number (e.g., '3' from '3s')
+        accid_type = identity[-1]  # Extract the type ('s' or 'f')
+
+        # Order of sharps and flats
+        sharps_order = ["f", "c", "g", "d", "a", "e", "b"]
+        flats_order = ["b", "e", "a", "d", "g", "c", "f"]
+
+        if accid_type == "s":
+            for i in range(count):
+                self.key_signature[sharps_order[i]] = "#"
+        elif accid_type == "f":
+            for i in range(count):
+                self.key_signature[flats_order[i]] = "-"
+
+    def _handle_inline_accidental(self, accid_class, pitch_string):
+        """
+        Registers an inline accidental into the local measure state.
+        In Humdrum (**kern), pitch strings encode the octave (e.g., 'cc', 'C').
+        Strictly speaking, a measure accidental only applies to that specific octave.
+        """
+        identity = accid_class.split("-")[-1]
+
+        accid_map = {
+            "sharp": "#",
+            "flat": "-",
+            "nat": "n",
+            "dsharp": "##",
+            "dflat": "--",
+        }
+
+        symbol = accid_map.get(identity, "")
+
+        # Strip existing non-alphabetic characters (like duration numbers or old accidentals)
+        # to isolate the pure pitch string (e.g., '4cc#' -> 'cc')
+        pure_pitch = "".join(filter(str.isalpha, pitch_string))
+
+        if symbol:
+            self.measure_accidentals[pure_pitch] = symbol
+
+    def get_effective_accidental(self, pure_pitch):
+        """
+        Returns the active modifier for a given pitch.
+        Checks the local measure state first, then the key signature.
+        """
+        # 1. Check local measure state (exact octave match)
+        if pure_pitch in self.measure_accidentals:
+            # If a natural 'n' is active, it cancels the accidental, so we return ''
+            mod = self.measure_accidentals[pure_pitch]
+            return "" if mod == "n" else mod
+
+        # 2. Check global key signature (pitch class match, ignoring octave)
+        pitch_class = pure_pitch[0].lower()  # 'cc' -> 'c', 'C' -> 'c'
+        return self.key_signature.get(pitch_class, "")
+
+
+def generate_kern_stream(system_nodes, super_nodes, node_roles):
+    """
+    Orchestrates the context tracking and semantic resolution to output Humdrum **kern.
+
+    system_nodes: List of all spatial nodes (dicts) in this system, strictly sorted left-to-right by 'cx'.
+    super_nodes: The dictionary of grouped primitives generated by _collapse_primitives().
+    node_roles: The JSON dict categorizing node types.
+    """
+    tracker = ContextTracker()
+    kern_stream = []
+
+    # Fast lookup sets
+    temporal_classes = set(node_roles["node_roles"]["temporal_anchors"])
+    context_classes = set(node_roles["node_roles"]["context_globals"])
+    context_classes.update(
+        node_roles["node_roles"]["structural_components"]
+    )  # Include barlines
+
+    for node in system_nodes:
+        node_class = node["class"]
+
+        # --- 1. Update Global/Local Context ---
+        if node_class in context_classes:
+            tracker.process_context_node(node)
+
+            # Humdrum also requires barlines and clefs to be printed in the output stream
+            if node_class.startswith("barLine"):
+                kern_stream.append("=")  # Humdrum barline token
+            elif node_class.startswith("clef"):
+                # Translate to Humdrum clef syntax (e.g., *clefG2)
+                clef_id = node_class.split("-")[-1]
+                kern_stream.append(f"*clef{clef_id}")
+
+            continue
+
+        # --- 2. Process Musical Events (Temporal Anchors) ---
+        if node_class in temporal_classes:
+            super_node_id = f"super_{node['id']}"
+
+            # Skip if the object detector found a notehead but the GNN failed to group it
+            if super_node_id not in super_nodes:
+                continue
+
+            super_node = super_nodes[super_node_id]
+
+            # A. Default to Rest logic
+            if node_class in ["rest", "mRest"]:
+                # Pass to semantic resolver (which we built previously)
+                # Rests don't need pitch math, just duration from the structurals
+                token = _resolve_semantics(super_node, pitch_string="")
+                kern_stream.append(token)
+                continue
+
+            # B. Note/Chord logic
+            # Calculate base pitch purely from spatial Y-coordinate and staff boundaries
+            staff_bbox = (0, tracker.staff_y_top, 0, tracker.staff_y_bottom)
+            raw_pitch = _calculate_pitch(node["cy"], staff_bbox, tracker.active_clef)
+
+            # Check the tracker for active key signatures or measure-local accidentals
+            effective_accidental = tracker.get_effective_accidental(raw_pitch)
+
+            # Combine them (e.g., 'cc' + '#' = 'cc#')
+            final_pitch_string = raw_pitch + effective_accidental
+
+            # If the super node has an inline accidental, update the tracker for the rest of the measure
+            tracker.process_context_node(
+                node, super_node=super_node, calculated_pitch=final_pitch_string
+            )
+
+            # Resolve rhythmic duration and combine with the final pitch string
+            kern_token = _resolve_semantics(super_node, pitch_string=final_pitch_string)
+
+            kern_stream.append(kern_token)
+
+    # Join the stream into a single column string (Humdrum format is tab/newline separated)
+    return "\n".join(kern_stream)
+
+
+# Third party imports
+import networkx as nx
+
+
+def _collapse_primitives(self, node_roles):
+    """
+    Merges Structural (1) and Modifier (2) edges into Super-Nodes.
+    Accounts for all dynamic classes defined in node_roles.
+    """
+    super_nodes = {}
+
+    # Unpack the roles into fast lookup sets
+    temporal_classes = set(node_roles["node_roles"]["temporal_anchors"])
+    structural_classes = set(node_roles["node_roles"]["structural_components"])
+    modifier_classes = set(node_roles["node_roles"]["modifiers"])
+
+    # 1. Isolate only the structural and modifier edges
+    subgraph_edges = [
+        (u, v) for u, v, d in self.G.edges(data=True) if d["type"] in [1, 2]
+    ]
+
+    # Create an undirected graph for easy component finding
+    primitive_graph = nx.Graph()
+    primitive_graph.add_edges_from(subgraph_edges)
+
+    # 2. CRITICAL: Add isolated temporal anchors (e.g., whole notes, rests without modifiers)
+    # If they have no edges, they won't be in 'subgraph_edges'
+    for node_id, data in self.G.nodes(data=True):
+        if data["class"] in temporal_classes and not primitive_graph.has_node(node_id):
+            primitive_graph.add_node(node_id)
+
+    # 3. Find connected components (e.g., [accid, notehead, stem, flag] becomes one group)
+    for component in nx.connected_components(primitive_graph):
+        # Fetch the full node data from the main directed graph
+        group = [self.G.nodes[n] for n in component]
+
+        # Categorize the nodes in this component
+        anchors = [n for n in group if n["class"] in temporal_classes]
+        structurals = [n for n in group if n["class"] in structural_classes]
+        modifiers = [n for n in group if n["class"] in modifier_classes]
+
+        # If there is no temporal anchor in this cluster, it's an orphaned visual element (skip it)
+        if not anchors:
+            continue
+
+        # For now, we assume one primary anchor per component.
+        # (If 'chord' is detected, it acts as the single anchor for multiple noteheads)
+        primary_anchor = anchors[0]
+
+        super_node_id = f"super_{primary_anchor['id']}"
+
+        # 4. Store the raw categorized data.
+        # We defer pitch/duration math to a later dedicated function.
+        super_nodes[super_node_id] = {
+            "id": super_node_id,
+            "type": primary_anchor["class"],  # e.g., 'notehead', 'rest', 'chord'
+            "anchor_data": primary_anchor,
+            "structurals": structurals,
+            "modifiers": modifiers,
+            "cx": primary_anchor["cx"],  # Keep X coordinate for temporal sorting
+            "cy": primary_anchor["cy"],  # Keep Y coordinate for pitch calculation
+        }
+
+    return super_nodes
+
+
+def _resolve_semantics(self, super_node):
+    """
+    Translates a grouped super_node into a **kern token (duration + pitch + modifiers).
+    """
+    anchor_type = super_node["type"]
+
+    # Extract just the class names for easy checking
+    structurals = [n["class"] for n in super_node["structurals"]]
+    modifiers = [n["class"] for n in super_node["modifiers"]]
+
+    # --- 1. Resolve Rhythmic Duration ---
+    # Default to a quarter note duration
+    duration = "4"
+
+    if "stem" not in structurals and anchor_type in ["notehead", "chord"]:
+        # No stem usually means a whole note (semibreve)
+        duration = "1"
+    elif "stem" in structurals:
+        # Count the number of flags or beams to subdivide the duration
+        # Note: In a real scenario, you'd count the exact number of intersecting beam/flag nodes
+        num_tails = structurals.count("flag") + structurals.count("beam")
+
+        if num_tails == 1:
+            duration = "8"  # Eighth note
+        elif num_tails == 2:
+            duration = "16"  # Sixteenth note
+        elif num_tails == 3:
+            duration = "32"  # Thirty-second note
+        else:
+            duration = "4"  # Just a stem -> Quarter note (or Half note, see note below)
+
+    # --- 2. Resolve Base Pitch / Rest ---
+    kern_token = ""
+
+    if anchor_type in ["rest", "mRest"]:
+        # 'r' is the Humdrum representation for a rest
+        kern_token = duration + "r"
+    else:
+        # We will build this spatial math function next!
+        # It needs the anchor_data['cy'] and the local staff lines.
+        pitch_string = self._calculate_pitch(super_node["anchor_data"]["cy"])
+        kern_token = duration + pitch_string
+
+        # --- 3. Apply Modifiers ---
+        if "accid" in modifiers:
+            # We need sub-classification here (e.g., '#', '-', 'n')
+            # Assuming a generic sharp for the placeholder
+            kern_token += "#"
+
+        if "fermata" in modifiers:
+            kern_token += ";"  # Humdrum syntax for fermata
+
+        if "artic" in modifiers:
+            # Assuming a staccato dot for the placeholder
+            kern_token += "'"  # Humdrum syntax for staccato
+
+        # You can continue adding modifier logic here (slurs, ties, etc.)
+
+    return kern_token
+
+
+# Third party imports
+import torch
+
+
+def _calculate_pitch(self, notehead_cy, staff_bbox, active_clef="treble"):
+    """
+    Calculates the Humdrum **kern pitch string based on Y-coordinate interpolation.
+
+    notehead_cy: The center-Y of the notehead or chord anchor.
+    staff_bbox: Tuple of (x1, y1, x2, y2) for the staff this note belongs to.
+    active_clef: String indicating the current clef ('treble', 'bass', 'alto', etc.)
+    """
+    _, y_top, _, y_bottom = staff_bbox
+    staff_height = y_bottom - y_top
+
+    # A standard staff has 8 steps between the top line and bottom line
+    step_size = staff_height / 8.0
+
+    # Calculate how many steps down from the top line the notehead is
+    offset_from_top = notehead_cy - y_top
+    slot = round(offset_from_top / step_size)
+
+    # --- Pitch Mapping Arrays ---
+    # Index 0 is the top line. Negative indices go above the staff.
+    # Humdrum **kern pitch representations:
+    # middle C = c; octave above = cc; octave below = C; two below = CC
+
+    maps = {
+        "treble": {
+            -4: "ccc",
+            -3: "bb",
+            -2: "aa",
+            -1: "gg",
+            0: "ff",  # Above staff
+            1: "ee",
+            2: "dd",
+            3: "cc",
+            4: "b",
+            5: "a",  # Upper half
+            6: "g",
+            7: "f",
+            8: "e",  # Lower half
+            9: "d",
+            10: "c",
+            11: "B",
+            12: "A",
+            13: "G",  # Below staff
+        },
+        "bass": {
+            -4: "e",
+            -3: "d",
+            -2: "c",
+            -1: "B",
+            0: "A",  # Above staff
+            1: "G",
+            2: "F",
+            3: "E",
+            4: "D",
+            5: "C",  # Upper half
+            6: "BB",
+            7: "AA",
+            8: "GG",  # Lower half
+            9: "FF",
+            10: "EE",
+            11: "DD",
+            12: "CC",
+            13: "BBB",  # Below staff
+        },
+    }
+
+    # Fallback to treble if clef is unknown, or cap the extremes if the slot goes wild
+    current_map = maps.get(active_clef.lower(), maps["treble"])
+
+    # Clamp the slot to our defined dictionary bounds to prevent KeyErrors on extreme ledger lines
+    min_slot, max_slot = min(current_map.keys()), max(current_map.keys())
+    clamped_slot = max(min_slot, min(slot, max_slot))
+
+    base_pitch = current_map[clamped_slot]
+
+    return base_pitch
+
+
+
+import networkx as nx
+
+class HumdrumSerializer:
+    def __init__(self, node_list, edge_index, edge_predictions, node_roles):
+        """
+        node_list: List of dictionaries [{'id': 0, 'class': 'noteheadBlack', 'bbox': [x1,y1,x2,y2], 'cx': cx, 'cy': cy}, ...]
+        edge_index: (2, E) tensor of predicted edge connections
+        edge_predictions: (E) tensor of predicted edge classes (0-4)
+        node_roles: The loaded structure.json ['node_roles'] dictionary
+        """
+        self.nodes = {n['id']: n for n in node_list}
+        self.roles = node_roles
+        
+        # Build a NetworkX directed graph for easy traversal
+        self.G = nx.DiGraph()
+        self.G.add_nodes_from(self.nodes.keys())
+        
+        # Only add valid edges (Exclude Class 0: No Edge)
+        for i in range(edge_index.shape[1]):
+            u = edge_index[0, i].item()
+            v = edge_index[1, i].item()
+            e_class = edge_predictions[i].item()
+            
+            if e_class > 0:
+                self.G.add_edge(u, v, edge_class=e_class)
+
+    def _get_pitch_string(self, note_cy, staff_bbox, current_clef="clefG"):
+        """
+        Estimates the pitch based on the notehead's Y-center relative to the staff bounding box.
+        """
+        sy1, _, sy2, _ = staff_bbox
+        h_staff = sy2 - sy1
+        
+        # A standard 5-line staff has 8 vertical "steps" (lines + spaces) from top to bottom
+        # Step 0 = Top line, Step 8 = Bottom line
+        step = round((note_cy - sy1) / (h_staff / 8.0))
+        
+        # Map the step to a rough kern pitch string (Assuming Treble Clef for this example)
+        # 0 (Top line) = f5, 8 (Bottom line) = e4
+        treble_map = {
+            -2: "a5", -1: "g5", 0: "f5", 1: "e5", 2: "d5", 
+            3: "c5", 4: "b4", 5: "a4", 6: "g4", 7: "f4", 
+            8: "e4", 9: "d4", 10: "c4", 11: "b3"
+        }
+        
+        # Default to middle C if out of bounds or unsupported clef
+        return treble_map.get(step, "c4") 
+
+    def _derive_duration(self, components):
+        """
+        Calculates Humdrum rhythmic duration (e.g., '4' for quarter, '8' for eighth).
+        """
+        classes = [n['class'] for n in components]
+        
+        # Base Notehead
+        if "noteheadWhole" in classes: return "1"
+        if "noteheadHalf" in classes: return "2"
+        
+        if "noteheadBlack" in classes:
+            # Check for flags/beams to reduce duration
+            if any("16th" in c for c in classes): return "16"
+            if any("8th" in c for c in classes) or "beam" in classes: return "8"
+            return "4" # Default for black notehead with stem but no flags
+            
+        # Rests
+        if "restQuarter" in classes: return "4"
+        if "rest8th" in classes: return "8"
+        if "rest16th" in classes: return "16"
+        if "restHalf" in classes: return "2"
+        if "restWhole" in classes: return "1"
+        
+        return "4" # Fallback
+
+    def build_super_nodes(self):
+        """
+        Aggregates structural and modifier nodes around their temporal anchors.
+        """
+        super_nodes = []
+        anchors = set(self.roles["temporal_anchors"]) #
+        
+        for n_id, data in self.nodes.items():
+            if data['class'] in anchors:
+                components = [data]
+                modifiers = []
+                
+                # Look at outgoing edges for children (e.g., note -> stem, note -> accidental)
+                for neighbor in self.G.successors(n_id):
+                    edge_data = self.G.get_edge_data(n_id, neighbor)
+                    e_class = edge_data['edge_class']
+                    
+                    if e_class == 1: # Structural
+                        components.append(self.nodes[neighbor])
+                    elif e_class == 2: # Modifier
+                        modifiers.append(self.nodes[neighbor])
+                        
+                # Look at incoming edges for parents (e.g., beam -> note, chord -> note)
+                for parent in self.G.predecessors(n_id):
+                    edge_data = self.G.get_edge_data(parent, n_id)
+                    if edge_data['edge_class'] == 1:
+                        components.append(self.nodes[parent])
+                        
+                super_nodes.append({
+                    'anchor_id': n_id,
+                    'cx': data['cx'],
+                    'cy': data['cy'],
+                    'components': components,
+                    'modifiers': modifiers
+                })
+                
+        # Sort left-to-right (Fallback for Temporal Edges)
+        return sorted(super_nodes, key=lambda sn: sn['cx'])
+
+    def generate_kern_system(self, staff_bbox):
+        """
+        Serializes the system into a single **kern string.
+        """
+        super_nodes = self.build_super_nodes()
+        kern_tokens = []
+        
+        for sn in super_nodes:
+            # 1. Get Base Attributes
+            duration = self._derive_duration(sn['components'])
+            
+            # If it's a rest, pitch is just 'r'
+            if "Rest" in self.nodes[sn['anchor_id']]['class'] or "rest" in self.nodes[sn['anchor_id']]['class']:
+                pitch = "r"
+            else:
+                pitch = self._get_pitch_string(sn['cy'], staff_bbox)
+                
+            # 2. Apply Modifiers
+            mod_string = ""
+            for mod in sn['modifiers']:
+                mod_class = mod['class']
+                if mod_class == "accidentalSharp": pitch = pitch.replace(pitch[0], pitch[0] + "#")
+                if mod_class == "accidentalFlat": pitch = pitch.replace(pitch[0], pitch[0] + "-")
+                if mod_class == "accidentalNatural": pitch = pitch.replace(pitch[0], pitch[0] + "n")
+                if mod_class == "articStaccatoAbove": mod_string += "'"
+                if mod_class == "dots": duration += "."
+                
+            # Combine into final token (e.g., "4cc#'")
+            token = f"{duration}{pitch}{mod_string}"
+            kern_tokens.append(token)
+            
+        return " ".join(kern_tokens)
