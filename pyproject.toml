@@ -32,7 +32,9 @@ dependencies = [
     "nbformat>=5.10.4",
     "music21>=9.1.0",
     "scikit-learn>=1.8.0",
-    "torch-geometric>=2.7.0"
+    "torch-geometric>=2.7.0",
+    "ipysigma>=0.24.6",
+    "jupyter>=1.1.1",
 ]
 
 [dependency-groups]
@@ -82,6 +84,7 @@ render-dataset = "kakigori.dataset.render_dataset:main"
 export-dataset = "kakigori.dataset.export_dataset:main"
 generate-graphs = "kakigori.dataset.generate_graphs:main"
 visualize-graphs = "kakigori.dataset.visualize_graphs:main"
+visualize-graphs-pysigma = "kakigori.dataset.visualize_graphs_pysigma:main"
 extract-annotations = "kakigori.dataset.extract_annotations:main"
 inject-mids = "kakigori.dataset.inject_mxl_ids:main"
 extract-classes = "kakigori.dataset.extract_classes:main"

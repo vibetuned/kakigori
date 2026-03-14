@@ -13,10 +13,12 @@ class GroundTruthGraphBuilder:
         if isinstance(json_files, str):
             json_files = [json_files]
 
-        for j_file in json_files:
+        for page_idx, j_file in enumerate(json_files):
             with open(j_file, "r") as f:
                 data = json.load(f)
-                self.spatial_nodes.extend(data.get("annotations", []))
+                for ann in data.get("annotations", []):
+                    ann["_page"] = page_idx
+                    self.spatial_nodes.append(ann)
 
         self.node_map = {}
         self.gt_edges = [] # Initialize early so we can add fallback edgess
@@ -91,23 +93,25 @@ class GroundTruthGraphBuilder:
                 elif child_class in sync: self.gt_edges.append((parent_id, child_id, 4))
                 else: self.gt_edges.append((parent_id, child_id, 1))
 
-        # Spatial Fallback for System -> Measure
+        # Spatial Fallback for System -> Measure (page-aware)
         systems = [n for n in self.spatial_nodes if n.get('class') == 'system']
         for measure in [n for n in self.spatial_nodes if n.get('class') == 'measure']:
             m_cy = (measure['bbox'][1] + measure['bbox'][3]) / 2
+            m_page = measure.get('_page')
             for sys in systems:
-                if sys['bbox'][1] <= m_cy <= sys['bbox'][3]:
+                if sys.get('_page') == m_page and sys['bbox'][1] <= m_cy <= sys['bbox'][3]:
                     self.gt_edges.append((sys['id'], measure['id'], 1))
                     break 
 
-        # Spatial Fallback for Staff -> Clefs/KeySigs
+        # Spatial Fallback for Staff -> Clefs/KeySigs (page-aware)
         staves = [n for n in self.spatial_nodes if n.get('class') == 'staff']
         existing_children = {child for parent, child, edge_class in self.gt_edges}
         for node in self.spatial_nodes:
             if node['class'] in context and node['id'] not in existing_children:
                 n_cy = (node['bbox'][1] + node['bbox'][3]) / 2.0
+                n_page = node.get('_page')
                 for st in staves:
-                    if st['bbox'][1] <= n_cy <= st['bbox'][3]:
+                    if st.get('_page') == n_page and st['bbox'][1] <= n_cy <= st['bbox'][3]:
                         self.gt_edges.append((st['id'], node['id'], 1))
                         break
 

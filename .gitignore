@@ -9,6 +9,9 @@ wheels/
 # Virtual environments
 .venv
 
+# Notebook checkpoints
+.ipynb_checkpoints/
+
 /data/
 /checkpoints/
 /checkpoints_gnn/
