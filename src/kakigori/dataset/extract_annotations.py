@@ -226,6 +226,22 @@ def extract_from_svg(
 
     defs_bboxes = get_defs_bboxes(root, ns)
     parent_map = {c: p for p in root.iter() for c in p}
+    
+    # Pre-extract all beam polygons globally to resolve un-nested or cross-staff beam connections
+    all_beam_polys = []
+    for bg in root.findall(".//svg:g", ns):
+        bcls = bg.get("class", "").split()
+        if "beam" in bcls or "beamSpan" in bcls:
+            for poly in bg.findall('./svg:polygon', ns):
+                pts_str = poly.get("points", "")
+                if pts_str:
+                    pts = []
+                    for pt in pts_str.split():
+                        if "," in pt:
+                            pts.append(tuple(map(float, pt.split(","))))
+                    if pts:
+                        all_beam_polys.append(pts)
+
     annotations = []
 
     for g in root.findall(".//svg:g", ns):
@@ -235,6 +251,70 @@ def extract_from_svg(
 
         # Check if it has a class we care about
         classes = cls.split()
+
+        if "system" in classes and "system-staff" in target_classes:
+            staff_lines = []
+            for staff_g in g.findall('.//svg:g', ns):
+                if "staff" in staff_g.get("class", "").split():
+                    for path in staff_g.findall('./svg:path', ns):
+                        d = path.get("d")
+                        if d and path.get("stroke-width") and parse_path is not None:
+                            try:
+                                path_obj = parse_path(d)
+                                p_xmin, p_xmax, p_ymin, p_ymax = path_obj.bbox()
+                                stroke_width = float(path.get("stroke-width", 0))
+                                p_xmin -= stroke_width / 2
+                                p_xmax += stroke_width / 2
+                                p_ymin -= stroke_width / 2
+                                p_ymax += stroke_width / 2
+
+                                matrix = get_absolute_transform(path, parent_map)
+                                p_xmin_t, p_xmax_t, p_ymin_t, p_ymax_t = apply_transform_to_bbox(matrix, p_xmin, p_xmax, p_ymin, p_ymax)
+                                staff_lines.append({
+                                    'xmin': p_xmin_t, 'xmax': p_xmax_t,
+                                    'ymin': p_ymin_t, 'ymax': p_ymax_t
+                                })
+                            except Exception:
+                                pass
+            
+            if staff_lines:
+                clusters = []
+                for bbox in staff_lines:
+                    matched_cluster = None
+                    y_center = (bbox['ymin'] + bbox['ymax']) / 2
+                    for cluster in clusters:
+                        c_y = (cluster['ymin'] + cluster['ymax']) / 2
+                        if abs(y_center - c_y) < 1000:
+                            matched_cluster = cluster
+                            break
+                    
+                    if matched_cluster:
+                        matched_cluster['xmin'] = min(matched_cluster['xmin'], bbox['xmin'])
+                        matched_cluster['xmax'] = max(matched_cluster['xmax'], bbox['xmax'])
+                        matched_cluster['ymin'] = min(matched_cluster['ymin'], bbox['ymin'])
+                        matched_cluster['ymax'] = max(matched_cluster['ymax'], bbox['ymax'])
+                    else:
+                        clusters.append(bbox)
+                        
+                for cluster in clusters:
+                    x1 = cluster['xmin'] * scale_x
+                    y1 = cluster['ymin'] * scale_y
+                    x2 = cluster['xmax'] * scale_x
+                    y2 = cluster['ymax'] * scale_y
+                    
+                    x1 = max(0.0, min(float(img_width), x1))
+                    y1 = max(0.0, min(float(img_height), y1))
+                    x2 = max(0.0, min(float(img_width), x2))
+                    y2 = max(0.0, min(float(img_height), y2))
+                    
+                    if (x2 - x1) >= 0.5 and (y2 - y1) >= 0.5:
+                        ann = {
+                            "class": "system-staff",
+                            "bbox": [round(x1, 2), round(y1, 2), round(x2, 2), round(y2, 2)]
+                        }
+                        if "id" in g.attrib:
+                            ann["id"] = g.attrib["id"]# + "_staff" + str(int((cluster['ymin'] + cluster['ymax'])/2))
+                        annotations.append(ann)
 
         # Heuristic for barLine
         if "barLine" in classes:
@@ -273,6 +353,217 @@ def extract_from_svg(
                         classes.append("barlineFinal")
                     else:
                         classes.append("barlineDouble")
+
+        if "beam" in classes:
+            polys = g.findall('./svg:polygon', ns)
+            poly_count = len(polys)
+            note_count = 0
+            for child in g.findall('.//svg:g', ns):
+                if "note" in child.get("class", "").split():
+                    note_count += 1
+            
+            if poly_count == 1:
+                classes.append("beam8")
+            elif poly_count == note_count:
+                # Check if all polygons have similar widths; if not, it's a broken beam
+                # (e.g. 8th + 16th beamed: primary beam spans full width, sub-beam is shorter)
+                if poly_count == 2:
+                    poly_widths = []
+                    for poly in polys:
+                        pts_str = poly.get("points", "")
+                        if pts_str:
+                            xs = []
+                            for pt in pts_str.split():
+                                if "," in pt:
+                                    xs.append(float(pt.split(",")[0]))
+                            if xs:
+                                poly_widths.append(max(xs) - min(xs))
+                    if poly_widths:
+                        max_width = max(poly_widths)
+                        if max_width > 0 and any(w < max_width * 0.6 for w in poly_widths):
+                            classes.append("beamBroken")
+                        else:
+                            classes.append("beam16")
+                    else:
+                        classes.append("beam16")
+                else:
+                    classes.append("beam16")
+            elif poly_count == 2 * note_count - 1:
+                classes.append("beam32")
+            else:
+                classes.append("beamBroken")
+
+        if "stem" in classes:
+            duration = 4
+            parent_note = parent_map.get(g)
+            
+            while parent_note is not None and "note" not in parent_note.get("class", "").split() and "chord" not in parent_note.get("class", "").split():
+                if "beam" in parent_note.get("class", "").split():
+                    break
+                parent_note = parent_map.get(parent_note)
+
+            if parent_note is not None and ("note" in parent_note.get("class", "").split() or "chord" in parent_note.get("class", "").split()):
+                has_8th_flag = False
+                has_16th_flag = False
+                has_32nd_flag = False
+                
+                for use in parent_note.findall('.//svg:use', ns):
+                    href = use.get("{http://www.w3.org/1999/xlink}href", "").lstrip("#")
+                    prefix = href.split("-")[0]
+                    smufl = smufl_mapping.get(prefix, "")
+                    if "8th" in smufl:
+                        has_8th_flag = True
+                    elif "16th" in smufl:
+                        has_16th_flag = True
+                    elif "32nd" in smufl:
+                        has_32nd_flag = True
+                
+                if has_32nd_flag:
+                    duration = 32
+                elif has_16th_flag:
+                    duration = 16
+                elif has_8th_flag:
+                    duration = 8
+                else:
+                    curr = parent_note
+                    beam_node = None
+                    while curr is not None:
+                        if "beam" in curr.get("class", "").split():
+                            beam_node = curr
+                            break
+                        curr = parent_map.get(curr)
+                        
+                    if beam_node is not None:
+                        beam_classes = []
+                        
+                        # Re-run the beam poly counting logic to safely get the beam subdivision class
+                        beam_polys = beam_node.findall('./svg:polygon', ns)
+                        poly_count = len(beam_polys)
+                        note_count = 0
+                        for child in beam_node.findall('.//svg:g', ns):
+                            if "note" in child.get("class", "").split():
+                                note_count += 1
+                        
+                        is_broken = False
+                        if poly_count == note_count and poly_count == 2:
+                            poly_widths = []
+                            for poly in beam_polys:
+                                pts_str = poly.get("points", "")
+                                if pts_str:
+                                    xs = []
+                                    for pt in pts_str.split():
+                                        if "," in pt:
+                                            xs.append(float(pt.split(",")[0]))
+                                    if xs:
+                                        poly_widths.append(max(xs) - min(xs))
+                            if poly_widths:
+                                max_width = max(poly_widths)
+                                if max_width > 0 and any(w < max_width * 0.6 for w in poly_widths):
+                                    is_broken = True
+                        
+                        if poly_count == 1:
+                            duration = 8
+                        elif poly_count == note_count and not is_broken:
+                            duration = 16
+                        elif poly_count == 2 * note_count - 1:
+                            duration = 32
+                        else:
+                            # Fallback if beam is broken or irregular: check Y-level overlap clusters using local polygons
+                            stem_path = g.find('.//svg:path', ns)
+                            if stem_path is not None:
+                                d = stem_path.get("d", "")
+                                nums = list(map(float, re.findall(r"[-+]?[0-9]*\.?[0-9]+", d)))
+                                if len(nums) >= 4:
+                                    stem_x = nums[0]
+                                    stem_ymin, stem_ymax = min(nums[1], nums[3]), max(nums[1], nums[3])
+                                    intersecting_ys = []
+                                    for poly in beam_node.findall('./svg:polygon', ns):
+                                        pts_str = poly.get("points", "")
+                                        if not pts_str:
+                                            continue
+                                        pts = []
+                                        for pt in pts_str.split():
+                                            if "," in pt:
+                                                pts.append(tuple(map(float, pt.split(","))))
+                                        if len(pts) > 0:
+                                            xs = [p[0] for p in pts]
+                                            if min(xs) - 5 <= stem_x <= max(xs) + 5:
+                                                min_x, max_x = min(xs), max(xs)
+                                                if max_x - min_x > 0:
+                                                    left_ys = [p[1] for p in pts if p[0] - min_x < 5]
+                                                    right_ys = [p[1] for p in pts if max_x - p[0] < 5]
+                                                    if left_ys and right_ys:
+                                                        left_y = sum(left_ys) / len(left_ys)
+                                                        right_y = sum(right_ys) / len(right_ys)
+                                                        y_at_stem = left_y + (right_y - left_y) * (stem_x - min_x) / (max_x - min_x)
+                                                    else:
+                                                        y_at_stem = sum(p[1] for p in pts) / len(pts)
+                                                else:
+                                                    y_at_stem = sum(p[1] for p in pts) / len(pts)
+                                                
+                                                # Check vertical overlap with stem bounds
+                                                if stem_ymin - 20 <= y_at_stem <= stem_ymax + 20:    
+                                                    intersecting_ys.append(y_at_stem)
+                                    
+                                    unique_levels = []
+                                    for y in intersecting_ys:
+                                        if not any(abs(y - uy) < 20 for uy in unique_levels):
+                                            unique_levels.append(y)
+                                            
+                                    num_levels = len(unique_levels)
+                                    if num_levels >= 3:
+                                        duration = 32
+                                    elif num_levels == 2:
+                                        duration = 16
+                                    elif num_levels == 1:
+                                        duration = 8
+                    else:
+                        # Unbeamed stem or detached cross-staff beam: Verify against ALL global beam polygons
+                        has_32nd_flag = False
+                        has_16th_flag = False
+                        has_8th_flag = False
+                        
+                        stem_path = g.find('.//svg:path', ns)
+                        if stem_path is not None:
+                            d = stem_path.get("d", "")
+                            nums = list(map(float, re.findall(r"[-+]?[0-9]*\.?[0-9]+", d)))
+                            if len(nums) >= 4:
+                                stem_x = nums[0]
+                                stem_ymin, stem_ymax = min(nums[1], nums[3]), max(nums[1], nums[3])
+                                intersecting_ys = []
+                                for pts in all_beam_polys:
+                                    xs = [p[0] for p in pts]
+                                    if min(xs) - 5 <= stem_x <= max(xs) + 5:
+                                        min_x, max_x = min(xs), max(xs)
+                                        if max_x - min_x > 0:
+                                            left_ys = [p[1] for p in pts if p[0] - min_x < 5]
+                                            right_ys = [p[1] for p in pts if max_x - p[0] < 5]
+                                            if left_ys and right_ys:
+                                                left_y = sum(left_ys) / len(left_ys)
+                                                right_y = sum(right_ys) / len(right_ys)
+                                                y_at_stem = left_y + (right_y - left_y) * (stem_x - min_x) / (max_x - min_x)
+                                            else:
+                                                y_at_stem = sum(p[1] for p in pts) / len(pts)
+                                        else:
+                                            y_at_stem = sum(p[1] for p in pts) / len(pts)
+                                        
+                                        if stem_ymin - 20 <= y_at_stem <= stem_ymax + 20:    
+                                            intersecting_ys.append(y_at_stem)
+                                
+                                unique_levels = []
+                                for y in intersecting_ys:
+                                    if not any(abs(y - uy) < 20 for uy in unique_levels):
+                                        unique_levels.append(y)
+                                        
+                                num_levels = len(unique_levels)
+                                if num_levels >= 3:
+                                    duration = 32
+                                elif num_levels == 2:
+                                    duration = 16
+                                elif num_levels == 1:
+                                    duration = 8
+            
+            classes.append(f"stem{duration}")
 
         match = list(target_classes.intersection(classes))
         if not match:

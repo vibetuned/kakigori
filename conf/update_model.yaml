@@ -1,0 +1,41 @@
+# Data args
+img_dir: "data/train-small/imgs"
+ann_dir: "data/train-small/annotations"
+synthetic_img_dir: "data/synthetic-new/imgs"
+synthetic_ann_dir: "data/synthetic-new/annotations"
+use_synthetic: true
+synthetic_ratio: -9
+config: "conf/config.json"
+input_size: 640
+num_workers: 4
+
+# Model args
+use_bottom_up: false
+out_indices: [0, 1, 2]
+
+# Class expansion args
+freeze_epochs: 10
+old_num_classes: 93
+
+# Trainer args
+reg_weight: 5.0
+cls_weight: 1.0
+max_gamma: 3.0    # Final gamma for focal loss
+base_gamma: 2.0   # Initial gamma for focal loss
+scale_ranges: null
+
+# Training args
+output_dir: "checkpoints"
+logging_dir: "runs"
+epochs: 30
+batch_size: 4
+# Two-Stage Learning Rates
+lr: 0.0005   
+lr_unfrozen: 0.00005
+logging_steps: 50
+save_steps: 500
+max_steps: -1
+seed: 42
+resume: false
+resume_from_checkpoint: null
+fine_tune: "checkpoints/run_003/"

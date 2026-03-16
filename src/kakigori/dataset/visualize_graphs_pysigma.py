@@ -32,6 +32,8 @@ from PySide6.QtWidgets import (
     QPushButton,
     QVBoxLayout,
     QApplication,
+    QDialog,
+    QTextEdit,
 )
 from PySide6.QtWebEngineCore import QWebEngineProfile, QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
@@ -189,12 +191,15 @@ class PySigmaVisualizer(QMainWindow):
 
         btn_prev = QPushButton("< Prev")
         btn_next = QPushButton("Next >")
+        btn_json = QPushButton("Show JSON")
 
         btn_prev.clicked.connect(self.prev_item)
         btn_next.clicked.connect(self.next_item)
+        btn_json.clicked.connect(self.show_json)
 
         nav_layout.addWidget(self.lbl_info)
         nav_layout.addStretch()
+        nav_layout.addWidget(btn_json)
         nav_layout.addWidget(btn_prev)
         nav_layout.addWidget(btn_next)
 
@@ -206,6 +211,60 @@ class PySigmaVisualizer(QMainWindow):
 
         QShortcut(QKeySequence(Qt.Key_Left), self, self.prev_item)
         QShortcut(QKeySequence(Qt.Key_A), self, self.prev_item)
+
+    def show_json(self):
+        if not hasattr(self, "current_G") or self.current_G is None:
+            return
+
+        component_value = self.cb_component.currentData()
+        min_degree = self.slider_min_deg.value()
+        max_nodes = self.slider_max_nodes.value()
+        keep_isolates = self.chk_isolates.isChecked()
+
+        subgraph = self.make_filtered_subgraph(
+            self.current_G, component_value, min_degree, max_nodes, keep_isolates
+        )
+
+        graph_data = {
+            "nodes": [],
+            "edges": []
+        }
+        
+        for n, data in subgraph.nodes(data=True):
+            node_data = {"id": str(n)}
+            for k, v in data.items():
+                if isinstance(v, (int, float, str, bool)):
+                    node_data[k] = v
+                else:
+                    node_data[k] = str(v)
+            graph_data["nodes"].append(node_data)
+            
+        for u, v, data in subgraph.edges(data=True):
+            edge_data = {"source": str(u), "target": str(v)}
+            for k, v in data.items():
+                if isinstance(v, (int, float, str, bool)):
+                    edge_data[k] = v
+                else:
+                    edge_data[k] = str(v)
+            graph_data["edges"].append(edge_data)
+            
+        json_str = json.dumps(graph_data, indent=2)
+        
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Current Graph JSON")
+        dlg.resize(600, 800)
+        layout = QVBoxLayout(dlg)
+        
+        text_edit = QTextEdit()
+        text_edit.setReadOnly(True)
+        text_edit.setPlainText(json_str)
+        layout.addWidget(text_edit)
+        
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dlg.accept)
+        layout.addWidget(close_btn)
+        
+        dlg.exec()
 
     def update_min_deg_label(self, val):
         self.lbl_min_deg.setText(str(val))
@@ -248,9 +307,19 @@ class PySigmaVisualizer(QMainWindow):
         for path in ann_paths:
             if path.exists():
                 try:
+                    page_num = 0
+                    if "_page" in path.stem:
+                        try:
+                            page_num = int(path.stem.split("_page")[-1])
+                        except ValueError:
+                            pass
+
                     with open(path, "r") as f:
                         data = json.load(f)
-                        annotations.extend(data.get("annotations", []))
+                        page_annotations = data.get("annotations", [])
+                        for ann in page_annotations:
+                            ann["_page"] = page_num
+                        annotations.extend(page_annotations)
                 except Exception as e:
                     logger.error(f"Error reading {path}: {e}")
 
@@ -333,6 +402,37 @@ class PySigmaVisualizer(QMainWindow):
             components = (
                 list(nx.weakly_connected_components(G)) if num_nodes > 0 else []
             )
+
+            # Order components per cy of the system and the page number
+            def get_component_sort_key(comp_nodes):
+                system_nodes = []
+                all_nodes = []
+                
+                for node in comp_nodes:
+                    orig_id = G.nodes[node]["original_id"]
+                    if node_map and orig_id in node_map:
+                        ann = node_map[orig_id]
+                        if "bbox" in ann:
+                            page = ann.get("_page", 0)
+                            bbox = ann["bbox"]
+                            cy = (bbox[1] + bbox[3]) / 2.0
+                            node_info = (page, cy)
+                            all_nodes.append(node_info)
+                            if ann.get("class") == "system":
+                                system_nodes.append(node_info)
+                
+                if system_nodes:
+                    avg_page = sum(n[0] for n in system_nodes) / len(system_nodes)
+                    avg_cy = sum(n[1] for n in system_nodes) / len(system_nodes)
+                    return (avg_page, avg_cy)
+                elif all_nodes:
+                    avg_page = sum(n[0] for n in all_nodes) / len(all_nodes)
+                    avg_cy = sum(n[1] for n in all_nodes) / len(all_nodes)
+                    return (avg_page, avg_cy)
+                return (0, 0)
+
+            if components:
+                components.sort(key=get_component_sort_key)
             component_map = {}
             for component_index, nodes in enumerate(components):
                 for node in nodes:
@@ -497,6 +597,19 @@ class PySigmaVisualizer(QMainWindow):
                 background_color="#EEEEEE",
             )
             sigma_obj.to_html(html_path)
+
+            # Read the generated HTML to modify the JSON widget state directly
+            with open(html_path, "r") as f:
+                html_code = f.read()
+            
+            # Replace the fixed piexel height injected by Sigma with a viewport-relative one
+            html_code = html_code.replace('"800px"', '"100vh"')
+            
+            # Inject CSS to reset body margins and prevents scrollbars
+            html_code += "<style>body, html { margin: 0; padding: 0; height: 100vh; width: 100vw; overflow: hidden; }</style>"
+            
+            with open(html_path, "w") as f:
+                f.write(html_code)
 
             self.web_view.setUrl(QUrl.fromLocalFile(html_path))
         except Exception as e:

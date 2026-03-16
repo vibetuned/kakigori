@@ -55,7 +55,7 @@ def inject_mxl_file(mxl_path: Path, output_dir: Path) -> bool:
 
         # We use a sequential ID format prefixing with the stem to ensure global uniqueness across the dataset
         # Verovio requires XML valid IDs (must start with letter)
-        stem_prefix = "".join([c if c.isalnum() else "" for c in mxl_path.stem])
+        stem_prefix = "".join([c if c.isalnum() else "" for c in mxl_path.stem[-3:]])
         counter = 1
 
         for el in tree.iter():

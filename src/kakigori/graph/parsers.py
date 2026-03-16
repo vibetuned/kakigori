@@ -55,15 +55,22 @@ class GroundTruthGraphBuilder:
 
         # 1. Temporal Edges (Class 3) - Left-to-Right sequence within layers
         for layer in self.mei_root.findall('.//mei:layer', self.ns):
-            events = layer.findall('./*') 
             valid_sequence = []
             
-            for ev in events:
-                ev_id = self._get_id(ev)
-                if ev_id in self.node_map:
-                    cls = self.node_map[ev_id]['class']
-                    if cls in temporal or cls in context:
-                        valid_sequence.append(ev_id)
+            def get_events(el):
+                for child in el:
+                    tag = child.tag.split('}')[-1]
+                    # Only recursively expand beams and tuplets to get their inner notes/chords
+                    if tag in ['beam', 'tuplet']:
+                        get_events(child)
+                    else:
+                        ev_id = self._get_id(child)
+                        if ev_id and ev_id in self.node_map:
+                            cls = self.node_map[ev_id]['class']
+                            if cls in temporal or cls in context:
+                                valid_sequence.append(ev_id)
+                                
+            get_events(layer)
                         
             for i in range(len(valid_sequence) - 1):
                 self.gt_edges.append((valid_sequence[i], valid_sequence[i+1], 3))
@@ -114,6 +121,69 @@ class GroundTruthGraphBuilder:
                     if st.get('_page') == n_page and st['bbox'][1] <= n_cy <= st['bbox'][3]:
                         self.gt_edges.append((st['id'], node['id'], 1))
                         break
+
+        # Spatial Fallback for Note -> Dots/Modifiers (page-aware)
+        # Dots are MEI attributes, not child elements, so the hierarchy
+        # walker can't link them. Find the nearest note/chord spatially.
+        existing_children = {child for _, child, _ in self.gt_edges}
+        notes = [
+            n for n in self.spatial_nodes
+            if n.get('class') in temporal and 'id' in n
+        ]
+        for node in self.spatial_nodes:
+            if node['class'] in modifier and node.get('id') and node['id'] not in existing_children:
+                n_cx = (node['bbox'][0] + node['bbox'][2]) / 2.0
+                n_cy = (node['bbox'][1] + node['bbox'][3]) / 2.0
+                n_page = node.get('_page')
+
+                best_note = None
+                best_dist = float('inf')
+
+                for note in notes:
+                    if note.get('_page') != n_page:
+                        continue
+                    # Modifier must be vertically within or near the note's bbox
+                    if not (note['bbox'][1] - 30 <= n_cy <= note['bbox'][3] + 30):
+                        continue
+                    dist = abs(n_cx - (note['bbox'][0] + note['bbox'][2]) / 2.0)
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_note = note
+
+                if best_note is not None:
+                    self.gt_edges.append((best_note['id'], node['id'], 2))
+
+        # Spatial Fallback for Note/Chord -> Stems (page-aware)
+        # Stems are SVG-only visual elements, not MEI child elements.
+        # A stem can touch multiple noteheads in a chord, so link to ALL matching notes.
+        noteheads = [
+            n for n in self.spatial_nodes
+            if n.get('class') in ["noteheadWhole", "noteheadHalf", "noteheadBlack"] and 'id' in n
+        ]
+        stem_classes = {"stem4", "stem8", "stem16", "stem32"}
+        existing_children = {child for _, child, _ in self.gt_edges}
+        for node in self.spatial_nodes:
+            if node['class'] in stem_classes and node.get('id') and node['id'] not in existing_children:
+                n_bbox = node['bbox']
+                n_page = node.get('_page')
+
+                # Link all noteheads whose bounding box intersects with the stem's bounding box
+                for note in noteheads:
+                    if note.get('_page') != n_page:
+                        continue
+                        
+                    note_bbox = note['bbox']
+                    
+                    # Check for bounding box intersection
+                    intersects = (
+                        n_bbox[0] <= note_bbox[2] and  # stem left <= note right
+                        n_bbox[2] >= note_bbox[0] and  # stem right >= note left
+                        n_bbox[1] <= note_bbox[3] and  # stem top <= note bottom
+                        n_bbox[3] >= note_bbox[1]      # stem bottom >= note top
+                    )
+                    
+                    if intersects:
+                        self.gt_edges.append((note['id'], node['id'], 1))
 
         return self.gt_edges
 
