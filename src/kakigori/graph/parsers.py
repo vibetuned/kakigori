@@ -155,26 +155,25 @@ class GroundTruthGraphBuilder:
 
         # Spatial Fallback for Note/Chord -> Stems (page-aware)
         # Stems are SVG-only visual elements, not MEI child elements.
-        # A stem can touch multiple noteheads in a chord, so link to ALL matching notes.
         noteheads = [
             n for n in self.spatial_nodes
             if n.get('class') in ["noteheadWhole", "noteheadHalf", "noteheadBlack"] and 'id' in n
         ]
         stem_classes = {"stem4", "stem8", "stem16", "stem32"}
         existing_children = {child for _, child, _ in self.gt_edges}
+        
         for node in self.spatial_nodes:
             if node['class'] in stem_classes and node.get('id') and node['id'] not in existing_children:
                 n_bbox = node['bbox']
                 n_page = node.get('_page')
-
-                # Link all noteheads whose bounding box intersects with the stem's bounding box
+                
+                # 1. Collect all intersecting noteheads
+                intersecting_notes = []
                 for note in noteheads:
                     if note.get('_page') != n_page:
                         continue
                         
                     note_bbox = note['bbox']
-                    
-                    # Check for bounding box intersection
                     intersects = (
                         n_bbox[0] <= note_bbox[2] and  # stem left <= note right
                         n_bbox[2] >= note_bbox[0] and  # stem right >= note left
@@ -183,7 +182,38 @@ class GroundTruthGraphBuilder:
                     )
                     
                     if intersects:
-                        self.gt_edges.append((note['id'], node['id'], 1))
+                        intersecting_notes.append(note)
+
+                # 2. Group intersecting notes by exact vertical position (finds shared unisons)
+                unison_groups = {}
+                for note in intersecting_notes:
+                    # Rounding to nearest pixel handles minor bounding box jitter
+                    cy = round((note['bbox'][1] + note['bbox'][3]) / 2.0)
+                    unison_groups.setdefault(cy, []).append(note)
+                
+                stem_cy = (n_bbox[1] + n_bbox[3]) / 2.0
+
+                # 3. Resolve edges, breaking ties for shared noteheads
+                for cy, unisons in unison_groups.items():
+                    if len(unisons) == 1:
+                        # Normal case: stem intersects a unique notehead (or multiple distinct notes in a chord)
+                        self.gt_edges.append((unisons[0]['id'], node['id'], 1))
+                    else:
+                        # Tie-breaker for overlapping noteheads!
+                        # Sort unisons by MEI ID to ensure deterministic assignment to layers
+                        unisons.sort(key=lambda x: x['id'])
+                        
+                        # An "Up" stem sits above the notehead (lower Y value in standard coordinates)
+                        is_up_stem = stem_cy < cy
+                        
+                        if is_up_stem:
+                            # Up stem goes to the first layer (usually Soprano/lower ID)
+                            target_note = unisons[0]
+                        else:
+                            # Down stem goes to the second layer (usually Alto/higher ID)
+                            target_note = unisons[-1]
+                            
+                        self.gt_edges.append((target_note['id'], node['id'], 1))
 
         return self.gt_edges
 
