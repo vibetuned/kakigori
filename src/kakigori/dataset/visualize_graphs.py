@@ -7,6 +7,10 @@ from pathlib import Path
 
 # Third party imports
 import torch
+
+# First party imports
+from kakigori.graph.parsers import page_sort_key
+
 from PySide6.QtGui import QPen, QFont, QColor, QPixmap, QShortcut, QKeySequence
 from PySide6.QtCore import Qt, QLineF, QRectF
 from PySide6.QtWidgets import (
@@ -225,7 +229,7 @@ class GraphVisualizer(QMainWindow):
         # Build the collision-safe node map across ALL pages of the score, in the
         # same sorted order as generate_graphs.py, so the pseudo-ID counter
         # matches the one used by GroundTruthGraphBuilder
-        ann_paths = sorted(self.ann_dir.glob(f"{stem_no_page}_page*.json"))
+        ann_paths = sorted(self.ann_dir.glob(f"{stem_no_page}_page*.json"), key=page_sort_key)
         if not ann_paths:
             single = self.ann_dir / f"{img_path.stem}.json"
             ann_paths = [single] if single.exists() else []

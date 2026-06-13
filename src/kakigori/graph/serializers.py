@@ -55,6 +55,31 @@ SUB_GLYPH_CLASSES = set(NOTEHEAD_BASE_DURATION.keys())
 VALID_DURATIONS = [1, 2, 4, 8, 16, 32]
 
 
+def _find_staff_row(staff_node: dict, system_staves: list):
+    """Match a measure-staff to the system-staff (tight 5-line box) it sits on.
+
+    Uses vertical overlap rather than center distance: a staff's content bbox
+    (ledger lines, dynamics...) can shift its center past a neighboring row,
+    but it always fully covers its own 5 staff lines.
+    """
+    y1, y2 = staff_node['bbox'][1], staff_node['bbox'][3]
+    best, best_overlap = None, 0.0
+    for ss in system_staves:
+        s1, s2 = ss['bbox'][1], ss['bbox'][3]
+        overlap = min(y2, s2) - max(y1, s1)
+        if overlap > best_overlap:
+            best_overlap, best = overlap, ss
+    return best
+
+
+def _staff_sort_key(staff_node: dict, system_staves: list) -> float:
+    """Stable top-to-bottom ordering key for staves within a measure."""
+    row = _find_staff_row(staff_node, system_staves)
+    if row is not None:
+        return (row['bbox'][1] + row['bbox'][3]) / 2.0
+    return (staff_node['bbox'][1] + staff_node['bbox'][3]) / 2.0
+
+
 def _nearest_duration(value: float) -> int:
     """Snap a raw duration value to the nearest standard kern duration."""
     return min(VALID_DURATIONS, key=lambda d: abs(d - value))
@@ -89,13 +114,15 @@ class Measure:
         self.measure_id = measure_id
         self.tokens = []
         self.durations = []  # Duration in whole-note units, parallel to tokens
-        self.cxs = []  # <--- NEW: Store spatial x-coordinates
+        self.cxs = []  # Spatial x-coordinates, parallel to tokens
+        self.ids = []  # Graph node IDs, parallel to tokens
 
-    def add(self, token: str, duration: float = 0.25, cx: float = 0.0):
+    def add(self, token: str, duration: float = 0.25, cx: float = 0.0, node_id=None):
         """Add a note/rest token with its duration (in whole-note units)."""
         self.tokens.append(token)
         self.durations.append(duration)
         self.cxs.append(cx)
+        self.ids.append(node_id)
 
     def build(self) -> list:
         """Return the tokens for this measure. Uses null token if empty."""
@@ -168,15 +195,14 @@ class Spine:
         if not target_keysig:
             return "*k[]"
 
-        staff_node_id = staff_node['id']
-
-        if not staff_node_id:
-            return "*k[]"
-
-        # 2. Ask the graph for ONLY the accidentals explicitly linked to this keySig
+        # 2. Collect the accidentals linked to this keySig or directly to the
+        # staff (the spatial fallback in the graph builder attaches them there)
         valid_accids = []
-        
-        for child_id, e_class in children_map.get(staff_node_id, []):
+        candidate_children = (
+            children_map.get(target_keysig, [])
+            + children_map.get(staff_node['id'], [])
+        )
+        for child_id, e_class in candidate_children:
             child_node = nodes_map.get(child_id)
             if child_node and "keyAccid" in child_node['class']:
                 valid_accids.append(child_node)
@@ -260,10 +286,11 @@ class Spine:
         system_descendants = cls._get_system_descendants(system_id, children_map)
         
         staves = [
-            v for v, e_class in children_map.get(measure_id, []) 
+            v for v, e_class in children_map.get(measure_id, [])
             if e_class == 1 and nodes_map[v].get('class') == 'staff'
         ]
-        staves.sort(key=lambda s_id: nodes_map[s_id]['cy'])
+        system_staves = [n for n in nodes_map.values() if n.get('class') == 'system-staff']
+        staves.sort(key=lambda s_id: _staff_sort_key(nodes_map[s_id], system_staves))
 
         spines = []
         for index, st_id in enumerate(staves, start=1):
@@ -316,15 +343,108 @@ class Spine:
 
 class HumdrumContext:
     """Manages the collection of spines and handles the final text rendering."""
-    
-    def __init__(self):
+
+    def __init__(self, sync_groups=None):
         self.spines = []
+        # Maps node ID -> sync group key. Events sharing a group are simultaneous
+        # (Class 5 edges in the graph) and must land on the same Humdrum row.
+        self.sync_groups = sync_groups or {}
 
     def add_spine(self, spine: Spine):
         self.spines.append(spine)
 
+    def _slices_from_sync(self, measures: list):
+        """Build time slices from Class 5 (sync) edge groups via topological sort.
+
+        Returns a list of slices, where each slice is a list (one entry per
+        spine) of token lists — or None if the constraints are cyclic.
+        """
+        if not any(self.sync_groups.get(node_id) is not None
+                   for m in measures for node_id in m.ids):
+            return None  # No sync information in this measure
+
+        # 1. Assign every token a slice key: its sync group, or a unique key
+        slice_spines = {}  # key -> {spine_idx: [tokens]}
+        slice_cx = {}      # key -> min cx (topo tie-breaker)
+        spine_keys = []    # per spine: ordered list of slice keys
+
+        for s_idx, m in enumerate(measures):
+            keys = []
+            for i, token in enumerate(m.tokens):
+                node_id = m.ids[i] if i < len(m.ids) else None
+                group = self.sync_groups.get(node_id)
+                key = group if group is not None else ("solo", s_idx, i)
+                slice_spines.setdefault(key, {}).setdefault(s_idx, []).append(token)
+                cx = m.cxs[i] if i < len(m.cxs) else 0.0
+                slice_cx[key] = min(slice_cx.get(key, cx), cx)
+                keys.append(key)
+            spine_keys.append(keys)
+
+        # 2. Precedence constraints: within a spine, tokens appear in time order
+        successors = {key: set() for key in slice_spines}
+        in_degree = {key: 0 for key in slice_spines}
+        for keys in spine_keys:
+            for a, b in zip(keys, keys[1:]):
+                if a != b and b not in successors[a]:
+                    successors[a].add(b)
+                    in_degree[b] += 1
+
+        # 3. Kahn topological sort, tie-breaking by horizontal position
+        ready = sorted((k for k in slice_spines if in_degree[k] == 0),
+                       key=lambda k: slice_cx[k])
+        ordered = []
+        while ready:
+            key = ready.pop(0)
+            ordered.append(key)
+            changed = False
+            for succ in successors[key]:
+                in_degree[succ] -= 1
+                if in_degree[succ] == 0:
+                    ready.append(succ)
+                    changed = True
+            if changed:
+                ready.sort(key=lambda k: slice_cx[k])
+
+        if len(ordered) < len(slice_spines):
+            return None  # Cyclic constraints; caller falls back to geometry
+
+        n_spines = len(measures)
+        return [
+            [slice_spines[key].get(s_idx, []) for s_idx in range(n_spines)]
+            for key in ordered
+        ]
+
+    @staticmethod
+    def _slices_from_geometry(measures: list):
+        """Fallback: cluster events into time slices by horizontal proximity."""
+        TOLERANCE = 30.0  # Pixels. Events within this horizontal distance sync up.
+
+        all_cxs = sorted(cx for m in measures for cx in m.cxs)
+        if not all_cxs:
+            return [[[] for _ in measures]]
+
+        clusters = []
+        current_cluster = [all_cxs[0]]
+        for cx in all_cxs[1:]:
+            if cx - current_cluster[0] <= TOLERANCE:
+                current_cluster.append(cx)
+            else:
+                clusters.append(sum(current_cluster) / len(current_cluster))
+                current_cluster = [cx]
+        if current_cluster:
+            clusters.append(sum(current_cluster) / len(current_cluster))
+
+        merged_timeline = sorted(clusters)
+        slices = [[[] for _ in measures] for _ in merged_timeline]
+        for s_idx, m in enumerate(measures):
+            for token, cx in zip(m.tokens, m.cxs):
+                t_idx = min(range(len(merged_timeline)),
+                            key=lambda j: abs(merged_timeline[j] - cx))
+                slices[t_idx][s_idx].append(token)
+        return slices
+
     def _synchronize_measures(self):
-        """Align measures across spines using spatial horizontal coordinates (cx)."""
+        """Align measures across spines, preferring sync edges over geometry."""
         if not self.spines:
             return
 
@@ -334,60 +454,24 @@ class HumdrumContext:
             while len(spine.measures) < max_measures:
                 spine.measures.append(Measure("_pad"))
 
-        # 2. Cluster events into time slices based on spatial proximity
-        TOLERANCE = 30.0  # Pixels. Events within this horizontal distance sync up.
-
+        # 2. Slice each measure column into simultaneous rows
         for m_idx in range(max_measures):
-            all_cxs = []
-            for spine in self.spines:
-                all_cxs.extend(spine.measures[m_idx].cxs)
+            measures = [spine.measures[m_idx] for spine in self.spines]
 
-            if not all_cxs:
-                # All spines have empty measures, ensure at least one null token
-                for spine in self.spines:
-                    if not spine.measures[m_idx].tokens:
-                        spine.measures[m_idx].tokens = ["."]
-                        spine.measures[m_idx].cxs = [0.0]
+            if not any(m.tokens for m in measures):
+                for m in measures:
+                    m.tokens = ["."]
                 continue
 
-            # Sort and cluster the horizontal coordinates
-            all_cxs.sort()
-            clusters = []
-            current_cluster = [all_cxs[0]]
+            slices = self._slices_from_sync(measures)
+            if slices is None:
+                slices = self._slices_from_geometry(measures)
 
-            for cx in all_cxs[1:]:
-                if cx - current_cluster[0] <= TOLERANCE:
-                    current_cluster.append(cx)
-                else:
-                    # Average the positions in the cluster to find its center
-                    clusters.append(sum(current_cluster) / len(current_cluster))
-                    current_cluster = [cx]
-            
-            if current_cluster:
-                clusters.append(sum(current_cluster) / len(current_cluster))
-
-            # Merged timeline is now the sorted centers of our geometric clusters
-            merged_timeline = sorted(clusters)
-
-            # Rebuild each spine's tokens aligned to the geometric timeline
-            for spine in self.spines:
-                m = spine.measures[m_idx]
-                time_to_token = {}
-
-                # Map this spine's tokens to the nearest cluster
-                for token, cx in zip(m.tokens, m.cxs):
-                    nearest_cluster = min(merged_timeline, key=lambda c: abs(c - cx))
-                    # Prevent overwriting if multiple tokens snap to the same cluster (e.g., a chord)
-                    if nearest_cluster not in time_to_token:
-                        time_to_token[nearest_cluster] = token
-                    else:
-                        time_to_token[nearest_cluster] += f" {token}"
-
-                new_tokens = []
-                for t in merged_timeline:
-                    new_tokens.append(time_to_token.get(t, "."))
-
-                m.tokens = new_tokens
+            for s_idx, m in enumerate(measures):
+                m.tokens = [
+                    " ".join(sl[s_idx]) if sl[s_idx] else "."
+                    for sl in slices
+                ]
 
     def merge_spines(self) -> str:
         """Builds all spines and transposes them into tab-separated horizontal rows."""
@@ -419,8 +503,29 @@ class MinimalHumdrumSerializer:
         self.node_roles = node_roles
         self.pyg_node_ids = pyg_node_ids
 
-        self.context = HumdrumContext()
+        self.context = HumdrumContext(self._build_sync_groups())
         self._head_initialized = False
+
+    def _build_sync_groups(self) -> dict:
+        """Union-find over Class 5 (sync) edges: maps node ID -> simultaneity group."""
+        parent = {}
+
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        for i in range(self.edge_index.shape[1]):
+            if self.edge_predictions[i].item() != 5:
+                continue
+            u = self.pyg_node_ids[self.edge_index[0, i].item()]
+            v = self.pyg_node_ids[self.edge_index[1, i].item()]
+            parent.setdefault(u, u)
+            parent.setdefault(v, v)
+            parent[find(u)] = find(v)
+
+        return {node: find(node) for node in parent}
 
     def _build_children(self, nodes: dict) -> dict:
         """Build the children adjacency map scoped to a set of nodes."""
@@ -479,14 +584,14 @@ class MinimalHumdrumSerializer:
 
     def _add_measure_to_spines(self, measure_id: str, children: dict, nodes: dict):
         """Create a Measure for each staff, populate with note tokens, and append to the spine."""
+        # 1. Grab all system-staff nodes to use their tight 5-line bounding boxes
+        all_system_staves = [n for n in nodes.values() if n.get('class') == 'system-staff']
+
         staves = [
             v for v, e_class in children.get(measure_id, [])
             if e_class == 1 and nodes.get(v, {}).get('class') == 'staff'
         ]
-        staves.sort(key=lambda s_id: nodes[s_id].get('cy', 0))
-
-        # 1. Grab all system-staff nodes to use their tight 5-line bounding boxes
-        all_system_staves = [n for n in nodes.values() if n.get('class') == 'system-staff']
+        staves.sort(key=lambda s_id: _staff_sort_key(nodes[s_id], all_system_staves))
 
         for spine_idx, staff_id in enumerate(staves):
             if spine_idx >= len(self.context.spines):
@@ -496,16 +601,10 @@ class MinimalHumdrumSerializer:
             staff_node = nodes[staff_id]
             measure = Measure(measure_id)
 
-            # 2. Find the closest system-staff geometrically
-            staff_cy = staff_node.get('cy', 0.0)
-            
-            if all_system_staves:
-                # Find the system-staff whose vertical center is closest to this staff's center
-                best_ss = min(
-                    all_system_staves, 
-                    key=lambda ss: abs(((ss['bbox'][1] + ss['bbox'][3]) / 2.0) - staff_cy)
-                )
-                active_bbox = best_ss['bbox']
+            # 2. Find the system-staff row this staff sits on (by y-overlap)
+            staff_row = _find_staff_row(staff_node, all_system_staves)
+            if staff_row is not None:
+                active_bbox = staff_row['bbox']
             else:
                 active_bbox = staff_node.get('bbox', [0, 0, 0, 0])
 
@@ -523,11 +622,11 @@ class MinimalHumdrumSerializer:
                     measure_value = spine.meter_num / spine.meter_den
                     info['duration'], info['dots'] = _value_to_duration(measure_value)
 
-            # 5. Serialize to kern tokens with durations and spatial cx
+            # 5. Serialize to kern tokens with durations, spatial cx and node ID
             for info in event_infos:
                 dur = _note_value(info['duration'], info['dots'])
                 cx = info.get('cx', 0.0)
-                measure.add(self._info_to_kern(info), dur, cx)
+                measure.add(self._info_to_kern(info), dur, cx, info.get('id'))
 
             spine.add_measure(measure)
 
@@ -535,13 +634,20 @@ class MinimalHumdrumSerializer:
 
     def _collect_staff_events(self, staff_id: str, children: dict, nodes: dict) -> list:
         """Find temporal-anchor events under a staff, ordered by Class 3 (Temporal) edges."""
-        # 1. Collect all structural descendants via Class 1 edges
+        # 1. Collect all structural descendants via Class 1 edges. Tuplets are
+        # modifier-class containers (Class 2 edge from the layer) but hold
+        # their notes via Class 1 edges, so descend through them as well.
         descendants = set()
         stack = [staff_id]
         while stack:
             curr = stack.pop()
             for child_id, e_class in children.get(curr, []):
-                if e_class == 1 and child_id not in descendants:
+                if child_id in descendants:
+                    continue
+                is_tuplet_container = (
+                    e_class == 2 and nodes.get(child_id, {}).get('class') == 'tuplet'
+                )
+                if e_class == 1 or is_tuplet_container:
                     descendants.add(child_id)
                     stack.append(child_id)
 
@@ -622,14 +728,15 @@ class MinimalHumdrumSerializer:
         """Analyze a graph event and return a structured info dict."""
         cls = event['class']
         base_cx = event.get('cx', 0.0)
+        event_id = event.get('id')
 
         if cls in REST_KERN:
             dur = int(REST_KERN[cls].replace('r', ''))
             dots = self._count_dots(event.get('id', ''), children, nodes)
-            return {"type": "rest", "duration": dur, "dots": dots, "ambiguous": False, "cx": base_cx}
+            return {"type": "rest", "duration": dur, "dots": dots, "ambiguous": False, "cx": base_cx, "id": event_id}
 
         if cls == "mRest":
-            return {"type": "mrest", "duration": 1, "dots": 0, "ambiguous": False, "cx": base_cx}
+            return {"type": "mrest", "duration": 1, "dots": 0, "ambiguous": False, "cx": base_cx, "id": event_id}
 
         if cls == "note":
             return self._analyze_note(event, children, nodes, clef_type, staff_bbox)
@@ -637,7 +744,7 @@ class MinimalHumdrumSerializer:
         if cls == "chord":
             return self._analyze_chord(event, children, nodes, clef_type, staff_bbox)
 
-        return {"type": "unknown", "duration": 4, "dots": 0, "ambiguous": False}
+        return {"type": "unknown", "duration": 4, "dots": 0, "ambiguous": False, "id": event_id}
 
     def _analyze_note(self, note_node: dict, children: dict, nodes: dict,
                       clef_type: str, staff_bbox: list) -> dict:
@@ -701,7 +808,8 @@ class MinimalHumdrumSerializer:
             "accidental": accidental,
             "dots": dot_count,
             "ambiguous": is_ambiguous,
-            "cx": notehead_cx
+            "cx": notehead_cx,
+            "id": note_node.get('id')
         }
 
     def _analyze_chord(self, chord_node: dict, children: dict, nodes: dict,
@@ -714,7 +822,11 @@ class MinimalHumdrumSerializer:
         shared_duration = 4
         shared_dots = 0
 
-        for child_id, _ in chord_children:
+        for child_id, e_class in chord_children:
+            # Only structural children are chord members; temporal (3) and
+            # sync (5) edges point to *other* events and must not be absorbed
+            if e_class != 1:
+                continue
             child = nodes.get(child_id)
             if child and child['class'] == 'note':
                 note_info = self._analyze_note(child, children, nodes, clef_type, staff_bbox)
@@ -731,7 +843,8 @@ class MinimalHumdrumSerializer:
             "dots": shared_dots,
             "ambiguous": shared_ambiguous,
             "notes": notes,
-            "cx": chord_cx
+            "cx": chord_cx,
+            "id": chord_node.get('id')
         }
 
     # --- Duration resolution ---

@@ -11,7 +11,7 @@ import torch
 from tqdm import tqdm
 
 # First party imports
-from kakigori.graph.parsers import GroundTruthGraphBuilder
+from kakigori.graph.parsers import GroundTruthGraphBuilder, page_sort_key
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -179,8 +179,8 @@ def main():
                 j_files = [j_file]
 
         if j_files:
-            # Sort list so pages are processed iteratively safely
-            j_files.sort()
+            # Natural page order: _page10 must come after _page2
+            j_files.sort(key=page_sort_key)
             tasks.append((m_file, j_files, out_path, node_roles))
         else:
             logger.debug(f"Missing json annotation for MEI file: {m_file.name}")

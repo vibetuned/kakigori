@@ -16,6 +16,9 @@ os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = (
 import torch
 import networkx as nx
 import matplotlib.pyplot as plt
+
+# First party imports
+from kakigori.graph.parsers import page_sort_key
 from ipysigma import Sigma
 from PySide6.QtGui import QFont, QShortcut, QKeySequence
 from PySide6.QtCore import Qt, QUrl
@@ -301,7 +304,9 @@ class PySigmaVisualizer(QMainWindow):
         ann_path = self.ann_dir / f"{graph_path.stem}.json"
 
         if not ann_path.exists():
-            ann_paths = sorted(list(self.ann_dir.glob(f"{graph_path.stem}_page*.json")))
+            ann_paths = sorted(
+                self.ann_dir.glob(f"{graph_path.stem}_page*.json"), key=page_sort_key
+            )
         else:
             ann_paths = [ann_path]
 

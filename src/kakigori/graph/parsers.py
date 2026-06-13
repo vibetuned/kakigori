@@ -1,7 +1,23 @@
 # Standard library imports
+import re
 import json
 import xml.etree.ElementTree as ET
 from fractions import Fraction
+
+
+def page_sort_key(filename):
+    """Natural sort key for per-page files: '..._page10' sorts after '..._page2'.
+
+    Every consumer of paginated annotations (graph generation, serialization,
+    visualization) must use this same ordering, since the pseudo-ID collision
+    counter and the measure sequence both depend on page order.
+    """
+    stem = str(filename).rsplit("/", 1)[-1].rsplit(".", 1)[0]
+    m = re.search(r"_page(\d+)$", stem)
+    if m:
+        return (stem[: m.start()], int(m.group(1)))
+    return (stem, 0)
+
 
 class GroundTruthGraphBuilder:
     def __init__(self, mei_file, json_files, node_roles):

@@ -12,7 +12,7 @@ from tqdm import tqdm
 from .serializers import MinimalHumdrumSerializer
 
 logging.basicConfig(
-    level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s"
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
