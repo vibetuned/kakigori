@@ -45,6 +45,20 @@ ACCIDENTAL_KERN = {
     "accidentalDoubleFlat": "--",
 }
 
+# Ornaments and articulations appended after the pitch in a kern token
+ORNAMENT_KERN = {
+    "trill": "T",
+    "mordent": "M",
+    "turn": "S",
+    "fermata": ";",
+    "arpeg": ":",
+    "articStaccatoAbove": "'",
+    "articTenutoAbove": "~",
+    "articAccentAbove": "^",
+    "articStaccatissimoAbove": "`",
+    "articMarcatoAbove": "^^",
+}
+
 # Event-level classes (top-level temporal anchors we serialize)
 EVENT_CLASSES = {"note", "chord", "mRest"} | set(REST_KERN.keys())
 
@@ -505,6 +519,8 @@ class MinimalHumdrumSerializer:
 
         self.context = HumdrumContext(self._build_sync_groups())
         self._head_initialized = False
+        # Per-page map: slur/tie node ID -> [(anchored event ID, cx), ...]
+        self._span_anchors = {}
 
     def _build_sync_groups(self) -> dict:
         """Union-find over Class 5 (sync) edges: maps node ID -> simultaneity group."""
@@ -548,6 +564,16 @@ class MinimalHumdrumSerializer:
         """Process a single page's annotations and accumulate into the context."""
         nodes = {n['id']: n for n in page_nodes}
         children = self._build_children(nodes)
+
+        # Index spanning curves by their anchored events so the open/close
+        # decision can compare the two end notes directly
+        self._span_anchors = {}
+        for parent_id, child_list in children.items():
+            for child_id, e_class in child_list:
+                if e_class == 2 and nodes.get(child_id, {}).get('class') in ('slur', 'tie'):
+                    self._span_anchors.setdefault(child_id, []).append(
+                        (parent_id, nodes.get(parent_id, {}).get('cx', 0.0))
+                    )
 
         # Find all systems on this page, sorted top-to-bottom
         systems = [n for n in nodes.values() if n['class'] == 'system']
@@ -609,22 +635,35 @@ class MinimalHumdrumSerializer:
                 active_bbox = staff_node.get('bbox', [0, 0, 0, 0])
 
             # 3. Collect events and analyze each one (passing the pristine active_bbox!)
-            events = self._collect_staff_events(staff_id, children, nodes)
+            events, tuplet_ratios = self._collect_staff_events(staff_id, children, nodes)
             event_infos = [
                 self._analyze_event(ev, children, nodes, spine.clef_type, active_bbox)
                 for ev in events
             ]
 
-            # 4. Resolve ambiguous durations and mRest using the time signature
+            # 4. Scale tuplet durations: a triplet eighth is a kern '12'
+            # (the scaled number is both the display token and the true value)
+            for info, ev in zip(event_infos, events):
+                ratio = tuplet_ratios.get(ev.get('id'))
+                if ratio and not info.get('grace'):
+                    num, numbase = ratio
+                    scaled = max(1, round(info['duration'] * num / numbase))
+                    info['duration'] = scaled
+                    info['ambiguous'] = False
+                    for sub in info.get('notes', []):
+                        sub['duration'] = scaled
+
+            # 5. Resolve ambiguous durations and mRest using the time signature
             self._resolve_durations(event_infos, spine.meter_num, spine.meter_den)
             for info in event_infos:
                 if info['type'] == 'mrest':
                     measure_value = spine.meter_num / spine.meter_den
                     info['duration'], info['dots'] = _value_to_duration(measure_value)
 
-            # 5. Serialize to kern tokens with durations, spatial cx and node ID
+            # 6. Serialize to kern tokens with durations, spatial cx and node ID
             for info in event_infos:
-                dur = _note_value(info['duration'], info['dots'])
+                # Grace notes take no time on the timeline
+                dur = 0.0 if info.get('grace') else _note_value(info['duration'], info['dots'])
                 cx = info.get('cx', 0.0)
                 measure.add(self._info_to_kern(info), dur, cx, info.get('id'))
 
@@ -632,15 +671,21 @@ class MinimalHumdrumSerializer:
 
     # --- Event collection ---
 
-    def _collect_staff_events(self, staff_id: str, children: dict, nodes: dict) -> list:
-        """Find temporal-anchor events under a staff, ordered by Class 3 (Temporal) edges."""
+    def _collect_staff_events(self, staff_id: str, children: dict, nodes: dict) -> tuple:
+        """Find temporal-anchor events under a staff, ordered by Class 3 (Temporal) edges.
+
+        Returns (sorted_events, tuplet_ratios) where tuplet_ratios maps event
+        IDs to a (num, numbase) duration ratio for events inside tuplets.
+        """
         # 1. Collect all structural descendants via Class 1 edges. Tuplets are
         # modifier-class containers (Class 2 edge from the layer) but hold
-        # their notes via Class 1 edges, so descend through them as well.
+        # their notes via Class 1 edges, so descend through them as well,
+        # remembering which tuplet an event belongs to.
         descendants = set()
-        stack = [staff_id]
+        tuplet_of = {}
+        stack = [(staff_id, None)]
         while stack:
-            curr = stack.pop()
+            curr, tuplet_ctx = stack.pop()
             for child_id, e_class in children.get(curr, []):
                 if child_id in descendants:
                     continue
@@ -649,7 +694,10 @@ class MinimalHumdrumSerializer:
                 )
                 if e_class == 1 or is_tuplet_container:
                     descendants.add(child_id)
-                    stack.append(child_id)
+                    ctx = child_id if is_tuplet_container else tuplet_ctx
+                    if ctx is not None:
+                        tuplet_of[child_id] = ctx
+                    stack.append((child_id, ctx))
 
         # 2. Filter down to valid top-level event temporal anchors
         raw_events = set()
@@ -703,7 +751,26 @@ class MinimalHumdrumSerializer:
             missing_nodes = sorted([nodes[m] for m in missing], key=lambda x: x.get('cx', 0))
             sorted_events.extend(missing_nodes)
 
-        return sorted_events
+        # 6. Derive tuplet duration ratios: a tuplet of N events plays N in the
+        # time of the largest power of two below N (3:2, 5:4, 6:4, 7:4...)
+        events_per_tuplet = {}
+        for ev_id in top_level_events:
+            t_id = tuplet_of.get(ev_id)
+            if t_id is not None:
+                events_per_tuplet.setdefault(t_id, []).append(ev_id)
+
+        tuplet_ratios = {}
+        for t_id, ev_ids in events_per_tuplet.items():
+            num = len(ev_ids)
+            if num < 3:
+                continue
+            numbase = 1
+            while numbase * 2 < num:
+                numbase *= 2
+            for ev_id in ev_ids:
+                tuplet_ratios[ev_id] = (num, numbase)
+
+        return sorted_events, tuplet_ratios
 
     # --- Event analysis (returns structured dicts) ---
 
@@ -722,6 +789,40 @@ class MinimalHumdrumSerializer:
                 else:
                     dot_count += 1
         return dot_count
+
+    def _collect_ornaments(self, event: dict, children: dict, nodes: dict) -> tuple:
+        """Collect kern prefix/suffix decorations from an event's modifier children.
+
+        Spanning curves (slur, tie) are linked to both end notes in the graph;
+        the leftmost anchored note opens the span, the other one closes it.
+        """
+        prefix, suffix = "", ""
+        ev_id = event.get('id', '')
+        for child_id, e_class in children.get(ev_id, []):
+            if e_class != 2:
+                continue
+            child = nodes.get(child_id)
+            if not child:
+                continue
+            ccls = child['class']
+            if ccls in ORNAMENT_KERN:
+                suffix += ORNAMENT_KERN[ccls]
+            elif ccls in ('slur', 'tie'):
+                open_ch, close_ch = ('(', ')') if ccls == 'slur' else ('[', ']')
+                anchors = self._span_anchors.get(child_id, [])
+                others = [(cx, aid) for aid, cx in anchors if aid != ev_id]
+                if others:
+                    is_start = (event.get('cx', 0.0), ev_id) <= min(others)
+                else:
+                    # Other end not on this page: fall back to curve geometry
+                    d_left = abs(event.get('cx', 0.0) - child['bbox'][0])
+                    d_right = abs(event.get('cx', 0.0) - child['bbox'][2])
+                    is_start = d_left <= d_right
+                if is_start:
+                    prefix += open_ch
+                else:
+                    suffix += close_ch
+        return prefix, suffix
 
     def _analyze_event(self, event: dict, children: dict, nodes: dict,
                        clef_type: str, staff_bbox: list) -> dict:
@@ -765,13 +866,15 @@ class MinimalHumdrumSerializer:
         notehead_cy = note_node.get('cy', 0.0)
         notehead_cx = note_node.get('cx', 0.0)
         has_definitive_duration = False
+        is_grace = False
+        staff_space = (staff_bbox[3] - staff_bbox[1]) / 4.0
 
         # 2. Analyze the collected components to determine the note's properties
         for desc_id in descendants:
             child = nodes.get(desc_id)
             if not child:
                 continue
-            
+
             cls = child.get('class', '')
 
             # Noteheads set the base duration and the Y-coordinate for pitch
@@ -780,6 +883,11 @@ class MinimalHumdrumSerializer:
                     duration = NOTEHEAD_BASE_DURATION[cls]
                 notehead_cy = child.get('cy', notehead_cy)
                 notehead_cx = child.get('cx', notehead_cx)
+                # Grace noteheads are drawn at ~0.75x scale; a regular
+                # notehead is about as tall as one staff space
+                notehead_h = child['bbox'][3] - child['bbox'][1]
+                if staff_space > 0 and notehead_h < 0.85 * staff_space:
+                    is_grace = True
 
             # Stems override noteheads with a more definitive duration
             if cls in STEM_DURATION:
@@ -798,8 +906,9 @@ class MinimalHumdrumSerializer:
         # 3. Check for dots (Note: You may need to adapt this depending on how dots connect)
         dot_count = self._count_dots(note_node['id'], children, nodes)
 
-        is_ambiguous = (duration == 4 and not has_definitive_duration)
+        is_ambiguous = (duration == 4 and not has_definitive_duration and not is_grace)
         pitch = self._position_to_kern_pitch(notehead_cy, clef_type, staff_bbox)
+        prefix, suffix = self._collect_ornaments(note_node, children, nodes)
 
         return {
             "type": "note",
@@ -808,6 +917,9 @@ class MinimalHumdrumSerializer:
             "accidental": accidental,
             "dots": dot_count,
             "ambiguous": is_ambiguous,
+            "grace": is_grace,
+            "prefix": prefix,
+            "suffix": suffix,
             "cx": notehead_cx,
             "id": note_node.get('id')
         }
@@ -837,11 +949,15 @@ class MinimalHumdrumSerializer:
                     shared_dots = note_info['dots']
                     shared_ambiguous = note_info['ambiguous']
         chord_cx = notes[0]['cx'] if notes else chord_node.get('cx', 0.0)
+        prefix, suffix = self._collect_ornaments(chord_node, children, nodes)
         return {
             "type": "chord",
             "duration": shared_duration,
             "dots": shared_dots,
             "ambiguous": shared_ambiguous,
+            "grace": any(n.get('grace') for n in notes),
+            "prefix": prefix,
+            "suffix": suffix,
             "notes": notes,
             "cx": chord_cx,
             "id": chord_node.get('id')
@@ -858,6 +974,8 @@ class MinimalHumdrumSerializer:
         ambiguous_indices = []
 
         for i, info in enumerate(event_infos):
+            if info.get('grace'):
+                continue  # Grace notes consume no measure time
             if info['ambiguous']:
                 ambiguous_indices.append(i)
             else:
@@ -902,17 +1020,24 @@ class MinimalHumdrumSerializer:
 
         if info['type'] == 'note':
             token = f"{info['duration']}{info['pitch']}{info.get('accidental', '')}"
+            if info.get('grace'):
+                token += "q"
             token += "." * info['dots']
-            return token
+            return f"{info.get('prefix', '')}{token}{info.get('suffix', '')}"
 
         if info['type'] == 'chord':
             note_tokens = []
             for note in info.get('notes', []):
                 t = f"{note['duration']}{note['pitch']}{note.get('accidental', '')}"
+                if note.get('grace'):
+                    t += "q"
                 t += "." * note['dots']
+                t = f"{note.get('prefix', '')}{t}{note.get('suffix', '')}"
                 note_tokens.append(t)
             note_tokens.sort()
-            return " ".join(note_tokens) if note_tokens else "."
+            if not note_tokens:
+                return "."
+            return f"{info.get('prefix', '')}{' '.join(note_tokens)}{info.get('suffix', '')}"
 
         return "."  # Unknown
 
@@ -942,9 +1067,10 @@ class MinimalHumdrumSerializer:
 
         total = bottom_idx + step
 
-        # Calculate diatonic note index and octave
+        # Calculate diatonic note index and octave; clamp the octave so
+        # degenerate staves (e.g. 1-line percussion) can't explode the range
         note_idx = total % 7
-        octave = bottom_oct + (total // 7)
+        octave = max(0, min(8, bottom_oct + (total // 7)))
         note_name = DIATONIC[note_idx]
 
         # Humdrum **kern octave formatting rules

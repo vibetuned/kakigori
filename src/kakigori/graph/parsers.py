@@ -166,8 +166,25 @@ class GroundTruthGraphBuilder:
         for child_el in self.mei_root.iter():
             child_id = self._get_id(child_el)
             if not child_id or child_id not in self.node_map: continue
-            
+
             child_class = self.node_map[child_id]['class']
+
+            # Control events (trill, mordent, slur, tie, fermata...) carry
+            # explicit @startid/@endid anchors in MEI — link them to their
+            # target note instead of their structural parent (the measure)
+            if child_class in modifier:
+                startid = child_el.get('startid', '').lstrip('#')
+                if not startid:
+                    # Some control events (e.g. arpeg) anchor via @plist instead
+                    plist = child_el.get('plist', '').split()
+                    startid = plist[0].lstrip('#') if plist else ''
+                if startid and startid in self.node_map:
+                    self.gt_edges.append((startid, child_id, 2))
+                    endid = child_el.get('endid', '').lstrip('#')
+                    if endid and endid != startid and endid in self.node_map:
+                        self.gt_edges.append((endid, child_id, 2))
+                    continue
+
             curr, parent_id = child_el, None
             
             while curr in parent_map:
