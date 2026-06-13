@@ -109,7 +109,7 @@ from torch_geometric.nn import GATv2Conv
 
 
 class ScoreGraphReconstructor(nn.Module):
-    def __init__(self, node_in_dim, num_classes, class_embed_dim=32, hidden_dim=256, num_edge_classes=5, num_heads=4, dropout=0.2):
+    def __init__(self, node_in_dim, num_classes, class_embed_dim=32, hidden_dim=256, num_edge_classes=6, num_heads=4, dropout=0.2):
         super().__init__()
         
         # 1. Class Embedding Layer

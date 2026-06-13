@@ -169,6 +169,16 @@ def parse_transform_string(transform_str):
     return matrix
 
 
+def has_ancestor_class(element, ancestor_class, stop_element, parent_map):
+    """Checks if an element has an ancestor with the given class, stopping at stop_element."""
+    curr = parent_map.get(element)
+    while curr is not None and curr is not stop_element:
+        if ancestor_class in curr.get("class", "").split():
+            return True
+        curr = parent_map.get(curr)
+    return False
+
+
 def get_absolute_transform(element, parent_map):
     """Calculates the absolute transform of an element by traversing to root."""
     curr = element
@@ -570,6 +580,10 @@ def extract_from_svg(
             continue
         label = match[0]
 
+        # Verovio nests the flag <g> inside the stem <g>; exclude it so stem
+        # bboxes only cover the stem line itself
+        exclude_flags = "stem" in classes
+
         # Calculate bounding box from all child <use> and <path> elements
         min_x, max_x, min_y, max_y = (
             float("inf"),
@@ -580,6 +594,8 @@ def extract_from_svg(
 
         # 1. Handle <use> elements (Glyph references)
         for use in g.findall(".//svg:use", ns):
+            if exclude_flags and has_ancestor_class(use, "flag", g, parent_map):
+                continue
             href = use.get("{http://www.w3.org/1999/xlink}href", "").lstrip("#")
             if href not in defs_bboxes:
                 continue
@@ -598,6 +614,8 @@ def extract_from_svg(
 
         # 2. Handle native <path> elements (stems, slurs, ledger lines etc.)
         for path in g.findall(".//svg:path", ns):
+            if exclude_flags and has_ancestor_class(path, "flag", g, parent_map):
+                continue
             d = path.get("d")
             if not d or parse_path is None:
                 continue

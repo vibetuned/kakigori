@@ -1,6 +1,7 @@
 # Standard library imports
 import json
 import xml.etree.ElementTree as ET
+from fractions import Fraction
 
 class GroundTruthGraphBuilder:
     def __init__(self, mei_file, json_files, node_roles):
@@ -41,6 +42,41 @@ class GroundTruthGraphBuilder:
     def _get_id(self, element):
         return element.attrib.get("{http://www.w3.org/XML/1998/namespace}id")
 
+    def _event_duration(self, element, tuplet_factor):
+        """Returns the duration of an event in whole-note units, or None if unknown."""
+        dur = element.get("dur")
+        if dur is None:
+            return None
+        try:
+            base = Fraction(1, int(dur))
+        except (ValueError, ZeroDivisionError):
+            return None  # non-numeric durations like 'breve'
+        dots = int(element.get("dots", 0))
+        # Each dot adds half of the previous value: base * (2 - 1/2^dots)
+        return base * (2 - Fraction(1, 2**dots)) * tuplet_factor
+
+    def _collect_onsets(self, parent, tuplet_factor, onset, events):
+        """Walks layer content in order, recording (onset, id) for every timed
+        event and returning the onset after the last event."""
+        for child in parent:
+            tag = child.tag.split('}')[-1]
+            if tag in ('beam', 'graceGrp', 'bTrem', 'fTrem'):
+                onset = self._collect_onsets(child, tuplet_factor, onset, events)
+            elif tag == 'tuplet':
+                num = int(child.get('num', 3))
+                numbase = int(child.get('numbase', 2))
+                onset = self._collect_onsets(
+                    child, tuplet_factor * Fraction(numbase, num), onset, events
+                )
+            elif tag in ('note', 'chord', 'rest', 'mRest', 'space'):
+                if child.get('grace'):
+                    continue  # grace notes take no time and sit off the beat
+                events.append((onset, self._get_id(child)))
+                dur = self._event_duration(child, tuplet_factor)
+                if dur is not None:
+                    onset += dur
+        return onset
+
     def _is_inside(self, inner_bbox, outer_bbox):
         """Checks if the center of the inner_bbox is contained within the outer_bbox."""
         cx = (inner_bbox[0] + inner_bbox[2]) / 2.0
@@ -75,7 +111,38 @@ class GroundTruthGraphBuilder:
             for i in range(len(valid_sequence) - 1):
                 self.gt_edges.append((valid_sequence[i], valid_sequence[i+1], 3))
 
-        # 2. Strict XML Hierarchy (Class 1, 2, 4)
+        # 2. Synchronization Edges (Class 5) - simultaneous events across staves/voices
+        # Events sharing an onset within a measure are engraved on the same
+        # vertical line (grand staff hands, multi-staff systems). Onsets are
+        # computed from MEI durations, then aligned events are chained top to
+        # bottom (staff order, then layer order).
+        for measure in self.mei_root.findall('.//mei:measure', self.ns):
+            onset_groups = {}
+            for staff in measure.findall('mei:staff', self.ns):
+                staff_n = int(staff.get('n', 0))
+                for layer_idx, layer in enumerate(staff.findall('mei:layer', self.ns)):
+                    layer_n = int(layer.get('n', layer_idx + 1))
+                    events = []
+                    self._collect_onsets(layer, Fraction(1), Fraction(0), events)
+                    for onset, ev_id in events:
+                        if ev_id and ev_id in self.node_map:
+                            cls = self.node_map[ev_id]['class']
+                            # mRest is centered in the measure, not on the beat,
+                            # so it never sits on the shared vertical line
+                            if cls in temporal and cls != 'mRest':
+                                onset_groups.setdefault(onset, []).append(
+                                    (staff_n, layer_n, ev_id)
+                                )
+
+            for group in onset_groups.values():
+                if len(group) < 2:
+                    continue
+                group.sort()
+                for (s1, l1, id1), (s2, l2, id2) in zip(group, group[1:]):
+                    if (s1, l1) != (s2, l2):
+                        self.gt_edges.append((id1, id2, 5))
+
+        # 3. Strict XML Hierarchy (Class 1, 2, 4)
         # This guarantees Measure -> Staff -> Layer -> Note regardless of bounding box overlaps
         # (Inside GroundTruthGraphBuilder.build_edges)
         parent_map = {c: p for p in self.mei_root.iter() for c in p}
@@ -214,6 +281,15 @@ class GroundTruthGraphBuilder:
                             target_note = unisons[-1]
                             
                         self.gt_edges.append((target_note['id'], node['id'], 1))
+
+        # Deduplicate node pairs, keeping the first edge type assigned
+        seen = set()
+        deduped = []
+        for u, v, edge_type in self.gt_edges:
+            if (u, v) not in seen:
+                seen.add((u, v))
+                deduped.append((u, v, edge_type))
+        self.gt_edges = deduped
 
         return self.gt_edges
 

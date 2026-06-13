@@ -196,7 +196,8 @@ def main():
     )
 
     # Define Focal Loss class weights
-    alpha_weights = torch.tensor([0.05, 1.0, 2.5, 1.0, 4.0], dtype=torch.float32)
+    # [none, contains, modifier, temporal, text-sync, note-sync]
+    alpha_weights = torch.tensor([0.05, 1.0, 2.5, 1.0, 4.0, 1.5], dtype=torch.float32)
     alpha_weights = alpha_weights.to(device)
 
     # Initialize Custom Trainer

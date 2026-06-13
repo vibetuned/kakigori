@@ -48,7 +48,8 @@ EDGE_CLASSES = {
     1: "Class 1: Structural",
     2: "Class 2: Modifier",
     3: "Class 3: Temporal",
-    4: "Class 4: Sync",
+    4: "Class 4: Text Sync",
+    5: "Class 5: Note Sync",
 }
 
 EDGE_COLORS = {
@@ -56,6 +57,7 @@ EDGE_COLORS = {
     2: "#33cc33",  # Green
     3: "#3333ff",  # Blue
     4: "#ff9900",  # Orange
+    5: "#00cccc",  # Cyan
 }
 DEFAULT_EDGE_COLOR = "#9aa0a6"
 

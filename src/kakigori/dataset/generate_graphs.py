@@ -38,7 +38,8 @@ def generate_graph(
         gt_edges = builder.build_edges()
 
         # Determine unique nodes present in edges to form the graph
-        unique_nodes = list(
+        # (sorted so node indices are deterministic across runs)
+        unique_nodes = sorted(
             set([u for u, v, _ in gt_edges] + [v for u, v, _ in gt_edges])
         )
 
@@ -57,8 +58,10 @@ def generate_graph(
                 torch.tensor(edge_index_list, dtype=torch.long).t().contiguous()
             )
 
-            # Map labels using parser tool
-            edge_labels = builder.get_pyg_labels(edge_index, unique_nodes)
+            # gt_edges is deduplicated, so labels map 1:1 onto edge_index columns
+            edge_labels = torch.tensor(
+                [edge_type for _, _, edge_type in gt_edges], dtype=torch.long
+            )
 
         # Assemble basic PyTorch Geometric Data object dict
         graph_data = {
@@ -75,7 +78,7 @@ def generate_graph(
         return True
 
     except Exception as e:
-        logger.debug(f"Error processing {mei_path.name}: {e}")
+        logger.warning(f"Error processing {mei_path.name}: {e}")
 
     return False
 
