@@ -13,6 +13,21 @@ CLEF_BOTTOM_LINE = {
     "clefC": (2, 3),  # E3
 }
 
+# Mid-piece clef-change glyphs and the clef they switch to
+CLEF_CHANGE_MAP = {
+    "gClefChange": "clefG",
+    "fClefChange": "clefF",
+    "cClefChange": "clefC",
+}
+
+# Kern clef tokens with their standard staff line: renderers need the line
+# number ('*clefG2', not '*clefG') or they may overwrite the key signature
+CLEF_KERN = {
+    "clefG": "*clefG2",
+    "clefF": "*clefF4",
+    "clefC": "*clefC3",
+}
+
 REST_KERN = {
     "mRest": "1r",
     "restWhole": "1r", "restHalf": "2r", "restQuarter": "4r",
@@ -136,6 +151,27 @@ def _note_value(duration: int, dots: int) -> float:
     return base
 
 
+def _assign_staff(cy: float, staff_rows: list, staff_space: float) -> int:
+    """Pick the staff a below-the-staff marking (dynamic, pedal) belongs to.
+
+    Such markings are engraved BELOW their staff, so a glyph between two
+    staves belongs to the one above it, even when the staff below is
+    geometrically closer.
+    """
+    inside = [i for i, r in enumerate(staff_rows) if r[1] <= cy <= r[3]]
+    if inside:
+        return inside[0]
+    above = [(cy - r[3], i) for i, r in enumerate(staff_rows) if r[3] <= cy]
+    if above:
+        dist, idx = min(above)
+        if dist < 8 * staff_space:
+            return idx
+    return min(
+        range(len(staff_rows)),
+        key=lambda i: max(staff_rows[i][1] - cy, cy - staff_rows[i][3], 0.0)
+    )
+
+
 def _parse_key_accidentals(key_str: str) -> dict:
     """Parse a kern key signature like '*k[f#c#]' into {'F': '#', 'C': '#'}."""
     accids = {}
@@ -169,6 +205,8 @@ class Measure:
         self.full_measure_rest = False  # Lone whole/measure rest fills this measure
         self.dynamics = []  # (cx, text) dynamic markings assigned to this staff
         self.dynam_tokens = None  # **dynam rows, aligned with tokens after sync
+        self.pedals = []  # (cx, '*ped'/'*Xped') pedal marks assigned to this staff
+        self.interps = []  # (cx, token) mid-piece clef/key/meter change rows
 
     def add(self, token: str, duration: float = 0.25, cx: float = 0.0, node_id=None):
         """Add a note/rest token with its duration (in whole-note units)."""
@@ -202,6 +240,8 @@ class Spine:
         self.meter_den = 4
         self.key_accidentals = {}  # Letter -> kern accidental, e.g. {'F': '#'}
         self.pending_ties = {}  # Pitch -> accidental of a tie left open last measure
+        self.key_token = "*k[]"  # Current key signature token, for change detection
+        self.meter_token = "*M4/4"  # Current meter token, for change detection
 
     def add_to_head(self, token: str):
         """Append a tandem interpretation to the spine header."""
@@ -274,17 +314,38 @@ class Spine:
         if not target_keysig:
             return "*k[]"
 
-        # 2. Collect the accidentals linked to this keySig or directly to the
-        # staff (the spatial fallback in the graph builder attaches them there)
+        return cls._keysig_token(target_keysig, staff_node['id'], children_map, nodes_map)
+
+    @classmethod
+    def _keysig_token(cls, keysig_id, staff_id, children_map, nodes_map) -> str:
+        """Build the '*k[...]' token from a keySig node's accidentals."""
+        # Collect the accidentals linked to this keySig or directly to the
+        # staff (the spatial fallback in the graph builder attaches them
+        # there). A staff can carry accids of SEVERAL signatures (courtesy
+        # restatement before a system break), so fallback accids must sit
+        # inside the keySig glyph's own horizontal span; and an accidental
+        # linked both ways is only counted once.
+        ks_bbox = nodes_map.get(keysig_id, {}).get('bbox')
         valid_accids = []
-        candidate_children = (
-            children_map.get(target_keysig, [])
-            + children_map.get(staff_node['id'], [])
-        )
-        for child_id, e_class in candidate_children:
+        seen = set()
+        for child_id, e_class in children_map.get(keysig_id, []):
             child_node = nodes_map.get(child_id)
             if child_node and "keyAccid" in child_node['class']:
+                seen.add(child_id)
                 valid_accids.append(child_node)
+        for child_id, e_class in children_map.get(staff_id, []):
+            if child_id in seen:
+                continue
+            child_node = nodes_map.get(child_id)
+            if not (child_node and "keyAccid" in child_node['class']):
+                continue
+            if ks_bbox:
+                pad = ks_bbox[3] - ks_bbox[1]
+                accid_cx = (child_node['bbox'][0] + child_node['bbox'][2]) / 2.0
+                if not (ks_bbox[0] - pad <= accid_cx <= ks_bbox[2] + pad):
+                    continue
+            seen.add(child_id)
+            valid_accids.append(child_node)
 
         sharps = sum(1 for a in valid_accids if "Sharp" in a['class'])
         flats = sum(1 for a in valid_accids if "Flat" in a['class'])
@@ -294,13 +355,13 @@ class Spine:
 
         sharps_order = ["f", "c", "g", "d", "a", "e", "b"]
         flats_order = ["b", "e", "a", "d", "g", "c", "f"]
-        
+
         accids = []
         if sharps > 0:
             accids = [f"{n}#" for n in sharps_order[:min(sharps, 7)]]
         elif flats > 0:
             accids = [f"{n}-" for n in flats_order[:min(flats, 7)]]
-            
+
         return f"*k[{''.join(accids)}]"
 
     @classmethod
@@ -317,11 +378,16 @@ class Spine:
                     break
                     
         if not target_metersig:
-            return "*M4/4" 
+            return "*M4/4"
 
-        # 2. Ask the graph for ONLY the digits explicitly linked to this meterSig
+        return cls._metersig_token(target_metersig, children_map, nodes_map)
+
+    @classmethod
+    def _metersig_token(cls, metersig_id, children_map, nodes_map) -> str:
+        """Build the '*M<num>/<den>' token from a meterSig node's digits."""
+        # Ask the graph for ONLY the digits explicitly linked to this meterSig
         time_sig_nodes = []
-        for child_id, e_class in children_map.get(target_metersig, []):
+        for child_id, e_class in children_map.get(metersig_id, []):
             child_node = nodes_map.get(child_id)
             if child_node and child_node['class'].startswith("timeSig"):
                 time_sig_nodes.append(child_node)
@@ -384,26 +450,29 @@ class Spine:
             key_sig_found = cls._extract_key_signature(staff_node, system_descendants, children_map, nodes_map)
             meter_sig_found = cls._extract_meter_signature(staff_node, system_descendants, children_map, nodes_map)
             
-            clef_found = "*"
+            clef_class = None
             staff_elements = [v for v, e in children_map.get(st_id, []) if e == 1]
             for el_id in staff_elements:
                 if nodes_map[el_id]['class'].startswith("clef"):
-                    clef_found = nodes_map[el_id]['class'].replace("clef", "*clef")
+                    clef_class = nodes_map[el_id]['class']
                     break
-                    
-            if clef_found == "*":
+
+            if clef_class is None:
                 for node_id in system_descendants:
                     node = nodes_map.get(node_id)
                     if node and node['class'].startswith("clef"):
                         if (staff_node['bbox'][1] - 20 <= node['cy'] <= staff_node['bbox'][3] + 20):
-                            clef_found = node['class'].replace("clef", "*clef")
+                            clef_class = node['class']
                             break
-            
+
+            clef_found = CLEF_KERN.get(clef_class, f"*{clef_class}" if clef_class else "*")
             spine.add_to_head(clef_found)
             spine.add_to_head(key_sig_found)
             spine.add_to_head(meter_sig_found)
-            spine.clef_type = clef_found.replace("*", "")
+            spine.clef_type = clef_class or ""
             spine.key_accidentals = _parse_key_accidentals(key_sig_found)
+            spine.key_token = key_sig_found
+            spine.meter_token = meter_sig_found
             spine.meter_num, spine.meter_den = cls._parse_meter(meter_sig_found)
 
             spines.append(spine)
@@ -547,6 +616,7 @@ class HumdrumContext:
                 for m in measures:
                     m.tokens = ["."]
                     m.dynam_tokens = [self._dynam_row_text(m.dynamics)]
+                self._insert_interp_rows(measures, [])
                 continue
 
             # A full-measure rest starts at the measure's first beat even
@@ -576,12 +646,67 @@ class HumdrumContext:
                 ]
                 m.dynam_tokens = self._place_dynamics(m.dynamics, slice_cxs)
 
+            self._insert_interp_rows(measures, slice_cxs)
+
     @staticmethod
     def _dynam_row_text(dynamics: list) -> str:
         """Merge a measure's dynamic markings into a single row token."""
         if not dynamics:
             return "."
         return " ".join(text for _, text in sorted(dynamics))
+
+    @staticmethod
+    def _insert_interp_rows(measures: list, slice_cxs: list):
+        """Insert interpretation rows shared by every spine.
+
+        Pedals: '*ped' goes before the slice nearest the press point and
+        '*Xped' after the slice nearest the release. Clef/key/meter changes
+        go before the first slice drawn to the right of their glyph.
+        Interpretation rows must be interpretation-only, so every other
+        spine (and the **dynam columns) carries '*' there.
+        """
+        slots = {}
+        for s_idx, m in enumerate(measures):
+            for cx, text in m.pedals:
+                if slice_cxs:
+                    near = min(range(len(slice_cxs)),
+                               key=lambda j: abs(slice_cxs[j] - cx))
+                else:
+                    near = 0
+                slot = near if text == "*ped" else near + 1
+                slots.setdefault(slot, []).append((cx, s_idx, text))
+            for cx, text in m.interps:
+                slot = sum(1 for scx in slice_cxs if scx < cx)
+                slots.setdefault(slot, []).append((cx, s_idx, text))
+
+        if not slots:
+            return
+
+        # Marks with the same token in the same slot share one row (e.g. a
+        # meter change printed on every staff)
+        slot_rows = {}
+        for slot, entries in slots.items():
+            rows, by_token = [], {}
+            for cx, s_idx, token in sorted(entries):
+                if token in by_token:
+                    by_token[token][2].add(s_idx)
+                else:
+                    row = (cx, token, {s_idx})
+                    by_token[token] = row
+                    rows.append(row)
+            slot_rows[slot] = rows
+
+        n_rows = len(measures[0].tokens)
+        for s_idx, m in enumerate(measures):
+            new_tokens, new_dynams = [], []
+            for row_idx in range(n_rows + 1):
+                for cx, token, owners in slot_rows.get(row_idx, []):
+                    new_tokens.append(token if s_idx in owners else "*")
+                    new_dynams.append("*")
+                if row_idx < n_rows:
+                    new_tokens.append(m.tokens[row_idx])
+                    new_dynams.append(m.dynam_tokens[row_idx])
+            m.tokens, m.dynam_tokens = new_tokens, new_dynams
 
     @staticmethod
     def _place_dynamics(dynamics: list, slice_cxs: list) -> list:
@@ -757,8 +882,10 @@ class MinimalHumdrumSerializer:
                 else nodes[staff_id].get('bbox', [0, 0, 0, 0])
             )
 
-        # Dynamics hang off the measure node itself; split them per staff row
+        # Dynamics and pedal spans hang off the measure node itself; split
+        # them per staff row
         dynamics_per_staff = self._collect_dynamics(measure_id, children, nodes, staff_rows)
+        pedals_per_staff = self._collect_pedals(measure_id, children, nodes, staff_rows)
 
         for spine_idx, staff_id in enumerate(staves):
             if spine_idx >= len(self.context.spines):
@@ -767,18 +894,41 @@ class MinimalHumdrumSerializer:
             spine = self.context.spines[spine_idx]
             measure = Measure(measure_id)
             measure.dynamics = dynamics_per_staff.get(spine_idx, [])
+            measure.pedals = pedals_per_staff.get(spine_idx, [])
             active_bbox = staff_rows[spine_idx]
 
-            # 3. Collect events and analyze each one (passing the pristine active_bbox!)
-            events, tuplet_ratios, beam_of = self._collect_staff_events(staff_id, children, nodes)
+            # 3. Mid-piece signature changes: every system restates its
+            # clef/keySig/meterSig on the staff — a differing value is a
+            # change that takes effect here and becomes an interpretation row
+            self._detect_signature_changes(spine, measure, staff_id, children, nodes)
+
+            # 3b. Collect events and analyze each one; mid-measure clef
+            # changes re-clef every event drawn to their right
+            events, tuplet_ratios, beam_of, clef_marks = \
+                self._collect_staff_events(staff_id, children, nodes)
             event_infos = [
-                self._analyze_event(ev, children, nodes, spine.clef_type, active_bbox)
+                self._analyze_event(
+                    ev, children, nodes,
+                    self._clef_at(ev.get('cx', 0.0), clef_marks, spine.clef_type),
+                    active_bbox,
+                )
                 for ev in events
             ]
+
+            running_clef = spine.clef_type
+            for cx, clef_type in clef_marks:
+                if clef_type != running_clef:
+                    measure.interps.append((cx, CLEF_KERN[clef_type]))
+                    running_clef = clef_type
+            spine.clef_type = running_clef
 
             # 3b. Mark beam groups (kern L/J) and use the beam class as a
             # duration fallback before tuplet scaling / ambiguity resolution
             self._apply_beams(events, event_infos, beam_of, nodes)
+
+            # 3c. The stacked dots of simultaneous stacked voices may all be
+            # attached to a single note — share them across the stack
+            self._share_simultaneous_dots(event_infos)
 
             # 4. Scale tuplet durations: a triplet eighth is a kern '12'
             # (the scaled number is both the display token and the true value)
@@ -822,6 +972,50 @@ class MinimalHumdrumSerializer:
             spine.add_measure(measure)
 
     @staticmethod
+    def _detect_signature_changes(spine, measure, staff_id: str,
+                                  children: dict, nodes: dict):
+        """Detect clef/key/meter restatements on a staff that differ from the
+        spine's running state; emit them as interpretation rows and update
+        the state so later measures use the new context."""
+        for child_id, e_class in children.get(staff_id, []):
+            if e_class != 1:
+                continue
+            node = nodes.get(child_id)
+            if not node:
+                continue
+            cls_name = node['class']
+            cx = node.get('cx', 0.0)
+
+            if cls_name in CLEF_BOTTOM_LINE:
+                if cls_name != spine.clef_type:
+                    measure.interps.append((cx, CLEF_KERN[cls_name]))
+                    spine.clef_type = cls_name
+            elif cls_name.lower() == 'keysig':
+                token = Spine._keysig_token(child_id, staff_id, children, nodes)
+                if token != spine.key_token:
+                    measure.interps.append((cx, token))
+                    spine.key_token = token
+                    spine.key_accidentals = _parse_key_accidentals(token)
+            elif cls_name.lower() == 'metersig':
+                token = Spine._metersig_token(child_id, children, nodes)
+                if token != spine.meter_token:
+                    measure.interps.append((cx, token))
+                    spine.meter_token = token
+                    spine.meter_num, spine.meter_den = Spine._parse_meter(token)
+
+    @staticmethod
+    def _clef_at(cx: float, clef_marks: list, base_clef: str) -> str:
+        """The clef in effect at horizontal position cx, given the measure's
+        cx-sorted clef changes and the clef the measure started with."""
+        clef = base_clef
+        for mark_cx, clef_type in clef_marks:
+            if mark_cx <= cx:
+                clef = clef_type
+            else:
+                break
+        return clef
+
+    @staticmethod
     def _collect_dynamics(measure_id: str, children: dict, nodes: dict,
                           staff_rows: list) -> dict:
         """Gather a measure's dynamic glyphs as {staff_index: [(cx, text)]}.
@@ -856,31 +1050,87 @@ class MinimalHumdrumSerializer:
                     continue
             clusters.append([glyph])
 
-        def _staff_of(cy: float) -> int:
-            # Dynamics are engraved BELOW the staff they apply to, so a glyph
-            # between two staves belongs to the one above it, even when the
-            # staff below is geometrically closer
-            inside = [i for i, r in enumerate(staff_rows) if r[1] <= cy <= r[3]]
-            if inside:
-                return inside[0]
-            above = [(cy - r[3], i) for i, r in enumerate(staff_rows) if r[3] <= cy]
-            if above:
-                dist, idx = min(above)
-                if dist < 8 * staff_space:
-                    return idx
-            return min(
-                range(len(staff_rows)),
-                key=lambda i: max(staff_rows[i][1] - cy, cy - staff_rows[i][3], 0.0)
-            )
-
         for cluster in clusters:
             text = "".join(DYNAMIC_KERN[g['class']] for g in cluster)
             cx = (min(g['bbox'][0] for g in cluster)
                   + max(g['bbox'][2] for g in cluster)) / 2.0
             cy = sum(g.get('cy', 0.0) for g in cluster) / len(cluster)
-            per_staff.setdefault(_staff_of(cy), []).append((cx, text))
+            staff_idx = _assign_staff(cy, staff_rows, staff_space)
+            per_staff.setdefault(staff_idx, []).append((cx, text))
 
         return per_staff
+
+    @staticmethod
+    def _collect_pedals(measure_id: str, children: dict, nodes: dict,
+                        staff_rows: list) -> dict:
+        """Gather a measure's pedal spans as {staff_index: [(cx, text)]}.
+
+        A pedal annotation covers the whole press-to-release line, so its
+        left edge becomes '*ped' and its right edge '*Xped'.
+        """
+        per_staff = {}
+        if not staff_rows:
+            return per_staff
+
+        heights = [row[3] - row[1] for row in staff_rows]
+        staff_space = max(1.0, (sum(heights) / len(heights)) / 4.0)
+
+        for child_id, e_class in children.get(measure_id, []):
+            node = nodes.get(child_id)
+            if e_class == 1 and node and node.get('class') == 'pedal':
+                x1, _, x2, _ = node['bbox']
+                staff_idx = _assign_staff(node.get('cy', 0.0), staff_rows, staff_space)
+                marks = per_staff.setdefault(staff_idx, [])
+                marks.append((x1, "*ped"))
+                marks.append((x2, "*Xped"))
+
+        return per_staff
+
+    def _share_simultaneous_dots(self, event_infos: list):
+        """Share augmentation dots among simultaneous notes of equal duration.
+
+        Stacked voices (e.g. three layers holding a double-dotted triad) are
+        drawn with one dot column per row, but the graph may attach every dot
+        glyph to a single note. Group events by sync group (or horizontal
+        proximity) and give same-duration notes the group's max dot count.
+        Different durations keep their own dots: a half against a dotted
+        quarter at the same onset is legitimate.
+        """
+        groups = {}
+        solo = []
+        for info in event_infos:
+            if info['type'] not in ('note', 'chord'):
+                continue
+            gid = self.context.sync_groups.get(info.get('id'))
+            if gid is not None:
+                groups.setdefault(gid, []).append(info)
+            else:
+                solo.append(info)
+
+        # Cluster sync-less events by horizontal proximity
+        solo.sort(key=lambda i: i.get('cx', 0.0))
+        cluster = []
+        for info in solo:
+            if cluster and info.get('cx', 0.0) - cluster[-1].get('cx', 0.0) >= 30.0:
+                groups[('cx', len(groups))] = cluster
+                cluster = []
+            cluster.append(info)
+        if cluster:
+            groups[('cx', len(groups))] = cluster
+
+        for members in groups.values():
+            if len(members) < 2:
+                continue
+            by_duration = {}
+            for info in members:
+                by_duration.setdefault((info['duration'], info.get('grace', False)),
+                                       []).append(info)
+            for same in by_duration.values():
+                best = max(i['dots'] for i in same)
+                for info in same:
+                    info['dots'] = best
+                    for sub in info.get('notes', []):
+                        sub['dots'] = best
 
     @staticmethod
     def _apply_beams(events, event_infos: list, beam_of: dict, nodes: dict):
@@ -958,9 +1208,11 @@ class MinimalHumdrumSerializer:
     def _collect_staff_events(self, staff_id: str, children: dict, nodes: dict) -> tuple:
         """Find temporal-anchor events under a staff, ordered by Class 3 (Temporal) edges.
 
-        Returns (sorted_events, tuplet_ratios, beam_of) where tuplet_ratios
-        maps event IDs to a (num, numbase) duration ratio for events inside
-        tuplets and beam_of maps event IDs to their containing beam node ID.
+        Returns (sorted_events, tuplet_ratios, beam_of, clef_marks) where
+        tuplet_ratios maps event IDs to a (num, numbase) duration ratio for
+        events inside tuplets, beam_of maps event IDs to their containing
+        beam node ID, and clef_marks is a cx-sorted list of (cx, clef_type)
+        mid-measure clef changes found under this staff.
         """
         # 1. Collect all structural descendants via Class 1 edges. Tuplets are
         # modifier-class containers (Class 2 edge from the layer) but hold
@@ -971,6 +1223,7 @@ class MinimalHumdrumSerializer:
         descendants = set()
         tuplet_of = {}
         beam_of = {}
+        clef_marks = []
         stack = [(staff_id, None, None)]
         while stack:
             curr, tuplet_ctx, beam_ctx = stack.pop()
@@ -981,6 +1234,10 @@ class MinimalHumdrumSerializer:
                 is_tuplet_container = (e_class == 2 and child_cls == 'tuplet')
                 if e_class == 1 or is_tuplet_container:
                     descendants.add(child_id)
+                    if child_cls in CLEF_CHANGE_MAP:
+                        clef_marks.append(
+                            (nodes[child_id].get('cx', 0.0), CLEF_CHANGE_MAP[child_cls])
+                        )
                     ctx = child_id if is_tuplet_container else tuplet_ctx
                     b_ctx = child_id if child_cls.startswith('beam') else beam_ctx
                     if ctx is not None:
@@ -988,6 +1245,7 @@ class MinimalHumdrumSerializer:
                     if b_ctx is not None and b_ctx != child_id:
                         beam_of[child_id] = b_ctx
                     stack.append((child_id, ctx, b_ctx))
+        clef_marks.sort()
 
         # 2. Filter down to valid top-level event temporal anchors
         raw_events = set()
@@ -1060,7 +1318,7 @@ class MinimalHumdrumSerializer:
             for ev_id in ev_ids:
                 tuplet_ratios[ev_id] = (num, numbase)
 
-        return sorted_events, tuplet_ratios, beam_of
+        return sorted_events, tuplet_ratios, beam_of, clef_marks
 
     # --- Event analysis (returns structured dicts) ---
 
@@ -1072,6 +1330,8 @@ class MinimalHumdrumSerializer:
         On chords the dots of every chord note merge into one tall glyph, so
         the aspect ratio is useless there — compare the width against the
         staff space instead (one dot column is ~0.4 spaces, two are ~1.1).
+        A node may also carry SEVERAL dots glyphs (one per chord-note row);
+        they all show the same augmentation, so take the max, never the sum.
         """
         dot_count = 0
         for child_id, _ in children.get(node_id, []):
@@ -1084,7 +1344,7 @@ class MinimalHumdrumSerializer:
                     (height > 0 and width / height > 1.8)
                     or (staff_space > 0 and width > 0.55 * staff_space)
                 )
-                dot_count += 2 if is_double else 1
+                dot_count = max(dot_count, 2 if is_double else 1)
         return dot_count
 
     def _collect_ornaments(self, event: dict, children: dict, nodes: dict) -> tuple:
@@ -1273,13 +1533,14 @@ class MinimalHumdrumSerializer:
                     shared_dots = note_info['dots']
                     shared_ambiguous = note_info['ambiguous']
 
-        # The stacked dots of a chord attach to the chord node itself, not to
-        # the member notes; every chord note carries them in its kern token
+        # A chord's dots may attach to the chord node itself or to any single
+        # member note (one glyph per row); they all show the same augmentation
+        # — take the max and give it to every chord note's kern token
         staff_space = (staff_bbox[3] - staff_bbox[1]) / 4.0
         chord_dots = self._count_dots(chord_node['id'], children, nodes, staff_space)
-        shared_dots = max(shared_dots, chord_dots)
+        shared_dots = max([shared_dots, chord_dots] + [n['dots'] for n in notes])
         for note in notes:
-            note['dots'] = max(note['dots'], shared_dots)
+            note['dots'] = shared_dots
 
         chord_cx = notes[0]['cx'] if notes else chord_node.get('cx', 0.0)
         prefix, suffix = self._collect_ornaments(chord_node, children, nodes)

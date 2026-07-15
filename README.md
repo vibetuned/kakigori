@@ -160,21 +160,27 @@ compare-kern --mei_dir data/validation-test/mei --krn_dir data/validation-test/k
 `compare-kern` matches per-staff/per-measure multisets of sounding pitches
 (letter, octave, alteration) and of pitch+duration, so it catches accidental,
 key-signature, octave, dots, and duration regressions. Current score on
-`data/validation-test`: **99.1% pitch / 98.9% rhythm** over ~6000 notes.
+`data/validation-test`: **99.9% pitch / 99.9% rhythm** over ~6000 notes.
+Mid-piece clef, key signature, and meter changes are detected from each
+system's printed restatements (plus in-measure `gClefChange`/`fClefChange`
+glyphs) and emitted as `*clefX` / `*k[...]` / `*M...` interpretation rows.
 Dynamics are serialized into a per-staff `**dynam` spine (192/194 markings
 match the MEI on the validation set; the two misses are `cresc.` text
-directives, which have no glyph class).
+directives, which have no glyph class). Pedal spans become `*ped` / `*Xped`
+interpretation rows at the press/release positions (span counts match the
+MEI exactly on the validation set).
 
 Known gaps, roughly by impact:
 
-- [ ] Mid-piece clef changes (`gClefChange` / `fClefChange` nodes) are ignored;
-      notes after the change are read with the header clef (visible in
-      `QmdyztkJ…_arranged`, staff 2 from measure 9).
 - [ ] Tuplet ratios are inferred from the member count, assuming uniform
       durations — mixed-duration tuplets misscale. The `tupletNum` digit glyph
       is not read. (Causes the 2 remaining verovio rhythm warnings.)
-- [ ] Mid-piece key signature and meter changes are ignored — spine headers
-      come from the first system only (`compare-kern` shares this assumption).
+- [ ] A pedal span is attached to the measure where it starts, so a span
+      crossing a barline gets its `*Xped` at the end of that measure instead
+      of in the following one (no such span exists in the validation set yet).
+- [ ] `compare-kern`'s MEI side still applies the *initial* key signature per
+      staff; a groundtruth piece that truly modulates would confuse the
+      checker even though the serializer now follows the change.
 - [ ] A few isolated high-ledger-line notes get the wrong octave from the
       geometric pitch estimate (~1% of notes on dense scans).
 - [ ] Ties whose far end is missing from the annotations leave unbalanced
