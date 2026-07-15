@@ -120,6 +120,26 @@ def _note_value(duration: int, dots: int) -> float:
     return base
 
 
+def _parse_key_accidentals(key_str: str) -> dict:
+    """Parse a kern key signature like '*k[f#c#]' into {'F': '#', 'C': '#'}."""
+    accids = {}
+    start, end = key_str.find('['), key_str.rfind(']')
+    if start == -1 or end <= start:
+        return accids
+    inner = key_str[start + 1:end]
+    i = 0
+    while i < len(inner):
+        letter = inner[i].upper()
+        i += 1
+        acc = ""
+        while i < len(inner) and inner[i] in "#-n":
+            acc += inner[i]
+            i += 1
+        if letter in "ABCDEFG" and acc and acc != "n":
+            accids[letter] = acc
+    return accids
+
+
 
 class Measure:
     """Represents one measure's content within a single spine."""
@@ -155,6 +175,7 @@ class Spine:
         self.clef_type = None
         self.meter_num = 4
         self.meter_den = 4
+        self.key_accidentals = {}  # Letter -> kern accidental, e.g. {'F': '#'}
 
     def add_to_head(self, token: str):
         """Append a tandem interpretation to the spine header."""
@@ -338,6 +359,7 @@ class Spine:
             spine.add_to_head(key_sig_found)
             spine.add_to_head(meter_sig_found)
             spine.clef_type = clef_found.replace("*", "")
+            spine.key_accidentals = _parse_key_accidentals(key_sig_found)
             spine.meter_num, spine.meter_den = cls._parse_meter(meter_sig_found)
 
             spines.append(spine)
@@ -635,11 +657,15 @@ class MinimalHumdrumSerializer:
                 active_bbox = staff_node.get('bbox', [0, 0, 0, 0])
 
             # 3. Collect events and analyze each one (passing the pristine active_bbox!)
-            events, tuplet_ratios = self._collect_staff_events(staff_id, children, nodes)
+            events, tuplet_ratios, beam_of = self._collect_staff_events(staff_id, children, nodes)
             event_infos = [
                 self._analyze_event(ev, children, nodes, spine.clef_type, active_bbox)
                 for ev in events
             ]
+
+            # 3b. Mark beam groups (kern L/J) and use the beam class as a
+            # duration fallback before tuplet scaling / ambiguity resolution
+            self._apply_beams(events, event_infos, beam_of, nodes)
 
             # 4. Scale tuplet durations: a triplet eighth is a kern '12'
             # (the scaled number is both the display token and the true value)
@@ -660,7 +686,11 @@ class MinimalHumdrumSerializer:
                     measure_value = spine.meter_num / spine.meter_den
                     info['duration'], info['dots'] = _value_to_duration(measure_value)
 
-            # 6. Serialize to kern tokens with durations, spatial cx and node ID
+            # 6. Spell pitches absolutely: apply the key signature and
+            # in-measure accidental carry-over (kern has no implicit keysig)
+            self._apply_key_signature(event_infos, spine.key_accidentals)
+
+            # 7. Serialize to kern tokens with durations, spatial cx and node ID
             for info in event_infos:
                 # Grace notes take no time on the timeline
                 dur = 0.0 if info.get('grace') else _note_value(info['duration'], info['dots'])
@@ -669,35 +699,99 @@ class MinimalHumdrumSerializer:
 
             spine.add_measure(measure)
 
+    @staticmethod
+    def _apply_beams(events, event_infos: list, beam_of: dict, nodes: dict):
+        """Mark kern beam start/end (L/J) on the first and last beamed event.
+
+        The beam class (beam8, beam16...) also acts as a duration fallback for
+        member notes whose stem/flag didn't resolve a definitive duration.
+        """
+        groups = {}
+        for pos, ev in enumerate(events):
+            beam_id = beam_of.get(ev.get('id'))
+            if beam_id is not None and event_infos[pos]['type'] in ('note', 'chord'):
+                groups.setdefault(beam_id, []).append(pos)
+
+        for beam_id, positions in groups.items():
+            beam_cls = nodes.get(beam_id, {}).get('class', '')
+            digits = ''.join(ch for ch in beam_cls if ch.isdigit())
+            if digits:
+                for pos in positions:
+                    info = event_infos[pos]
+                    if info['ambiguous']:
+                        info['duration'] = int(digits)
+                        info['ambiguous'] = False
+                        for sub in info.get('notes', []):
+                            sub['duration'] = int(digits)
+                            sub['ambiguous'] = False
+            # A beam needs at least two events; anything less is likely noise
+            if len(positions) >= 2:
+                event_infos[min(positions)]['beam'] = 'L'
+                event_infos[max(positions)]['beam'] = 'J'
+
+    @staticmethod
+    def _apply_key_signature(event_infos: list, key_accidentals: dict):
+        """Give every note its absolute chromatic spelling.
+
+        Kern pitches are absolute: under *k[b-] a plain 'b' still means B
+        natural. Notes without an explicit accidental glyph inherit the key
+        signature, and an explicit glyph carries over to later notes on the
+        same line/space until the end of the measure.
+        """
+        state = {}  # kern pitch (letter+octave) -> accidental active in this measure
+        for info in event_infos:
+            if info['type'] == 'note':
+                sub_notes = [info]
+            elif info['type'] == 'chord':
+                sub_notes = info.get('notes', [])
+            else:
+                continue
+            for note in sub_notes:
+                pitch = note.get('pitch')
+                if not pitch:
+                    continue
+                if note.get('accidental'):
+                    state[pitch] = note['accidental']
+                elif pitch in state:
+                    note['accidental'] = '' if state[pitch] == 'n' else state[pitch]
+                else:
+                    note['accidental'] = key_accidentals.get(pitch[0].upper(), '')
+
     # --- Event collection ---
 
     def _collect_staff_events(self, staff_id: str, children: dict, nodes: dict) -> tuple:
         """Find temporal-anchor events under a staff, ordered by Class 3 (Temporal) edges.
 
-        Returns (sorted_events, tuplet_ratios) where tuplet_ratios maps event
-        IDs to a (num, numbase) duration ratio for events inside tuplets.
+        Returns (sorted_events, tuplet_ratios, beam_of) where tuplet_ratios
+        maps event IDs to a (num, numbase) duration ratio for events inside
+        tuplets and beam_of maps event IDs to their containing beam node ID.
         """
         # 1. Collect all structural descendants via Class 1 edges. Tuplets are
         # modifier-class containers (Class 2 edge from the layer) but hold
         # their notes via Class 1 edges, so descend through them as well,
-        # remembering which tuplet an event belongs to.
+        # remembering which tuplet an event belongs to. Beams are structural
+        # containers (layer -> beam -> note/chord) and are traversed the same
+        # way, remembering which beam an event belongs to.
         descendants = set()
         tuplet_of = {}
-        stack = [(staff_id, None)]
+        beam_of = {}
+        stack = [(staff_id, None, None)]
         while stack:
-            curr, tuplet_ctx = stack.pop()
+            curr, tuplet_ctx, beam_ctx = stack.pop()
             for child_id, e_class in children.get(curr, []):
                 if child_id in descendants:
                     continue
-                is_tuplet_container = (
-                    e_class == 2 and nodes.get(child_id, {}).get('class') == 'tuplet'
-                )
+                child_cls = nodes.get(child_id, {}).get('class', '')
+                is_tuplet_container = (e_class == 2 and child_cls == 'tuplet')
                 if e_class == 1 or is_tuplet_container:
                     descendants.add(child_id)
                     ctx = child_id if is_tuplet_container else tuplet_ctx
+                    b_ctx = child_id if child_cls.startswith('beam') else beam_ctx
                     if ctx is not None:
                         tuplet_of[child_id] = ctx
-                    stack.append((child_id, ctx))
+                    if b_ctx is not None and b_ctx != child_id:
+                        beam_of[child_id] = b_ctx
+                    stack.append((child_id, ctx, b_ctx))
 
         # 2. Filter down to valid top-level event temporal anchors
         raw_events = set()
@@ -770,7 +864,7 @@ class MinimalHumdrumSerializer:
             for ev_id in ev_ids:
                 tuplet_ratios[ev_id] = (num, numbase)
 
-        return sorted_events, tuplet_ratios
+        return sorted_events, tuplet_ratios, beam_of
 
     # --- Event analysis (returns structured dicts) ---
 
@@ -903,6 +997,15 @@ class MinimalHumdrumSerializer:
             if cls in ACCIDENTAL_KERN:
                 accidental = ACCIDENTAL_KERN[cls]
 
+        # Accidentals are modifiers, attached with Class 2 edges rather than
+        # structural ones, so check the note's direct children as well
+        for child_id, e_class in children.get(note_node['id'], []):
+            if e_class != 2:
+                continue
+            child = nodes.get(child_id)
+            if child and child['class'] in ACCIDENTAL_KERN:
+                accidental = ACCIDENTAL_KERN[child['class']]
+
         # 3. Check for dots (Note: You may need to adapt this depending on how dots connect)
         dot_count = self._count_dots(note_node['id'], children, nodes)
 
@@ -1023,6 +1126,7 @@ class MinimalHumdrumSerializer:
             if info.get('grace'):
                 token += "q"
             token += "." * info['dots']
+            token += info.get('beam', '')
             return f"{info.get('prefix', '')}{token}{info.get('suffix', '')}"
 
         if info['type'] == 'chord':
@@ -1037,7 +1141,8 @@ class MinimalHumdrumSerializer:
             note_tokens.sort()
             if not note_tokens:
                 return "."
-            return f"{info.get('prefix', '')}{' '.join(note_tokens)}{info.get('suffix', '')}"
+            return (f"{info.get('prefix', '')}{' '.join(note_tokens)}"
+                    f"{info.get('beam', '')}{info.get('suffix', '')}")
 
         return "."  # Unknown
 
