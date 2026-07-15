@@ -99,6 +99,13 @@
         "articAccentAbove",
         "articStaccatissimoAbove",
         "articMarcatoAbove",
-        "dots"
+        "dots",
+        "dynamicMP",
+        "dynamicMF",
+        "dynamicPP",
+        "dynamicFF",
+        "dynamicFFF",
+        "dynamicSforzato",
+        "dynamicForzando"
     ]
 }

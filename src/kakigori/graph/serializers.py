@@ -45,6 +45,22 @@ ACCIDENTAL_KERN = {
     "accidentalDoubleFlat": "--",
 }
 
+# Dynamic glyph classes and their **dynam spine text
+DYNAMIC_KERN = {
+    "dynamicPiano": "p",
+    "dynamicMezzo": "m",
+    "dynamicForte": "f",
+    "dynamicSforzando": "s",
+    "dynamicZ": "z",
+    "dynamicPP": "pp",
+    "dynamicMP": "mp",
+    "dynamicMF": "mf",
+    "dynamicFF": "ff",
+    "dynamicFFF": "fff",
+    "dynamicSforzato": "sfz",
+    "dynamicForzando": "fz",
+}
+
 # Ornaments and articulations appended after the pitch in a kern token
 ORNAMENT_KERN = {
     "trill": "T",
@@ -151,6 +167,8 @@ class Measure:
         self.cxs = []  # Spatial x-coordinates, parallel to tokens
         self.ids = []  # Graph node IDs, parallel to tokens
         self.full_measure_rest = False  # Lone whole/measure rest fills this measure
+        self.dynamics = []  # (cx, text) dynamic markings assigned to this staff
+        self.dynam_tokens = None  # **dynam rows, aligned with tokens after sync
 
     def add(self, token: str, duration: float = 0.25, cx: float = 0.0, node_id=None):
         """Add a note/rest token with its duration (in whole-note units)."""
@@ -164,6 +182,12 @@ class Measure:
         if not self.tokens:
             return ["."]
         return list(self.tokens)
+
+    def build_dynam(self) -> list:
+        """Return the **dynam rows for this measure, aligned with build()."""
+        if self.dynam_tokens is not None:
+            return list(self.dynam_tokens)
+        return ["."] * len(self.build())
 
 
 class Spine:
@@ -195,6 +219,24 @@ class Spine:
             for i, measure in enumerate(self.measures, start=1):
                 tokens.append(f"={i}")
                 tokens.extend(measure.build())
+            tokens.append("==")
+        else:
+            tokens.append("=1")
+        tokens.append("*-")
+        return tokens
+
+    def has_dynamics(self) -> bool:
+        return any(m.dynamics for m in self.measures)
+
+    def build_dynam(self) -> list:
+        """Assemble the companion **dynam column, row-aligned with build()."""
+        tokens = ["**dynam"]
+        for head_token in self.head:
+            tokens.append(head_token if head_token.startswith("*part") else "*")
+        if self.measures:
+            for i, measure in enumerate(self.measures, start=1):
+                tokens.append(f"={i}")
+                tokens.extend(measure.build_dynam())
             tokens.append("==")
         else:
             tokens.append("=1")
@@ -394,8 +436,9 @@ class HumdrumContext:
     def _slices_from_sync(self, measures: list):
         """Build time slices from Class 5 (sync) edge groups via topological sort.
 
-        Returns a list of slices, where each slice is a list (one entry per
-        spine) of token lists — or None if the constraints are cyclic.
+        Returns (slices, slice_cxs) where each slice is a list (one entry per
+        spine) of token lists and slice_cxs holds a representative horizontal
+        position per slice — or None if the constraints are cyclic.
         """
         if not any(self.sync_groups.get(node_id) is not None
                    for m in measures for node_id in m.ids):
@@ -447,19 +490,23 @@ class HumdrumContext:
             return None  # Cyclic constraints; caller falls back to geometry
 
         n_spines = len(measures)
-        return [
+        slices = [
             [slice_spines[key].get(s_idx, []) for s_idx in range(n_spines)]
             for key in ordered
         ]
+        return slices, [slice_cx[key] for key in ordered]
 
     @staticmethod
     def _slices_from_geometry(measures: list):
-        """Fallback: cluster events into time slices by horizontal proximity."""
+        """Fallback: cluster events into time slices by horizontal proximity.
+
+        Returns (slices, slice_cxs) like _slices_from_sync.
+        """
         TOLERANCE = 30.0  # Pixels. Events within this horizontal distance sync up.
 
         all_cxs = sorted(cx for m in measures for cx in m.cxs)
         if not all_cxs:
-            return [[[] for _ in measures]]
+            return [[[] for _ in measures]], [0.0]
 
         clusters = []
         current_cluster = [all_cxs[0]]
@@ -479,7 +526,7 @@ class HumdrumContext:
                 t_idx = min(range(len(merged_timeline)),
                             key=lambda j: abs(merged_timeline[j] - cx))
                 slices[t_idx][s_idx].append(token)
-        return slices
+        return slices, merged_timeline
 
     def _synchronize_measures(self):
         """Align measures across spines, preferring sync edges over geometry."""
@@ -499,6 +546,7 @@ class HumdrumContext:
             if not any(m.tokens for m in measures):
                 for m in measures:
                     m.tokens = ["."]
+                    m.dynam_tokens = [self._dynam_row_text(m.dynamics)]
                 continue
 
             # A full-measure rest starts at the measure's first beat even
@@ -513,9 +561,10 @@ class HumdrumContext:
                 for i, m in enumerate(measures)
             ]
 
-            slices = self._slices_from_sync(sliceable)
-            if slices is None:
-                slices = self._slices_from_geometry(sliceable)
+            sliced = self._slices_from_sync(sliceable)
+            if sliced is None:
+                sliced = self._slices_from_geometry(sliceable)
+            slices, slice_cxs = sliced
 
             for i in rest_spines:
                 slices[0][i] = [measures[i].tokens[0]]
@@ -525,6 +574,27 @@ class HumdrumContext:
                     " ".join(sl[s_idx]) if sl[s_idx] else "."
                     for sl in slices
                 ]
+                m.dynam_tokens = self._place_dynamics(m.dynamics, slice_cxs)
+
+    @staticmethod
+    def _dynam_row_text(dynamics: list) -> str:
+        """Merge a measure's dynamic markings into a single row token."""
+        if not dynamics:
+            return "."
+        return " ".join(text for _, text in sorted(dynamics))
+
+    @staticmethod
+    def _place_dynamics(dynamics: list, slice_cxs: list) -> list:
+        """Distribute (cx, text) dynamics onto the slice rows nearest to them."""
+        n_rows = max(1, len(slice_cxs))
+        row = ["."] * n_rows
+        for cx, text in sorted(dynamics):
+            if slice_cxs:
+                idx = min(range(len(slice_cxs)), key=lambda j: abs(slice_cxs[j] - cx))
+            else:
+                idx = 0
+            row[idx] = text if row[idx] == "." else f"{row[idx]} {text}"
+        return row
 
     def merge_spines(self) -> str:
         """Builds all spines and transposes them into tab-separated horizontal rows."""
@@ -533,17 +603,19 @@ class HumdrumContext:
 
         self._synchronize_measures()
 
-        built_columns = [spine.build() for spine in self.spines]
+        # Humdrum orders spines bottom-to-top; each staff's **dynam column
+        # rides directly to the right of its **kern column
+        built_columns = []
+        for spine in reversed(self.spines):
+            built_columns.append(spine.build())
+            if spine.has_dynamics():
+                built_columns.append(spine.build_dynam())
+
         lines = []
-        total_rows = len(built_columns[0]) 
+        total_rows = len(built_columns[0])
 
         for row_idx in range(total_rows):
-            row_tokens = [col[row_idx] for col in built_columns]
-            
-            # Reverse the tokens to match Humdrum's bottom-to-top convention
-            row_tokens.reverse() 
-            
-            lines.append("\t".join(row_tokens))
+            lines.append("\t".join(col[row_idx] for col in built_columns))
 
         return "\n".join(lines)
         
@@ -676,20 +748,26 @@ class MinimalHumdrumSerializer:
         ]
         staves.sort(key=lambda s_id: _staff_sort_key(nodes[s_id], all_system_staves))
 
+        # 2. Find each staff's system-staff row (tight 5-line bbox, by y-overlap)
+        staff_rows = []
+        for staff_id in staves:
+            row = _find_staff_row(nodes[staff_id], all_system_staves)
+            staff_rows.append(
+                row['bbox'] if row is not None
+                else nodes[staff_id].get('bbox', [0, 0, 0, 0])
+            )
+
+        # Dynamics hang off the measure node itself; split them per staff row
+        dynamics_per_staff = self._collect_dynamics(measure_id, children, nodes, staff_rows)
+
         for spine_idx, staff_id in enumerate(staves):
             if spine_idx >= len(self.context.spines):
                 continue
 
             spine = self.context.spines[spine_idx]
-            staff_node = nodes[staff_id]
             measure = Measure(measure_id)
-
-            # 2. Find the system-staff row this staff sits on (by y-overlap)
-            staff_row = _find_staff_row(staff_node, all_system_staves)
-            if staff_row is not None:
-                active_bbox = staff_row['bbox']
-            else:
-                active_bbox = staff_node.get('bbox', [0, 0, 0, 0])
+            measure.dynamics = dynamics_per_staff.get(spine_idx, [])
+            active_bbox = staff_rows[spine_idx]
 
             # 3. Collect events and analyze each one (passing the pristine active_bbox!)
             events, tuplet_ratios, beam_of = self._collect_staff_events(staff_id, children, nodes)
@@ -742,6 +820,67 @@ class MinimalHumdrumSerializer:
                 measure.add(self._info_to_kern(info), dur, cx, info.get('id'))
 
             spine.add_measure(measure)
+
+    @staticmethod
+    def _collect_dynamics(measure_id: str, children: dict, nodes: dict,
+                          staff_rows: list) -> dict:
+        """Gather a measure's dynamic glyphs as {staff_index: [(cx, text)]}.
+
+        Adjacent glyphs merge into one marking (e.g. 'f' + 'z' -> 'fz'); each
+        marking is assigned to the staff row it sits closest to vertically.
+        """
+        per_staff = {}
+        if not staff_rows:
+            return per_staff
+
+        glyphs = [
+            nodes[child_id]
+            for child_id, e_class in children.get(measure_id, [])
+            if e_class == 1 and nodes.get(child_id, {}).get('class') in DYNAMIC_KERN
+        ]
+        if not glyphs:
+            return per_staff
+
+        glyphs.sort(key=lambda n: n.get('cx', 0.0))
+        heights = [row[3] - row[1] for row in staff_rows]
+        staff_space = max(1.0, (sum(heights) / len(heights)) / 4.0)
+
+        clusters = []
+        for glyph in glyphs:
+            if clusters:
+                prev = clusters[-1][-1]
+                gap = glyph['bbox'][0] - prev['bbox'][2]
+                if (gap < staff_space
+                        and abs(glyph.get('cy', 0.0) - prev.get('cy', 0.0)) < 2 * staff_space):
+                    clusters[-1].append(glyph)
+                    continue
+            clusters.append([glyph])
+
+        def _staff_of(cy: float) -> int:
+            # Dynamics are engraved BELOW the staff they apply to, so a glyph
+            # between two staves belongs to the one above it, even when the
+            # staff below is geometrically closer
+            inside = [i for i, r in enumerate(staff_rows) if r[1] <= cy <= r[3]]
+            if inside:
+                return inside[0]
+            above = [(cy - r[3], i) for i, r in enumerate(staff_rows) if r[3] <= cy]
+            if above:
+                dist, idx = min(above)
+                if dist < 8 * staff_space:
+                    return idx
+            return min(
+                range(len(staff_rows)),
+                key=lambda i: max(staff_rows[i][1] - cy, cy - staff_rows[i][3], 0.0)
+            )
+
+        for cluster in clusters:
+            text = "".join(DYNAMIC_KERN[g['class']] for g in cluster)
+            cx = (min(g['bbox'][0] for g in cluster)
+                  + max(g['bbox'][2] for g in cluster)) / 2.0
+            cy = sum(g.get('cy', 0.0) for g in cluster) / len(cluster)
+            per_staff.setdefault(_staff_of(cy), []).append((cx, text))
+
+        return per_staff
 
     @staticmethod
     def _apply_beams(events, event_infos: list, beam_of: dict, nodes: dict):

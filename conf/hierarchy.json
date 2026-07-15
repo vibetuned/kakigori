@@ -95,7 +95,14 @@
         "dynamicMezzo",
         "dynamicForte",
         "dynamicSforzando",
-        "dynamicZ"
+        "dynamicZ",
+        "dynamicMP",
+        "dynamicMF",
+        "dynamicPP",
+        "dynamicFF",
+        "dynamicFFF",
+        "dynamicSforzato",
+        "dynamicForzando"
     ],
     "Text_and_Labels": [
         "label",

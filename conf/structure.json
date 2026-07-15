@@ -99,7 +99,14 @@
             "dynamicMezzo",
             "dynamicForte",
             "dynamicSforzando",
-            "dynamicZ"
+            "dynamicZ",
+            "dynamicMP",
+            "dynamicMF",
+            "dynamicPP",
+            "dynamicFF",
+            "dynamicFFF",
+            "dynamicSforzato",
+            "dynamicForzando"
         ],
         "synchronization_text": [
             "syl",

@@ -74,6 +74,35 @@ The pipeline reads several JSON configs from `conf/`:
 | `gelato_config.json` | GNN-specific target-class list (consumed by `graph/train.py`) |
 | `train_gnn.yaml` | Default flags for the GNN trainer |
 
+### Adding a new glyph class
+
+Four config files need the new class (e.g. adding SMuFL U+E52D as `dynamicMF`):
+
+1. `smufl_mapping.json` — codepoint → class name (`"E52D": "dynamicMF"`); use the
+   [SMuFL canonical name](https://w3c.github.io/smufl/latest/tables/index.html).
+2. `config.json` — **append to the END of `target_classes`**. Never insert
+   mid-list: `retrain-model` widens the detector's classification head
+   positionally (old weights are copied into the first N slots), so inserting
+   shifts every later class index and silently breaks existing checkpoints.
+3. `hierarchy.json` — add to the appropriate visibility/TensorBoard group.
+4. `structure.json` — add to the right `node_roles` bucket.
+
+Then regenerate the derived data. Both extraction steps **silently skip
+existing output files** (and still count them as successes), so delete the old
+outputs first:
+
+```
+rm <annotations_dir>/*.json && extract-annotations --svg_dir … --img_dir … --out_dir <annotations_dir>
+rm <graphs_dir>/*.pt      && generate-graphs <mei_dir> <annotations_dir> --out_dir <graphs_dir>
+```
+
+Regenerating the graphs is not optional: annotation IDs are de-collided
+positionally at load time, so `.pt` graphs built against the old JSONs stop
+matching the new ones. Finally rerun `validate-groundtruth` + `compare-kern`
+and check the pitch/rhythm totals are unchanged. Note that the vision model
+must be fine-tuned (`retrain-model --old-num-classes N`) before the *detector*
+can emit the new class; the ground-truth pipeline works immediately.
+
 ## CLI entry points
 
 All scripts are installed as `pyproject.toml` `[project.scripts]`, so once the package is installed they are on `$PATH`.
@@ -132,6 +161,9 @@ compare-kern --mei_dir data/validation-test/mei --krn_dir data/validation-test/k
 (letter, octave, alteration) and of pitch+duration, so it catches accidental,
 key-signature, octave, dots, and duration regressions. Current score on
 `data/validation-test`: **99.1% pitch / 98.9% rhythm** over ~6000 notes.
+Dynamics are serialized into a per-staff `**dynam` spine (192/194 markings
+match the MEI on the validation set; the two misses are `cresc.` text
+directives, which have no glyph class).
 
 Known gaps, roughly by impact:
 
@@ -150,8 +182,9 @@ Known gaps, roughly by impact:
 - [ ] Double-dot detection is a bbox-width heuristic (width vs. staff space);
       unusual render scales could misclassify.
 - [ ] Unpitched/percussion notation (MEI `loc`-based notes) is not supported.
-- [ ] Dynamics, fingering, tempo, and text directives are detected by the
-      vision stage but not serialized.
+- [ ] Fingering, tempo, and text directives (`cresc.`, hairpins…) are detected
+      by the vision stage but not serialized; text directives also lack a
+      glyph class, so they are invisible to the `**dynam` spine.
 
 ## Requirements
 
