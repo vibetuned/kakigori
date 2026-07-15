@@ -150,6 +150,7 @@ class Measure:
         self.durations = []  # Duration in whole-note units, parallel to tokens
         self.cxs = []  # Spatial x-coordinates, parallel to tokens
         self.ids = []  # Graph node IDs, parallel to tokens
+        self.full_measure_rest = False  # Lone whole/measure rest fills this measure
 
     def add(self, token: str, duration: float = 0.25, cx: float = 0.0, node_id=None):
         """Add a note/rest token with its duration (in whole-note units)."""
@@ -499,9 +500,24 @@ class HumdrumContext:
                     m.tokens = ["."]
                 continue
 
-            slices = self._slices_from_sync(measures)
+            # A full-measure rest starts at the measure's first beat even
+            # though its glyph is drawn centered — keep it out of the cx-based
+            # slicing and pin it to the first row afterwards
+            rest_spines = [
+                i for i, m in enumerate(measures)
+                if m.full_measure_rest and len(m.tokens) == 1
+            ]
+            sliceable = [
+                Measure("_rest") if i in rest_spines else m
+                for i, m in enumerate(measures)
+            ]
+
+            slices = self._slices_from_sync(sliceable)
             if slices is None:
-                slices = self._slices_from_geometry(measures)
+                slices = self._slices_from_geometry(sliceable)
+
+            for i in rest_spines:
+                slices[0][i] = [measures[i].tokens[0]]
 
             for s_idx, m in enumerate(measures):
                 m.tokens = [
@@ -679,11 +695,18 @@ class MinimalHumdrumSerializer:
                     for sub in info.get('notes', []):
                         sub['duration'] = scaled
 
-            # 5. Resolve ambiguous durations and mRest using the time signature
+            # 5. Resolve ambiguous durations using the time signature. A whole
+            # rest (or mRest) standing alone means a full measure of silence,
+            # whatever the meter — restate it as the measure's true length.
             self._resolve_durations(event_infos, spine.meter_num, spine.meter_den)
+            measure_value = spine.meter_num / spine.meter_den
+            timed = [info for info in event_infos if not info.get('grace')]
+            if (len(timed) == 1 and timed[0]['type'] in ('rest', 'mrest')
+                    and timed[0]['duration'] == 1):
+                timed[0]['duration'], timed[0]['dots'] = _value_to_duration(measure_value)
+                measure.full_measure_rest = True
             for info in event_infos:
                 if info['type'] == 'mrest':
-                    measure_value = spine.meter_num / spine.meter_den
                     info['duration'], info['dots'] = _value_to_duration(measure_value)
 
             # 6. Spell pitches absolutely: apply the key signature and
@@ -868,8 +891,15 @@ class MinimalHumdrumSerializer:
 
     # --- Event analysis (returns structured dicts) ---
 
-    def _count_dots(self, node_id: str, children: dict, nodes: dict) -> int:
-        """Count augmentation dots attached to a node using bbox aspect ratio."""
+    def _count_dots(self, node_id: str, children: dict, nodes: dict,
+                    staff_space: float = 0.0) -> int:
+        """Count augmentation dots attached to a node from its 'dots' glyph bbox.
+
+        A single dot is roughly square; two dots side by side are much wider.
+        On chords the dots of every chord note merge into one tall glyph, so
+        the aspect ratio is useless there — compare the width against the
+        staff space instead (one dot column is ~0.4 spaces, two are ~1.1).
+        """
         dot_count = 0
         for child_id, _ in children.get(node_id, []):
             child = nodes.get(child_id)
@@ -877,11 +907,11 @@ class MinimalHumdrumSerializer:
                 bbox = child.get('bbox', [0, 0, 0, 0])
                 width = bbox[2] - bbox[0]
                 height = bbox[3] - bbox[1]
-                # A single dot is roughly square; two dots side by side are much wider
-                if height > 0 and width / height > 1.8:
-                    dot_count += 2
-                else:
-                    dot_count += 1
+                is_double = (
+                    (height > 0 and width / height > 1.8)
+                    or (staff_space > 0 and width > 0.55 * staff_space)
+                )
+                dot_count += 2 if is_double else 1
         return dot_count
 
     def _collect_ornaments(self, event: dict, children: dict, nodes: dict) -> tuple:
@@ -927,7 +957,8 @@ class MinimalHumdrumSerializer:
 
         if cls in REST_KERN:
             dur = int(REST_KERN[cls].replace('r', ''))
-            dots = self._count_dots(event.get('id', ''), children, nodes)
+            staff_space = (staff_bbox[3] - staff_bbox[1]) / 4.0
+            dots = self._count_dots(event.get('id', ''), children, nodes, staff_space)
             return {"type": "rest", "duration": dur, "dots": dots, "ambiguous": False, "cx": base_cx, "id": event_id}
 
         if cls == "mRest":
@@ -955,11 +986,12 @@ class MinimalHumdrumSerializer:
                     descendants.add(child_id)
                     stack.append(child_id)
 
-        duration = 4
         accidental = ""
         notehead_cy = note_node.get('cy', 0.0)
         notehead_cx = note_node.get('cx', 0.0)
-        has_definitive_duration = False
+        notehead_dur = None
+        stem_dur = None
+        flag_dur = None
         is_grace = False
         staff_space = (staff_bbox[3] - staff_bbox[1]) / 4.0
 
@@ -973,8 +1005,7 @@ class MinimalHumdrumSerializer:
 
             # Noteheads set the base duration and the Y-coordinate for pitch
             if cls in NOTEHEAD_BASE_DURATION:
-                if not has_definitive_duration:
-                    duration = NOTEHEAD_BASE_DURATION[cls]
+                notehead_dur = NOTEHEAD_BASE_DURATION[cls]
                 notehead_cy = child.get('cy', notehead_cy)
                 notehead_cx = child.get('cx', notehead_cx)
                 # Grace noteheads are drawn at ~0.75x scale; a regular
@@ -983,15 +1014,25 @@ class MinimalHumdrumSerializer:
                 if staff_space > 0 and notehead_h < 0.85 * staff_space:
                     is_grace = True
 
-            # Stems override noteheads with a more definitive duration
             if cls in STEM_DURATION:
-                duration = STEM_DURATION[cls]
-                has_definitive_duration = True
+                stem_dur = STEM_DURATION[cls]
 
-            # Flags override stems/noteheads
             if cls in FLAG_DURATION:
-                duration = FLAG_DURATION[cls]
-                has_definitive_duration = True
+                flag_dur = FLAG_DURATION[cls]
+
+        # Duration precedence: a half/whole notehead is authoritative (its
+        # plain stem is annotated 'stem4' but says nothing about duration);
+        # for black noteheads, flags beat stems beat the bare notehead
+        duration = 4
+        has_definitive_duration = False
+        if notehead_dur in (1, 2):
+            duration, has_definitive_duration = notehead_dur, True
+        elif flag_dur is not None:
+            duration, has_definitive_duration = flag_dur, True
+        elif stem_dur is not None:
+            duration, has_definitive_duration = stem_dur, True
+        elif notehead_dur is not None:
+            duration = notehead_dur
 
             # Grab accidentals if present
             if cls in ACCIDENTAL_KERN:
@@ -1006,8 +1047,14 @@ class MinimalHumdrumSerializer:
             if child and child['class'] in ACCIDENTAL_KERN:
                 accidental = ACCIDENTAL_KERN[child['class']]
 
-        # 3. Check for dots (Note: You may need to adapt this depending on how dots connect)
-        dot_count = self._count_dots(note_node['id'], children, nodes)
+        # 3. Check for dots: usually attached to the note, occasionally to its notehead
+        dot_count = self._count_dots(note_node['id'], children, nodes, staff_space)
+        if dot_count == 0:
+            for desc_id in descendants:
+                if nodes.get(desc_id, {}).get('class', '') in NOTEHEAD_BASE_DURATION:
+                    dot_count = self._count_dots(desc_id, children, nodes, staff_space)
+                    if dot_count:
+                        break
 
         is_ambiguous = (duration == 4 and not has_definitive_duration and not is_grace)
         pitch = self._position_to_kern_pitch(notehead_cy, clef_type, staff_bbox)
@@ -1051,6 +1098,15 @@ class MinimalHumdrumSerializer:
                     shared_duration = note_info['duration']
                     shared_dots = note_info['dots']
                     shared_ambiguous = note_info['ambiguous']
+
+        # The stacked dots of a chord attach to the chord node itself, not to
+        # the member notes; every chord note carries them in its kern token
+        staff_space = (staff_bbox[3] - staff_bbox[1]) / 4.0
+        chord_dots = self._count_dots(chord_node['id'], children, nodes, staff_space)
+        shared_dots = max(shared_dots, chord_dots)
+        for note in notes:
+            note['dots'] = max(note['dots'], shared_dots)
+
         chord_cx = notes[0]['cx'] if notes else chord_node.get('cx', 0.0)
         prefix, suffix = self._collect_ornaments(chord_node, children, nodes)
         return {

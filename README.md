@@ -113,6 +113,44 @@ All scripts are installed as `pyproject.toml` `[project.scripts]`, so once the p
 | `infer-model` | Run the detector across a PDF, emit PNG + JSON per page |
 | `train-gnn` | Train the Phase-2 GNN on top of a frozen detector |
 | `validate-groundtruth` | Run the serializer directly on GT graphs to debug it independently of the GNN |
+| `compare-kern` | Score generated `**kern` against groundtruth MEI: per-measure pitch and rhythm match rates |
+
+## Serializer status & TODO
+
+The `**kern` serializer is validated by running it on ground-truth graphs and
+comparing the result against the source MEI:
+
+```
+validate-groundtruth --graph_dir data/validation-test/graphs \
+                     --json_dir data/validation-test/annotations \
+                     --out_dir data/validation-test/krn-me \
+                     --roles_file conf/structure.json
+compare-kern --mei_dir data/validation-test/mei --krn_dir data/validation-test/krn-me
+```
+
+`compare-kern` matches per-staff/per-measure multisets of sounding pitches
+(letter, octave, alteration) and of pitch+duration, so it catches accidental,
+key-signature, octave, dots, and duration regressions. Current score on
+`data/validation-test`: **99.1% pitch / 98.9% rhythm** over ~6000 notes.
+
+Known gaps, roughly by impact:
+
+- [ ] Mid-piece clef changes (`gClefChange` / `fClefChange` nodes) are ignored;
+      notes after the change are read with the header clef (visible in
+      `QmdyztkJ…_arranged`, staff 2 from measure 9).
+- [ ] Tuplet ratios are inferred from the member count, assuming uniform
+      durations — mixed-duration tuplets misscale. The `tupletNum` digit glyph
+      is not read. (Causes the 2 remaining verovio rhythm warnings.)
+- [ ] Mid-piece key signature and meter changes are ignored — spine headers
+      come from the first system only (`compare-kern` shares this assumption).
+- [ ] A few isolated high-ledger-line notes get the wrong octave from the
+      geometric pitch estimate (~1% of notes on dense scans).
+- [ ] Accidental carry-over does not follow ties across barlines.
+- [ ] Double-dot detection is a bbox-width heuristic (width vs. staff space);
+      unusual render scales could misclassify.
+- [ ] Unpitched/percussion notation (MEI `loc`-based notes) is not supported.
+- [ ] Dynamics, fingering, tempo, and text directives are detected by the
+      vision stage but not serialized.
 
 ## Requirements
 
