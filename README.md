@@ -145,7 +145,8 @@ Known gaps, roughly by impact:
       come from the first system only (`compare-kern` shares this assumption).
 - [ ] A few isolated high-ledger-line notes get the wrong octave from the
       geometric pitch estimate (~1% of notes on dense scans).
-- [ ] Accidental carry-over does not follow ties across barlines.
+- [ ] Ties whose far end is missing from the annotations leave unbalanced
+      `[` / `]` markers (2 unmatched opens in `QmbiBpt…`).
 - [ ] Double-dot detection is a bbox-width heuristic (width vs. staff space);
       unusual render scales could misclassify.
 - [ ] Unpitched/percussion notation (MEI `loc`-based notes) is not supported.

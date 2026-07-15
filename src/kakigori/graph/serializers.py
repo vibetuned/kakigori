@@ -177,6 +177,7 @@ class Spine:
         self.meter_num = 4
         self.meter_den = 4
         self.key_accidentals = {}  # Letter -> kern accidental, e.g. {'F': '#'}
+        self.pending_ties = {}  # Pitch -> accidental of a tie left open last measure
 
     def add_to_head(self, token: str):
         """Append a tandem interpretation to the spine header."""
@@ -604,13 +605,31 @@ class MinimalHumdrumSerializer:
         children = self._build_children(nodes)
 
         # Index spanning curves by their anchored events so the open/close
-        # decision can compare the two end notes directly
+        # decision can compare the two end notes directly. Anchors are keyed
+        # by (system row, cx): a tie across a system break ends on a note
+        # whose cx is far LEFT of where it started, so raw cx ordering would
+        # reverse the open/close roles.
+        systems_sorted = sorted(
+            (n for n in nodes.values() if n['class'] == 'system'),
+            key=lambda s: s['bbox'][1]
+        )
+
+        def _anchor_key(node: dict) -> tuple:
+            cy = node.get('cy', 0.0)
+            row, best = 0, float('inf')
+            for i, sys_node in enumerate(systems_sorted):
+                dist = max(sys_node['bbox'][1] - cy, cy - sys_node['bbox'][3], 0.0)
+                if dist < best:
+                    best, row = dist, i
+            return (row, node.get('cx', 0.0))
+
         self._span_anchors = {}
         for parent_id, child_list in children.items():
             for child_id, e_class in child_list:
                 if e_class == 2 and nodes.get(child_id, {}).get('class') in ('slur', 'tie'):
+                    parent = nodes.get(parent_id, {})
                     self._span_anchors.setdefault(child_id, []).append(
-                        (parent_id, nodes.get(parent_id, {}).get('cx', 0.0))
+                        (parent_id, _anchor_key(parent))
                     )
 
         # Find all systems on this page, sorted top-to-bottom
@@ -711,7 +730,9 @@ class MinimalHumdrumSerializer:
 
             # 6. Spell pitches absolutely: apply the key signature and
             # in-measure accidental carry-over (kern has no implicit keysig)
-            self._apply_key_signature(event_infos, spine.key_accidentals)
+            spine.pending_ties = self._apply_key_signature(
+                event_infos, spine.key_accidentals, spine.pending_ties
+            )
 
             # 7. Serialize to kern tokens with durations, spatial cx and node ID
             for info in event_infos:
@@ -753,15 +774,19 @@ class MinimalHumdrumSerializer:
                 event_infos[max(positions)]['beam'] = 'J'
 
     @staticmethod
-    def _apply_key_signature(event_infos: list, key_accidentals: dict):
+    def _apply_key_signature(event_infos: list, key_accidentals: dict,
+                             pending_ties: dict) -> dict:
         """Give every note its absolute chromatic spelling.
 
         Kern pitches are absolute: under *k[b-] a plain 'b' still means B
         natural. Notes without an explicit accidental glyph inherit the key
         signature, and an explicit glyph carries over to later notes on the
-        same line/space until the end of the measure.
+        same line/space until the end of the measure. A note closing a tie
+        inherits the spelling of the note that opened it, even across the
+        barline. Returns the ties left open for the next measure.
         """
         state = {}  # kern pitch (letter+octave) -> accidental active in this measure
+        outgoing = {}  # Ties opened here, to be closed in the next measure
         for info in event_infos:
             if info['type'] == 'note':
                 sub_notes = [info]
@@ -773,12 +798,21 @@ class MinimalHumdrumSerializer:
                 pitch = note.get('pitch')
                 if not pitch:
                     continue
+                closes_tie = (']' in note.get('suffix', '')
+                              or ']' in info.get('suffix', ''))
+                opens_tie = ('[' in note.get('prefix', '')
+                             or '[' in info.get('prefix', ''))
                 if note.get('accidental'):
                     state[pitch] = note['accidental']
+                elif closes_tie and pitch in pending_ties:
+                    note['accidental'] = pending_ties[pitch]
                 elif pitch in state:
                     note['accidental'] = '' if state[pitch] == 'n' else state[pitch]
                 else:
                     note['accidental'] = key_accidentals.get(pitch[0].upper(), '')
+                if opens_tie:
+                    outgoing[pitch] = note['accidental']
+        return outgoing
 
     # --- Event collection ---
 
@@ -934,9 +968,10 @@ class MinimalHumdrumSerializer:
             elif ccls in ('slur', 'tie'):
                 open_ch, close_ch = ('(', ')') if ccls == 'slur' else ('[', ']')
                 anchors = self._span_anchors.get(child_id, [])
-                others = [(cx, aid) for aid, cx in anchors if aid != ev_id]
-                if others:
-                    is_start = (event.get('cx', 0.0), ev_id) <= min(others)
+                own_key = next((key for aid, key in anchors if aid == ev_id), None)
+                others = [(key, aid) for aid, key in anchors if aid != ev_id]
+                if others and own_key is not None:
+                    is_start = (own_key, ev_id) <= min(others)
                 else:
                     # Other end not on this page: fall back to curve geometry
                     d_left = abs(event.get('cx', 0.0) - child['bbox'][0])
