@@ -53,11 +53,15 @@ class MultiClassEdgeFocalLoss(nn.Module):
         # logits: (E, 5)
         # targets: (E)
 
-        # Calculate standard Cross Entropy Loss (unreduced)
+        # Weighted CE for the loss magnitude...
         ce_loss = F.cross_entropy(logits, targets, weight=self.alpha, reduction="none")
 
-        # Calculate the focal modulating factor (1 - p_t)^gamma
-        pt = torch.exp(-ce_loss)
+        # ...but the focal factor must come from the TRUE probability p_t,
+        # i.e. the unweighted CE. Deriving it from the weighted CE makes
+        # pt ~ exp(-alpha*CE): for a low-alpha class even a wrong prediction
+        # looks "easy" and its gradient is suppressed twice over.
+        with torch.no_grad():
+            pt = torch.exp(-F.cross_entropy(logits, targets, reduction="none"))
         focal_loss = ((1 - pt) ** self.gamma) * ce_loss
 
         if self.reduction == "mean":

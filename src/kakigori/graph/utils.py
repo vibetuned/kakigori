@@ -60,29 +60,25 @@ def split_into_systems(abs_boxes, labels, gt_edges, class_to_idx):
         sys_labels = primitive_labels[in_sys_mask]
 
         sys_original_indices = primitive_global_indices[in_sys_mask]
-        global_to_local_map = {
-            global_idx.item(): local_idx
-            for local_idx, global_idx in enumerate(sys_original_indices)
-        }
 
-        sys_gt_targets = []
+        # Vectorized edge re-indexing via a global->local lookup tensor. The
+        # previous per-edge .item() loop forced thousands of GPU syncs per
+        # training step and dominated the step time.
+        sys_gt_tensor = torch.empty((0, 3), dtype=torch.long, device=abs_boxes.device)
         if gt_edges is not None and len(gt_edges) > 0:
-            for u, v, edge_class in gt_edges:
-                # FIX: Extract scalar values from the tensors for dict lookup!
-                u_val = u.item()
-                v_val = v.item()
-                cls_val = edge_class.item()
-                
-                if u_val in global_to_local_map and v_val in global_to_local_map:
-                    local_u = global_to_local_map[u_val]
-                    local_v = global_to_local_map[v_val]
-                    sys_gt_targets.append([local_u, local_v, cls_val])
-
-        sys_gt_tensor = (
-            torch.tensor(sys_gt_targets, dtype=torch.long, device=abs_boxes.device)
-            if sys_gt_targets
-            else torch.empty((0, 3), dtype=torch.long, device=abs_boxes.device)
-        )
+            lut = torch.full(
+                (abs_boxes.shape[0],), -1, dtype=torch.long, device=abs_boxes.device
+            )
+            lut[sys_original_indices] = torch.arange(
+                len(sys_original_indices), device=abs_boxes.device
+            )
+            u_local = lut[gt_edges[:, 0]]
+            v_local = lut[gt_edges[:, 1]]
+            keep = (u_local >= 0) & (v_local >= 0)
+            if keep.any():
+                sys_gt_tensor = torch.stack(
+                    [u_local[keep], v_local[keep], gt_edges[keep, 2]], dim=1
+                )
 
         system_groups.append(
             {

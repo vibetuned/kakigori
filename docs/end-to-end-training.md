@@ -160,30 +160,46 @@ the first training step (seen on newer GPUs) is an environment problem, not
 a model problem — upgrade the pinned wheels with
 `uv lock --upgrade-package torch --upgrade-package torchvision && uv sync`.
 
-## Stage 4 — Train the GNN
+## Stage 4 — Train the GNN (phased)
+
+The GNN trains in four phases that release one constraint at a time — the
+full rationale, monitoring guide, and hard-won lessons live in
+[graph.md](graph.md). Operationally each phase is one run of:
 
 ```
-uv run train-gnn --train-config conf/train_gnn.yaml
+./train.sh uv run train-gnn --train-config conf/train_gnn.yaml --resume
 ```
 
-Edit `conf/train_gnn.yaml` first:
+with `conf/train_gnn.yaml` set per phase (pre-create the next
+`checkpoints_gnn/run_NNN` so `--resume` targets it rather than the previous
+run):
 
-- `detector_checkpoint:` → your Stage-3 consolidation run
-  (e.g. `checkpoints/run_025`). The detector is **frozen**; the GNN trains a
-  GATv2 edge classifier on RoI features pooled from the detector's PANet
-  neck.
-- `img_dir` / `ann_dir` / `graph_dir` → your Stage-2 dataset triplet.
-- `config:` should stay `conf/config.json` (the `gelato_config.json` default
-  in `graph/train.py` is stale — the file doesn't exist).
+| Phase | yaml | Notes |
+| --- | --- | --- |
+| 1 | `unfreeze: "none"`, `lr: 0.001`, 30 epochs | GNN + RoI head from scratch, frozen detector |
+| 2 | `unfreeze: "neck"`, `fine_tune: <phase-1 run>`, `lr: 0.0003`, `vision_lr: 1e-5` | PANet adapts as a vision→graph adaptation layer |
+| 3 | `unfreeze: "full"` | only if phase 2 plateaus; tiny vision_lr |
+| 4 | add `box_jitter: <px>` | GT-box noise, narrows the gap to detector boxes |
+
+Common settings: `detector_checkpoint:` → the Stage-3 consolidation run;
+`img_dir`/`ann_dir`/`graph_dir` → the Stage-2 triplet; `config:` stays
+`conf/config.json`. `fine_tune:` accepts an HF checkpoint dir and
+warm-starts the whole wrapper. **After any unfrozen phase, re-run
+`eval-model` on the detector**: the same backbone serves detection at
+inference, and joint fine-tuning can silently degrade box quality.
 
 Candidate edges come from `heuristics.generate_axis_aware_edges` (vertical,
 staff-lane horizontal, kNN safety net); the GNN classifies candidates, so
 recall is capped by the heuristics — if an edge type never appears as a
 candidate, no amount of training recovers it.
 
-Monitor `runs_gnn/` in TensorBoard; checkpoints land in
-`checkpoints_gnn/run_NNN`. Look at per-edge-class F1, not just loss —
-class 0 (no-edge) dominates the candidate set.
+Monitoring (eval runs every `eval_steps`; TensorBoard in `runs_gnn/`):
+watch per-edge-class F1 (all six classes) *and* the topology deltas.
+Topology deltas frozen at identical values across evals mean the model has
+collapsed into an attractor (all-background, or the inverse rare-class
+flood) — see graph.md §4 for the diagnosis recipe and §5 for the fixes.
+Phase-1 reference: macro-F1 0.825 after 30 epochs (~2.2 h on an RTX 5090
+at ~20 it/s).
 
 ## Stage 5 — Validate the serializer (no models involved)
 

@@ -27,7 +27,9 @@ Per-module documentation lives in [docs/modules/](docs/modules/):
 - [matching.md](docs/modules/matching.md)
 
 For the full corpus → detector → GNN → `**kern` recipe, see the
-[end-to-end training guide](docs/end-to-end-training.md).
+[end-to-end training guide](docs/end-to-end-training.md). The graph model's
+design, phase curriculum, and training lessons are explained in
+[docs/graph.md](docs/graph.md).
 
 ## Pipeline
 

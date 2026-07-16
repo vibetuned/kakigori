@@ -5,6 +5,7 @@ Uses Hugging Face Transformers Trainer for robust, standard implementation.
 
 import os
 import json
+import shutil
 import logging
 import argparse
 from pathlib import Path
@@ -59,9 +60,22 @@ def parse_args():
     parser.add_argument("--batch-size", type=int, default=2) # 2 is standard for full-page graphs
     parser.add_argument("--lr", type=float, default=1e-3)    # 1e-3 is ideal for GATv2 initialization
     parser.add_argument("--logging-steps", type=int, default=10)
+    parser.add_argument("--eval-steps", type=int, default=1000)
     parser.add_argument("--save-steps", type=int, default=500)
     parser.add_argument("--max-steps", type=int, default=-1)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--unfreeze", type=str, default="none", choices=["none", "neck", "full"],
+        help="Vision components to train jointly: none (phase 1), neck-only (phase 2), full backbone (phase 3).",
+    )
+    parser.add_argument(
+        "--vision-lr", type=float, default=1e-5,
+        help="Learning rate for unfrozen vision parameters (param group separate from the GNN lr).",
+    )
+    parser.add_argument(
+        "--box-jitter", type=float, default=0.0,
+        help="Stddev in px of gaussian noise added to GT boxes during training (phase 4 curriculum).",
+    )
     parser.add_argument("--resume", action="store_true", help="Auto-detect and resume from the last checkpoint.")
     parser.add_argument("--resume-from-checkpoint", type=str, default=None, help="Path to a specific checkpoint to resume from.")
     parser.add_argument("--fine-tune", type=str, default=None, help="Path to a checkpoint to fine-tune from.")
@@ -164,13 +178,17 @@ def main():
     )
     
     # Wrap them for the Trainer
-    model_wrapper = GNNPhase2Model(detector, roi_extractor, gnn_model)
+    model_wrapper = GNNPhase2Model(detector, roi_extractor, gnn_model, unfreeze=args.unfreeze)
+    if args.unfreeze != "none":
+        n_vision = sum(p.numel() for p in detector.parameters() if p.requires_grad)
+        logger.info(f"Vision unfreeze='{args.unfreeze}': {n_vision/1e6:.1f}M vision params train at lr={args.vision_lr}")
 
     if args.fine_tune:
-        logger.info(f"Loading weights from {args.fine_tune} for fine-tuning...")
-        # Since only the GNN is trainable, we load weights for the whole wrapper
-        # The vision model is already loaded and frozen
-        model_wrapper.load_state_dict(torch.load(args.fine_tune, map_location=device), strict=False)
+        logger.info(f"Loading wrapper weights from {args.fine_tune} for fine-tuning...")
+        # Warm-start the whole wrapper (detector + RoI + GNN) from a previous
+        # phase's HF checkpoint dir or weights file — the phase curriculum
+        # chains runs this way (phase 2 starts from phase 1's weights)
+        load_checkpoint(model_wrapper, args.fine_tune, device=torch.device("cpu"), eval=False)
 
     # Initialize Training Arguments
     training_args = TrainingArguments(
@@ -180,7 +198,8 @@ def main():
         per_device_train_batch_size=args.batch_size,
         per_device_eval_batch_size=args.batch_size,
         learning_rate=args.lr,
-        eval_steps=1000,
+        eval_strategy="steps",  # default is "no": without this eval never runs
+        eval_steps=args.eval_steps,
         logging_steps=args.logging_steps,
         save_steps=args.save_steps,
         max_steps=args.max_steps,
@@ -191,18 +210,39 @@ def main():
         logging_first_step=True,
         lr_scheduler_type="cosine",
         warmup_ratio=0.1,
-        fp16=True, 
+        fp16=True,
         dataloader_pin_memory=True,
+        dataloader_num_workers=4,  # PNG decode + letterbox off the main process
     )
 
     # Define Focal Loss class weights
     # [none, contains, modifier, temporal, text-sync, note-sync]
-    alpha_weights = torch.tensor([0.05, 1.0, 2.5, 1.0, 4.0, 1.5], dtype=torch.float32)
+    # alpha[0] must not be too small: candidates are ~97% no-edge, and a
+    # 30x penalty ratio drove the model into flooding rare classes while
+    # never predicting class 0 at all
+    alpha_weights = torch.tensor([0.4, 1.0, 2.0, 1.0, 3.0, 1.5], dtype=torch.float32)
     alpha_weights = alpha_weights.to(device)
+
+    # Differential learning rates when vision components are unfrozen:
+    # the GNN/RoI head keeps args.lr, vision params get the (much lower)
+    # vision lr. Built before the Trainer so HF wraps it with its scheduler.
+    optimizers = (None, None)
+    if args.unfreeze != "none":
+        vision_params = [p for p in model_wrapper.detector.parameters() if p.requires_grad]
+        head_params = list(model_wrapper.gnn.parameters()) + list(model_wrapper.roi_extractor.parameters())
+        optimizer = torch.optim.AdamW(
+            [
+                {"params": head_params, "lr": args.lr},
+                {"params": vision_params, "lr": args.vision_lr},
+            ],
+            weight_decay=training_args.weight_decay,
+        )
+        optimizers = (optimizer, None)
 
     # Initialize Custom Trainer
     trainer = GNNTrainer(
         alpha_weights=alpha_weights,
+        box_jitter=args.box_jitter,
         model=model_wrapper,
         class_list=class_list,
         args=training_args,
@@ -210,6 +250,7 @@ def main():
         eval_dataset=val_dataset,
         data_collator=omr_collate_fn,
         compute_metrics=compute_gnn_metrics,
+        optimizers=optimizers,
     )
 
     # Start Training
@@ -218,6 +259,13 @@ def main():
         checkpoint = args.resume_from_checkpoint
     elif args.resume:
         last_checkpoint = get_last_checkpoint(str(run_dir))
+        # A crash during a save leaves a partial checkpoint that would
+        # crash-loop the resume; discard it and use the last complete one
+        while (last_checkpoint is not None
+               and not (Path(last_checkpoint) / "trainer_state.json").exists()):
+            logger.warning(f"Discarding incomplete checkpoint: {last_checkpoint}")
+            shutil.rmtree(last_checkpoint)
+            last_checkpoint = get_last_checkpoint(str(run_dir))
         if last_checkpoint is not None:
             logger.info(f"Checkpoint detected, resuming training at {last_checkpoint}.")
             checkpoint = last_checkpoint

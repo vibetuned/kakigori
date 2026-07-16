@@ -148,26 +148,29 @@ def map_gt_to_candidates(candidate_edge_index, gt_targets):
     Assigns the correct class label (0-5) to each proposed candidate edge:
     0 none, 1 structural, 2 modifier, 3 temporal, 4 sync-text, 5 simultaneity.
     gt_targets: Tensor of (E, 3) where columns are [u, v, edge_class]
+
+    Vectorized: (u, v) pairs are encoded as scalar keys and matched with
+    searchsorted. The previous per-candidate .item() loop caused thousands
+    of GPU syncs per training step and dominated the step time.
     """
     num_candidates = candidate_edge_index.shape[1]
     y_tensor = torch.zeros(
         num_candidates, dtype=torch.long, device=candidate_edge_index.device
     )
 
-    if gt_targets.numel() == 0:
+    if gt_targets.numel() == 0 or num_candidates == 0:
         return y_tensor  # All candidates are Class 0 (No Edge)
 
-    # Build a fast dictionary of Ground Truth edges
-    gt_dict = {
-        (u.item(), v.item()): edge_class.item() for u, v, edge_class in gt_targets
-    }
+    gt = gt_targets.to(candidate_edge_index.device)
+    n = int(max(candidate_edge_index.max(), gt[:, :2].max()).item()) + 1
+    cand_keys = candidate_edge_index[0].long() * n + candidate_edge_index[1].long()
+    gt_keys = gt[:, 0].long() * n + gt[:, 1].long()
 
-    for i in range(num_candidates):
-        u = candidate_edge_index[0, i].item()
-        v = candidate_edge_index[1, i].item()
-
-        if (u, v) in gt_dict:
-            y_tensor[i] = gt_dict[(u, v)]
+    sort_idx = torch.argsort(gt_keys)
+    sorted_keys = gt_keys[sort_idx]
+    pos = torch.searchsorted(sorted_keys, cand_keys).clamp(max=len(sorted_keys) - 1)
+    matched = sorted_keys[pos] == cand_keys
+    y_tensor[matched] = gt[sort_idx][pos[matched], 2].long()
 
     return y_tensor
 

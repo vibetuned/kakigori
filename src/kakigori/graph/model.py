@@ -5,25 +5,37 @@ from torchvision.ops import MultiScaleRoIAlign
 
 class GNNPhase2Model(nn.Module):
     """
-    Wraps the Vision Backbone (frozen), RoI Extractor (frozen), 
-    and Graph Network (training) into a single module.
+    Wraps the Vision Backbone, RoI Extractor, and Graph Network into a
+    single module. The vision side is frozen by default; `unfreeze` opens
+    it up progressively for the later GNN training phases:
+      - "none": detector fully frozen (phase 1)
+      - "neck": PANet neck trains as an adaptation layer, ConvNeXt frozen (phase 2)
+      - "full": backbone + neck both train (phase 3)
     """
-    def __init__(self, detector, roi_extractor, gnn):
+    def __init__(self, detector, roi_extractor, gnn, unfreeze="none"):
         super().__init__()
         self.detector = detector
         self.roi_extractor = roi_extractor
         self.gnn = gnn
-        
-        # Phase 2: Strictly freeze the vision backbone and RoI extractor
+        self.unfreeze = unfreeze
+
         self.detector.eval()
-        
         for p in self.detector.parameters():
             p.requires_grad = False
-            
+        if unfreeze in ("neck", "full"):
+            for p in self.detector.neck.parameters():
+                p.requires_grad = True
+        if unfreeze == "full":
+            for p in self.detector.backbone.parameters():
+                p.requires_grad = True
+
     def train(self, mode=True):
-        """Ensure vision components stay in eval mode."""
+        """Keep the detector in eval mode in every phase: ConvNeXt/PANet are
+        LayerNorm-based, so eval only disables dropout/droppath — weights
+        still receive gradients when unfrozen."""
         super().train(mode)
         self.detector.eval()
+        return self
         
 class GraphVisualExtractor(nn.Module):
     def __init__(self, featmap_names=['0', '1', '2'], roi_size=(7, 7), in_channels=128, out_channels=256):

@@ -2,23 +2,32 @@
 # This file is passed via --train-config to the training script
 
 # --- Data Arguments ---
-img_dir: "data/validation-small/imgs"
-ann_dir: "data/validation-small/annotations"
-graph_dir: "data/validation-small/graphs"
+img_dir: "data/train-small/imgs"
+ann_dir: "data/train-small/annotations"
+graph_dir: "data/train-small/graphs"
 config: "conf/config.json"
 
 # --- Pre-trained Vision Backbone Arguments ---
 # This is required! You must provide the path to your RoI Extractor weights.
-detector_checkpoint: "checkpoints/run_022" # Update this path!
+detector_checkpoint: "checkpoints/run_003"
+
+# --- Phase control ---
+# Phase 1: none | Phase 2: neck (PANet adaptation) | Phase 3: full backbone
+# Phase 4: keep unfreeze, add box_jitter (px) to simulate detector noise
+unfreeze: "neck"
+vision_lr: 0.00001
+box_jitter: 1.5   # phase 4: gaussian px noise on GT boxes (640-canvas space)
+fine_tune: "checkpoints_gnn/run_002"  # warm-start from phase 2
 
 # --- Trainer Arguments ---
 output_dir: "checkpoints_gnn"
 logging_dir: "runs_gnn"
-epochs: 30
+epochs: 15     # phase 2 refines a converged head; 30 was the from-scratch phase 1
 batch_size: 2  # 2 is standard for full-page graphs
-lr: 0.001      # 1e-3 is ideal for GATv2 initialization
+lr: 0.0003     # phase 2: gentler than the 1e-3 used for GATv2 from scratch
 logging_steps: 10
-save_steps: 500
+eval_steps: 2500  # ~440 eval pages per pass; 1000 made eval a large fraction of wall time
+save_steps: 250  # segfault cadence on this hardware makes tighter saves worthwhile
 max_steps: -1
 seed: 42
 

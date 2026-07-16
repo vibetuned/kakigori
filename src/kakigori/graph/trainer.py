@@ -13,12 +13,15 @@ from .utils import split_into_systems
 
 
 class GNNTrainer(Trainer):
-    def __init__(self, alpha_weights, class_list, *args, **kwargs):
+    def __init__(self, alpha_weights, class_list, box_jitter=0.0, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # Initialize the multi-class focal loss
         self.loss_fn = MultiClassEdgeFocalLoss(alpha_weights=alpha_weights)
         self.topology_evaluator = GraphTopologyEvaluator()
         self.class_list = class_list
+        # Phase 4 curriculum: gaussian noise (in px) added to GT boxes during
+        # training to simulate detector localization error
+        self.box_jitter = box_jitter
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         images = inputs["images"]
@@ -37,21 +40,37 @@ class GNNTrainer(Trainer):
         
         class_to_idx = {c: i for i, c in enumerate(self.class_list)} 
         
+        unfreeze = getattr(model, "unfreeze", "none")
+
         for i in range(len(images)):
             img = images[i].to(device)
             abs_boxes = boxes_list[i].to(device)
             labels = labels_list[i].to(device)
             page_edges = edges_list[i].to(device)
-            
+
             # We only need at least 2 boxes to form an edge.
             if len(abs_boxes) < 2:
                 continue
-            
-            # --- 1. VISION DOMAIN: Full Page Extraction (Strictly Frozen) ---
-            with torch.no_grad():
+
+            # Phase 4: simulate detector localization noise on GT boxes
+            if model.training and self.box_jitter > 0:
+                abs_boxes = abs_boxes + torch.randn_like(abs_boxes) * self.box_jitter
+                abs_boxes[:, 2:] = torch.maximum(abs_boxes[:, 2:], abs_boxes[:, :2] + 1.0)
+
+            # --- 1. VISION DOMAIN: Full Page Extraction ---
+            # Gradient flow matches the phase: backbone only in "full",
+            # neck also in "neck" (PANet as an adaptation layer)
+            if unfreeze == "full":
                 features = model.detector.backbone(img.unsqueeze(0))
+            else:
+                with torch.no_grad():
+                    features = model.detector.backbone(img.unsqueeze(0))
+            if unfreeze in ("neck", "full"):
                 fused_features = model.detector.neck(features)
-                feat_dict = {str(idx): feat for idx, feat in enumerate(fused_features)}
+            else:
+                with torch.no_grad():
+                    fused_features = model.detector.neck(features)
+            feat_dict = {str(idx): feat for idx, feat in enumerate(fused_features)}
 
             # --- 2. BRIDGE: Isolate Systems ---
             system_groups = split_into_systems(abs_boxes, labels, page_edges, class_to_idx)
@@ -73,10 +92,15 @@ class GNNTrainer(Trainer):
                 sys_rel_boxes[:, 1] -= sy1
                 sys_rel_boxes[:, 2] -= sx1
                 sys_rel_boxes[:, 3] -= sy1
-                
+
+                # Node features must share a scale: raw pixel coords (0..640)
+                # swamp the unit-scale RoI features and embeddings inside the
+                # GATv2 projections. Heuristics keep the pixel-space copy.
+                norm_boxes = sys_rel_boxes / img.shape[-1]
+
                 class_embeds = model.gnn.class_embedding(sys_labels)
-                x = torch.cat([roi_feats, sys_rel_boxes, class_embeds], dim=1)
-                
+                x = torch.cat([roi_feats, norm_boxes, class_embeds], dim=1)
+
                 # FIX 3: Passed class_to_idx to heuristics
                 candidate_edge_index = generate_axis_aware_edges(sys_rel_boxes, sys_labels, class_to_idx)
                 
@@ -229,6 +253,17 @@ class GNNTrainer(Trainer):
             return total_loss, outputs
             
         return total_loss
+
+    def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
+        """Route evaluation through compute_loss: GNNPhase2Model has no
+        forward(), and the default prediction_step would call model(**inputs).
+        Returns (loss, edge_logits, edge_targets) so compute_metrics receives
+        the edge-classification pair rather than the page-level node labels."""
+        with torch.no_grad():
+            loss, outputs = self.compute_loss(model, inputs, return_outputs=True)
+        if prediction_loss_only:
+            return (loss.detach(), None, None)
+        return (loss.detach(), outputs["logits"].detach(), outputs["labels"].detach())
 
     def evaluate(self, eval_dataset=None, ignore_keys=None, metric_key_prefix="eval"):
         """
