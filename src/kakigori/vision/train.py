@@ -6,6 +6,7 @@ Uses Hugging Face Transformers Trainer for robust, standard implementation.
 # Standard library imports
 import os
 import json
+import shutil
 import logging
 import argparse
 from pathlib import Path
@@ -300,6 +301,13 @@ def main():
         checkpoint = args.resume_from_checkpoint
     elif args.resume:
         last_checkpoint = get_last_checkpoint(str(run_dir))
+        # A crash during a save leaves a partial checkpoint that would
+        # crash-loop the resume; discard it and use the last complete one
+        while (last_checkpoint is not None
+               and not (Path(last_checkpoint) / "trainer_state.json").exists()):
+            logger.warning(f"Discarding incomplete checkpoint: {last_checkpoint}")
+            shutil.rmtree(last_checkpoint)
+            last_checkpoint = get_last_checkpoint(str(run_dir))
         if last_checkpoint is not None:
             logger.info(f"Checkpoint detected, resuming training at {last_checkpoint}.")
             checkpoint = last_checkpoint

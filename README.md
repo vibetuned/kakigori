@@ -26,6 +26,9 @@ Per-module documentation lives in [docs/modules/](docs/modules/):
 - [dataset.md](docs/modules/dataset.md)
 - [matching.md](docs/modules/matching.md)
 
+For the full corpus → detector → GNN → `**kern` recipe, see the
+[end-to-end training guide](docs/end-to-end-training.md).
+
 ## Pipeline
 
 ```

@@ -120,7 +120,7 @@ class GNNTrainer(Trainer):
                 concat_targets = torch.cat(all_targets, dim=0)
                 outputs = {"logits": concat_logits, "labels": concat_targets}
             else:
-                outputs = {"logits": torch.empty((0, 5), device=device), "labels": torch.empty(0, device=device)}
+                outputs = {"logits": torch.empty((0, 6), device=device), "labels": torch.empty(0, device=device)}
             return total_loss, outputs
             
         return total_loss
@@ -225,7 +225,7 @@ class GNNTrainer(Trainer):
                 concat_targets = torch.cat(all_targets, dim=0)
                 outputs = {"logits": concat_logits, "labels": concat_targets}
             else:
-                outputs = {"logits": torch.empty((0, 5), device=device), "labels": torch.empty(0, device=device)}
+                outputs = {"logits": torch.empty((0, 6), device=device), "labels": torch.empty(0, device=device)}
             return total_loss, outputs
             
         return total_loss
@@ -258,21 +258,26 @@ def compute_gnn_metrics(eval_pred):
         logits = logits[0]
         
     preds = logits.argmax(axis=1)
-    
-    target_names = ['No Edge', 'Structural', 'Modifier', 'Temporal', 'Sync']
-    
+
+    # Full edge taxonomy emitted by parsers.GroundTruthGraphBuilder:
+    # 0 none, 1 structural, 2 modifier, 3 temporal, 4 sync-text (syl/verse),
+    # 5 simultaneity (same-onset events, consumed by the kern serializer)
+    target_names = ['No Edge', 'Structural', 'Modifier', 'Temporal', 'SyncText', 'Simultaneity']
+
     report = classification_report(
-        labels, 
-        preds, 
-        target_names=target_names, 
-        zero_division=0, 
+        labels,
+        preds,
+        labels=list(range(len(target_names))),
+        target_names=target_names,
+        zero_division=0,
         output_dict=True
     )
-    
+
     return {
         "f1_structural": report['Structural']['f1-score'],
         "f1_modifier": report['Modifier']['f1-score'],
         "f1_temporal": report['Temporal']['f1-score'],
-        "f1_sync": report['Sync']['f1-score'],
+        "f1_sync_text": report['SyncText']['f1-score'],
+        "f1_simultaneity": report['Simultaneity']['f1-score'],
         "f1_macro": report['macro avg']['f1-score']
     }

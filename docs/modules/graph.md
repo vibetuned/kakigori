@@ -6,7 +6,7 @@ This subpackage is the "relational" half of the OMR pipeline. The vision stack (
 
 The flow is roughly:
 
-1. `parsers.GroundTruthGraphBuilder` reads an MEI file plus per-page JSON detections and emits ground-truth typed edges (5 classes: 0=no edge, 1=structural, 2=modifier, 3=temporal, 4=sync). These are saved as `.pt` files (one per score) containing `edge_index`, `y`, `node_ids`, `json_files`.
+1. `parsers.GroundTruthGraphBuilder` reads an MEI file plus per-page JSON detections and emits ground-truth typed edges (6 classes: 0=no edge, 1=structural, 2=modifier, 3=temporal, 4=sync-text (syl/verse), 5=simultaneity). These are saved as `.pt` files (one per score) containing `edge_index`, `y`, `node_ids`, `json_files`.
 2. `dataset.OMRFullPageDataset` pairs images + JSON annotations + saved graphs into PyG-compatible samples.
 3. `model.ScoreGraphReconstructor` (GATv2) and `model.GraphVisualExtractor` (MultiScaleRoIAlign over the detector's PANet features) form the GNN. `model.GNNPhase2Model` wraps them with a frozen detector.
 4. `train.py` (CLI) trains the GNN via `trainer.GNNTrainer` using `losses.MultiClassEdgeFocalLoss`, `heuristics.generate_axis_aware_edges` for candidate proposal, and `metrics.GraphTopologyEvaluator` plus `compute_gnn_metrics` for evaluation.

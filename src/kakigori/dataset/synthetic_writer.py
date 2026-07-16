@@ -165,19 +165,21 @@ class ArpeggioPattern(Enum):
 # User starting keys
 STARTING_KEYS = ["C", "G", "D", "F", "Bb", "A", "E", "Eb", "Ab"]
 MINOR_STARTING_KEYS = ["A", "E", "B", "D", "G", "C", "F", "F#", "C#"]
+# Weighted (by duplication) toward the meters whose digit glyphs evaluate
+# weakest on the detector: timeSig1/2/3/6/8 and common/cut-common symbols
 TIME_SIGNATURES = [
-    "1/4",
-    "2/4",
-    "4/4",
-    "6/8",
-    "8/8",
-    "C",
-    "cut",
-    "16/8",
-    "16/16",
+    "1/4", "1/4",
+    "2/4", "2/2",
+    "3/4", "3/8",
+    "6/8", "6/4",
+    "12/8", "12/8",
     "16/12",
+    "8/8", "16/8",
+    "C", "C",
+    "cut", "cut",
+    "4/4",
     "9/8",
-    "12/8",
+    "16/16",
 ]
 FAILING_ARTICULATIONS = [
     music21.articulations.Staccato,
@@ -186,12 +188,15 @@ FAILING_ARTICULATIONS = [
     music21.articulations.Tenuto,
     music21.articulations.StrongAccent,  # Marcato
 ]
+# Trill weighted up (weak detector class)
 FAILING_ORNAMENTS = [
+    music21.expressions.Trill,
     music21.expressions.Trill,
     music21.expressions.Mordent,
     music21.expressions.Turn,
 ]
-FAILING_DYNAMICS = ["p", "pp", "z", "sfz", "fz", "mf", "f"]
+# pp/mp/ff weighted up (weak detector classes)
+FAILING_DYNAMICS = ["pp", "pp", "mp", "mp", "ff", "ff", "p", "z", "sfz", "fz", "mf", "f"]
 
 
 def get_chord_pitches(
@@ -424,8 +429,9 @@ def _get_chromatic_fingerings(pitches: List[music21.pitch.Pitch], hand: str) -> 
 
 def _choose_note_duration(bar_length: float) -> float:
     """Pick a random note duration that fits within a single bar."""
-    candidates = [4.0, 2.0, 1.0, 0.5, 0.25]
-    weights = [0.10, 0.15, 0.35, 0.25, 0.15]
+    # 0.125 (32nds) feeds the weak rest32nd/stem32/beam32 classes
+    candidates = [4.0, 2.0, 1.0, 0.5, 0.25, 0.125]
+    weights = [0.08, 0.14, 0.33, 0.24, 0.14, 0.07]
     # Filter out durations that exceed the bar length
     valid = [(d, w) for d, w in zip(candidates, weights) if d <= bar_length]
     if not valid:
@@ -816,6 +822,17 @@ def generate_score(min_measures, max_measures):
     hands_measures["RH"], hands_measures["LH"] = _equalize_measures(
         hands_measures["RH"], hands_measures["LH"]
     )
+
+    # Section barlines: double bars at phrase boundaries feed the weak
+    # barlineDouble class; positions shared by both hands
+    n_measures = len(hands_measures["RH"])
+    double_bar_positions = {
+        i for i in range(3, n_measures - 1) if random.random() < 0.10
+    }
+    for hand in ["RH", "LH"]:
+        for idx, m in enumerate(hands_measures[hand]):
+            if idx in double_bar_positions:
+                m.rightBarline = music21.bar.Barline("double")
 
     # Assemble parts
     for hand in ["RH", "LH"]:

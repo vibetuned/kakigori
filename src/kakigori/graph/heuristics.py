@@ -145,7 +145,8 @@ def generate_axis_aware_edges(boxes, labels, class_to_idx, k_neighbors=3):
 
 def map_gt_to_candidates(candidate_edge_index, gt_targets):
     """
-    Assigns the correct class label (0-4) to each proposed candidate edge.
+    Assigns the correct class label (0-5) to each proposed candidate edge:
+    0 none, 1 structural, 2 modifier, 3 temporal, 4 sync-text, 5 simultaneity.
     gt_targets: Tensor of (E, 3) where columns are [u, v, edge_class]
     """
     num_candidates = candidate_edge_index.shape[1]

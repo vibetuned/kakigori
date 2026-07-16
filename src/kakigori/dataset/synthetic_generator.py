@@ -139,8 +139,9 @@ def apply_rhythmic_mutations(score):
                     pass
                 continue
 
-            # 3. Inject 32nd rests/notes
-            if n1.duration.quarterLength == 0.25 and random.random() < 0.10:
+            # 3. Inject 32nd rests/notes (rate boosted: rest32nd/beam32/stem32
+            # are among the weakest detector classes)
+            if n1.duration.quarterLength == 0.25 and random.random() < 0.20:
                 orig_offset = n1.offset
                 try:
                     parent.remove(n1)
@@ -226,9 +227,11 @@ def apply_ornaments(score):
             )
             note.articulations.append(artic)
 
-        # NEW: Dynamics
+        # NEW: Dynamics (pp/mp/ff weighted up — weak detector classes)
         if random.random() < 0.05 and note.activeSite:
-            dyn_symbol = random.choice(["p", "mp", "mf", "f", "sfz", "fz"])
+            dyn_symbol = random.choice(
+                ["pp", "pp", "mp", "mp", "ff", "ff", "p", "mf", "f", "sfz", "fz"]
+            )
             dyn = music21.dynamics.Dynamic(dyn_symbol)
             try:
                 note.activeSite.insert(note.offset, dyn)
@@ -300,7 +303,8 @@ def apply_spanners(score):
             part.insert(0, slur)
             part_changed = True
 
-        if not part_changed and len(valid_targets) >= 4 and random.random() < 0.15:
+        # Rate boosted: 'octave' is the weakest detector class
+        if not part_changed and len(valid_targets) >= 4 and random.random() < 0.30:
             start_idx = random.randint(0, len(valid_targets) - 4)
             end_idx = random.randint(start_idx + 3, len(valid_targets) - 1)
 
@@ -313,11 +317,59 @@ def apply_spanners(score):
     return score
 
 
+def apply_barlines(score):
+    """Random double barlines at phrase ends — feeds the weak barlineDouble
+    class. Positions are shared across parts so the notation stays sane."""
+    parts = list(score.parts)
+    if not parts:
+        return score
+    n_measures = len(list(parts[0].getElementsByClass(music21.stream.Measure)))
+    positions = {
+        i for i in range(1, max(1, n_measures - 1)) if random.random() < 0.06
+    }
+    if not positions:
+        return score
+    for part in parts:
+        for i, m in enumerate(part.getElementsByClass(music21.stream.Measure)):
+            if i in positions:
+                try:
+                    m.rightBarline = music21.bar.Barline("double")
+                except music21.exceptions21.StreamException:
+                    pass
+    return score
+
+
+def apply_clef_changes(score):
+    """Insert a temporary clef change and restore it a couple of measures
+    later — feeds the weak gClefChange/fClefChange classes."""
+    for part in score.parts:
+        measures = list(part.getElementsByClass(music21.stream.Measure))
+        if len(measures) < 6 or random.random() > 0.25:
+            continue
+        current = part.recurse().getElementsByClass(music21.clef.Clef).first()
+        if isinstance(current, music21.clef.TrebleClef):
+            new_clef, restore_clef = music21.clef.BassClef(), music21.clef.TrebleClef()
+        elif isinstance(current, music21.clef.BassClef):
+            new_clef, restore_clef = music21.clef.TrebleClef(), music21.clef.BassClef()
+        else:
+            continue
+        idx = random.randint(2, len(measures) - 3)
+        span = random.randint(1, 2)
+        try:
+            measures[idx].insert(0.0, new_clef)
+            measures[min(idx + span, len(measures) - 1)].insert(0.0, restore_clef)
+        except music21.exceptions21.StreamException:
+            pass
+    return score
+
+
 def mutate_score(score):
     """Master pipeline for orchestrating the mutations safely."""
     score = apply_rhythmic_mutations(score)
     score = apply_ornaments(score)
     score = apply_spanners(score)
+    score = apply_barlines(score)
+    score = apply_clef_changes(score)
 
     try:
         for part in score.parts:

@@ -214,7 +214,9 @@ class GroundTruthGraphBuilder:
         staves = [n for n in self.spatial_nodes if n.get('class') == 'staff']
         existing_children = {child for parent, child, edge_class in self.gt_edges}
         for node in self.spatial_nodes:
-            if node['class'] in context and node['id'] not in existing_children:
+            # Extractor-only boxes (system-staff, page furniture) carry no id
+            # and cannot be graph nodes — same guard as the modifier fallback
+            if node['class'] in context and node.get('id') and node['id'] not in existing_children:
                 n_cy = (node['bbox'][1] + node['bbox'][3]) / 2.0
                 n_page = node.get('_page')
                 for st in staves:

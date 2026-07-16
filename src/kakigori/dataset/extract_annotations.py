@@ -930,7 +930,7 @@ def process_single_file(
             return True
 
     except Exception as e:
-        logger.debug(f"Failed to process pair {svg_path.name}: {e}")
+        logger.warning(f"Failed to process pair {svg_path.name}: {e}")
 
     return False
 
