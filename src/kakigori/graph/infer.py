@@ -1,242 +1,198 @@
-# Third party imports
-import torch
-import torchvision.transforms.functional as TF
-from PIL import Image
+"""End-to-end OMR inference: score pages -> Humdrum **kern.
 
-# Import your previously built components
-# from models import ModelA_Detector, GraphVisualExtractor, ScoreGraphReconstructor
-# from heuristics import generate_axis_aware_edges, generate_text_candidate_edges
-# from serialization import generate_kern_stream, _collapse_primitives
-# from context import ContextTracker
+Runs the full pipeline on a PDF or a directory of page images:
 
+  1. detector checkpoint      — glyph/structure detection on each page
+  2. GNN wrapper checkpoint   — edge prediction over the detections
+                                (its own adapted PANet neck feeds the RoI
+                                features; the detection neck stays intact)
+  3. graph repairs            — spatial certainties (graph_repair.py)
+  4. MinimalHumdrumSerializer — staff-identity-aware **kern export
 
-class FullPageOMRPipeline:
-    def __init__(self, detector, roi_extractor, gnn, class_list, device="cuda"):
-        self.device = torch.device(device)
-        self.class_list = class_list
-        self.class_to_idx = {c: i for i, c in enumerate(class_list)}
+Usage:
+    infer-omr --pdf score.pdf \
+              --detector-checkpoint checkpoints/run_006 \
+              --gnn-checkpoint checkpoints_gnn/run_004 \
+              --output-dir out/
+    infer-omr --images pages/ ...     # directory of pre-rendered .png pages
 
-        # We assume models are already loaded with their weights and set to eval()
-        self.detector = detector.to(self.device).eval()
-        self.roi_extractor = roi_extractor.to(self.device).eval()
-        self.gnn = gnn.to(self.device).eval()
-
-    @torch.inference_mode()
-    def process_page(self, image_path, node_roles):
-        """Processes a full page image and returns the complete **kern document."""
-        image = Image.open(image_path).convert("RGB")
-        image_tensor = (
-            TF.to_tensor(image).unsqueeze(0).to(self.device)
-        )  # Shape: (1, C, H, W)
-
-        # --- 1. Model A: Full Page Detection ---
-        # Assuming the detector returns absolute pixel coordinates [x1, y1, x2, y2]
-        predictions = self.detector(image_tensor)[0]
-        all_boxes = predictions["boxes"]
-        all_labels = predictions["labels"]
-        all_scores = predictions["scores"]
-
-        # Filter by confidence threshold (e.g., > 0.5)
-        keep = all_scores > 0.5
-        all_boxes = all_boxes[keep]
-        all_labels = all_labels[keep]
-
-        # --- 2. System Isolation & Coordinate Translation ---
-        system_idx = self.class_to_idx["system"]  # From gelato_config.json
-        system_mask = all_labels == system_idx
-
-        system_boxes = all_boxes[system_mask]
-        primitive_boxes = all_boxes[~system_mask]
-        primitive_labels = all_labels[~system_mask]
-
-        # Sort systems vertically top-to-bottom on the page
-        system_boxes = system_boxes[system_boxes[:, 1].argsort()]
-
-        full_page_kern = []
-
-        # --- 3. Process Each System Independently ---
-        for sys_idx, sys_box in enumerate(system_boxes):
-            sx1, sy1, sx2, sy2 = sys_box
-
-            # Find all primitives whose center point (cy) falls within this system's vertical boundaries
-            centers_y = (primitive_boxes[:, 1] + primitive_boxes[:, 3]) / 2.0
-            in_system_mask = (centers_y >= sy1) & (centers_y <= sy2)
-
-            sys_primitives_boxes = primitive_boxes[in_system_mask].clone()
-            sys_primitives_labels = primitive_labels[in_system_mask]
-
-            if len(sys_primitives_boxes) == 0:
-                continue
-
-            # CRITICAL: Translate absolute page coordinates to relative system coordinates
-            sys_primitives_boxes[:, 0] -= sx1  # x1
-            sys_primitives_boxes[:, 1] -= sy1  # y1
-            sys_primitives_boxes[:, 2] -= sx1  # x2
-            sys_primitives_boxes[:, 3] -= sy1  # y2
-
-            # Crop the image tensor to just this system
-            # Coordinates must be integers for tensor slicing
-            crop_x1, crop_y1, crop_x2, crop_y2 = map(int, [sx1, sy1, sx2, sy2])
-            system_crop = image_tensor[:, :, crop_y1:crop_y2, crop_x1:crop_x2]
-
-            # --- 4. Model B: Graph Generation ---
-            # Reconstruct the node tracking dictionary expected by your serializer
-            nodes_meta = []
-            for i in range(len(sys_primitives_boxes)):
-                box = sys_primitives_boxes[i].cpu().tolist()
-                label_name = self.class_list[sys_primitives_labels[i].item()]
-                cx = (box[0] + box[2]) / 2
-                cy = (box[1] + box[3]) / 2
-
-                nodes_meta.append(
-                    {"id": i, "class": label_name, "bbox": box, "cx": cx, "cy": cy}
-                )
-
-            # A. Extract visual features using the *cropped* image and *relative* boxes
-            roi_features = self.roi_extractor(
-                self.detector.extract_features(
-                    system_crop
-                ),  # Assuming a feature extraction method
-                [sys_primitives_boxes],
-                system_crop.shape[-2:],
-            )
-
-            # B. Build PyG inputs (x, edge_index)
-            class_embeds = self.gnn.class_embedding(sys_primitives_labels)
-            x = torch.cat([roi_features, sys_primitives_boxes, class_embeds], dim=1)
-
-            # Generate candidate edges using your spatial heuristics based on relative coordinates
-            edge_index = generate_axis_aware_edges(
-                sys_primitives_boxes, sys_primitives_labels, self.class_to_idx
-            )
-
-            # C. Predict Edges
-            edge_logits = self.gnn(x, edge_index)
-            edge_predictions = torch.argmax(edge_logits, dim=1)
-
-            # --- 5. Semantic Serialization ---
-            # Instantiate the serializer graph with your predicted edges
-            # (Assuming you updated HumdrumSerializer to accept this format)
-            # Third party imports
-            from serialization import HumdrumSerializer
-
-            serializer = HumdrumSerializer(nodes_meta, edge_index, edge_predictions)
-
-            super_nodes = serializer._collapse_primitives(node_roles)
-
-            # Sort the raw nodes left-to-right for the context tracker sweep
-            sorted_nodes = sorted(nodes_meta, key=lambda n: n["cx"])
-
-            # Generate the **kern string for this specific system
-            system_kern_string = generate_kern_stream(
-                sorted_nodes, super_nodes, node_roles
-            )
-
-            # Append system marker and the decoded string
-            full_page_kern.append(f"!! System {sys_idx + 1}")
-            full_page_kern.append(system_kern_string)
-
-        return "\n".join(full_page_kern)
-# Assuming 'fused_features' is the list [P3, P4, P5] from your PANetNeck
-#features_dict = {str(i): feat for i, feat in enumerate(fused_features)}
-
-# Now pass it to the new extractor
-#node_visual_features = visual_extractor(features_dict, normalized_boxes, (640, 640))
+Outputs into --output-dir: page_NNNN.png + page_NNNN.json (detections in
+dataset annotation format, same as infer-model) and score.krn.
+"""
 
 # Standard library imports
 import json
+import logging
+import argparse
 from pathlib import Path
 
 # Third party imports
 import torch
-import torchvision.transforms.functional as TF
 from PIL import Image
-from torch_geometric.data import Data
+from tqdm import tqdm
 
-# Local folder imports
-#from .model import GraphVisualExtractor, ScoreGraphReconstructor
-from .heuristics import generate_axis_aware_edges, generate_text_candidate_edges
-from .serializer import HumdrumSerializer
+# Local imports
+from .serializers import MinimalHumdrumSerializer
+from .graph_repair import repair_page_edges
+from .validate_predictions import (
+    _load_gnn, predict_page_edges, _inject_system_measure_edges,
+)
+from kakigori.vision.model import MusicDetector
+from kakigori.vision.utils import load_checkpoint, decode_model_outputs
+from kakigori.vision.infer import pdf_to_pages, preprocess
+
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
 
 
-class OMRGraphInferencer:
-    def __init__(self, gnn_checkpoint, roi_extractor_checkpoint, class_list, device="cpu"):
-        self.device = torch.device(device)
-        self.class_to_idx = {c: i for i, c in enumerate(class_list)}
-        
-        # 1. Load the RoI Extractor (The bridge from pixels to node features)
-        self.roi_extractor = GraphVisualExtractor().to(self.device)
-        self.roi_extractor.load_state_dict(torch.load(roi_extractor_checkpoint, map_location=self.device))
-        self.roi_extractor.eval()
-        
-        # 2. Load the GATv2 Edge Classifier
-        # Node input dim = RoI features (256) + BBox coords (4) + Class Embedding (e.g., 32)
-        node_in_dim = 256 + 4 + 32 
-        self.gnn = ScoreGraphReconstructor(node_in_dim=node_in_dim).to(self.device)
-        self.gnn.load_state_dict(torch.load(gnn_checkpoint, map_location=self.device))
-        self.gnn.eval()
-        
-        # 3. Class Embedding lookup (translates class ID into a trainable vector)
-        self.class_embedding = torch.nn.Embedding(len(class_list), 32).to(self.device)
+@torch.inference_mode()
+def detect_page_nodes(detector, page_image: Image.Image, page_idx: int,
+                      class_list: list, device, input_size: int,
+                      conf_thresh: float, iou_thresh: float) -> list:
+    """Detect glyphs on one page; return serializer-format nodes in
+    ORIGINAL page coordinates (the serializer's geometry space)."""
+    tensor, meta = preprocess(page_image, input_size, device)
+    outputs = detector(tensor)
+    preds = decode_model_outputs(outputs, conf_thresh, iou_thresh, input_size)[0]
 
-    def _build_pyg_data(self, image_tensor, annotations):
-        """Converts raw JSON annotations and the image into a PyTorch Geometric graph."""
-        nodes_meta = []
-        boxes = []
-        labels = []
-        
-        for i, ann in enumerate(annotations):
-            boxes.append(ann["bbox"]) # Assuming absolute [x1, y1, x2, y2] relative to the system crop
-            labels.append(self.class_to_idx[ann["class"]])
-            nodes_meta.append({"id": i, "class": ann["class"], "bbox": ann["bbox"]})
-            
-        boxes_tensor = torch.tensor(boxes, dtype=torch.float32, device=self.device)
-        labels_tensor = torch.tensor(labels, dtype=torch.long, device=self.device)
-        
-        # --- A. Node Features (x) ---
-        with torch.no_grad():
-            # 1. Extract visual features from the raw image using the bounding boxes
-            # We pass a dummy feature map here assuming RoI extractor handles a raw image directly for inference
-            # (Or you pass the MobileNet backbone here if doing end-to-end)
-            roi_features = self.roi_extractor(image_tensor.unsqueeze(0), [boxes_tensor])
-            
-            # 2. Get class embeddings
-            class_embeds = self.class_embedding(labels_tensor)
-            
-            # 3. Concatenate to create the final node feature vector 'x'
-            x = torch.cat([roi_features, boxes_tensor, class_embeds], dim=1)
-            
-        # --- B. Candidate Edges (edge_index) ---
-        # Run the X/Y axis sorting and the Vertical Raycasting for text
-        structural_edges = generate_axis_aware_edges(boxes_tensor, labels_tensor, self.class_to_idx)
-        text_edges = generate_text_candidate_edges(boxes_tensor, labels_tensor, self.class_to_idx)
-        
-        if text_edges.numel() > 0:
-            edge_index = torch.cat([structural_edges, text_edges], dim=1)
-        else:
-            edge_index = structural_edges
-            
-        return Data(x=x, edge_index=edge_index), nodes_meta
+    nodes = []
+    boxes = preds["boxes"].cpu()
+    labels = preds["labels"].cpu()
+    scores = preds["scores"].cpu()
+    for i in range(boxes.shape[0]):
+        x1 = float(((boxes[i, 0] - meta["pad_x"]) / meta["scale"]).clamp(min=0.0))
+        y1 = float(((boxes[i, 1] - meta["pad_y"]) / meta["scale"]).clamp(min=0.0))
+        x2 = float(((boxes[i, 2] - meta["pad_x"]) / meta["scale"]).clamp(max=float(meta["orig_w"])))
+        y2 = float(((boxes[i, 3] - meta["pad_y"]) / meta["scale"]).clamp(max=float(meta["orig_h"])))
+        nodes.append({
+            "id": f"p{page_idx}n{i}",
+            "class": class_list[int(labels[i])],
+            "score": round(float(scores[i]), 4),
+            "bbox": [round(x1, 1), round(y1, 1), round(x2, 1), round(y2, 1)],
+            "cx": (x1 + x2) / 2.0,
+            "cy": (y1 + y2) / 2.0,
+        })
+    return nodes
 
-    @torch.inference_mode()
-    def process_system(self, image_path, json_path):
-        """Runs the GNN on a single system and outputs the **kern string."""
-        # 1. Load Data
-        image = Image.open(image_path).convert("RGB")
-        image_tensor = TF.to_tensor(image).to(self.device)
-        
-        with open(json_path) as f:
-            data = json.load(f)
-        
-        # 2. Build the Graph
-        pyg_data, nodes_meta = self._build_pyg_data(image_tensor, data["annotations"])
-        
-        # 3. Predict Edges
-        edge_logits = self.gnn(pyg_data.x, pyg_data.edge_index)
-        edge_predictions = torch.argmax(edge_logits, dim=1) # 0, 1, 2, 3, or 4
-        
-        # 4. Serialize to Humdrum
-        serializer = HumdrumSerializer(nodes_meta, pyg_data.edge_index, edge_predictions)
-        kern_matrix = serializer.generate_kern_matrix()
-        
-        return kern_matrix
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="End-to-end OMR: PDF or page images -> Humdrum **kern."
+    )
+    src = parser.add_mutually_exclusive_group(required=True)
+    src.add_argument("--pdf", type=str, help="Input PDF score.")
+    src.add_argument("--images", type=str,
+                     help="Directory of pre-rendered page images (.png), page order = sorted names.")
+    parser.add_argument("--detector-checkpoint", type=str, required=True,
+                        help="Detection checkpoint dir (e.g. checkpoints/run_006)")
+    parser.add_argument("--gnn-checkpoint", type=str, required=True,
+                        help="GNN wrapper run dir (e.g. checkpoints_gnn/run_004)")
+    parser.add_argument("--config", type=str, default="conf/config.json")
+    parser.add_argument("--roles_file", type=str, default="conf/structure.json")
+    parser.add_argument("--output-dir", type=str, default="inference_out")
+    parser.add_argument("--input-size", type=int, default=640)
+    parser.add_argument("--conf-thresh", type=float, default=0.3)
+    parser.add_argument("--iou-thresh", type=float, default=0.5)
+    parser.add_argument("--dpi", type=int, default=300, help="DPI for PDF rendering.")
+    parser.add_argument("--no-repair", action="store_true",
+                        help="Disable the spatial graph-repair heuristics")
+    args = parser.parse_args()
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    logger.info(f"Using device: {device}")
+
+    with open(args.config) as f:
+        class_list = json.load(f)["target_classes"]
+    class_to_idx = {c: i for i, c in enumerate(class_list)}
+    with open(args.roles_file) as f:
+        node_roles = json.load(f)
+
+    detector = MusicDetector(num_classes=len(class_list))
+    load_checkpoint(detector, args.detector_checkpoint, device)
+    gnn_wrapper = _load_gnn(args.gnn_checkpoint, device)
+
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.pdf:
+        pages = pdf_to_pages(Path(args.pdf), dpi=args.dpi)
+        stem = Path(args.pdf).stem
+    else:
+        img_paths = sorted(Path(args.images).glob("*.png"))
+        if not img_paths:
+            raise SystemExit(f"No .png pages found in {args.images}")
+        pages = [Image.open(p).convert("RGB") for p in img_paths]
+        stem = Path(args.images).name
+
+    # 1. Detect nodes and predict edges page by page
+    all_edges, all_pages, node_ids = [], [], []
+    for page_idx, page_image in enumerate(
+            tqdm(pages, desc="Detect + predict edges", unit="page")):
+        img_path = output_dir / f"page_{page_idx + 1:04d}.png"
+        page_image.save(img_path)
+
+        page_nodes = detect_page_nodes(
+            detector, page_image, page_idx, class_list, device,
+            args.input_size, args.conf_thresh, args.iou_thresh,
+        )
+        with open(output_dir / f"page_{page_idx + 1:04d}.json", "w") as f:
+            json.dump({
+                "image": img_path.name,
+                "width": page_image.width,
+                "height": page_image.height,
+                "annotations": [
+                    {"class": n["class"], "score": n["score"], "bbox": n["bbox"]}
+                    for n in page_nodes
+                ],
+            }, f, indent=2)
+
+        if not page_nodes:
+            continue
+        page_edges = predict_page_edges(
+            gnn_wrapper, page_nodes, img_path, class_to_idx, device,
+            input_size=args.input_size,
+        )
+        _inject_system_measure_edges(page_nodes, page_edges)
+        if not args.no_repair:
+            repair_page_edges(page_nodes, page_edges)
+
+        all_edges.extend(page_edges)
+        all_pages.append(page_nodes)
+        node_ids.extend(n["id"] for n in page_nodes)
+
+    if not all_edges:
+        raise SystemExit("No edges predicted — nothing to serialize.")
+
+    # 2. Serialize the whole document
+    id_to_idx = {nid: i for i, nid in enumerate(node_ids)}
+    rows = [(id_to_idx[u], id_to_idx[v], c) for u, v, c in all_edges
+            if u in id_to_idx and v in id_to_idx]
+    edge_index = torch.tensor(
+        [[r[0] for r in rows], [r[1] for r in rows]], dtype=torch.long)
+    edge_predictions = torch.tensor([r[2] for r in rows], dtype=torch.long)
+
+    serializer = MinimalHumdrumSerializer(
+        edge_index=edge_index,
+        edge_predictions=edge_predictions,
+        node_roles=node_roles,
+        pyg_node_ids=node_ids,
+    )
+    for page_nodes in all_pages:
+        serializer.add_page(page_nodes)
+
+    kern_stream = serializer.export_to_krn()
+    if kern_stream.startswith("Error"):
+        raise SystemExit(f"Serialization failed: {kern_stream}")
+
+    krn_path = output_dir / f"{stem}.krn"
+    with open(krn_path, "w", encoding="utf-8") as f:
+        f.write(kern_stream)
+        f.write("\n")
+    logger.info(f"Done. Wrote {krn_path} "
+                f"({len(node_ids)} detections, {len(rows)} edges, {len(pages)} pages).")
+
+
+if __name__ == "__main__":
+    main()

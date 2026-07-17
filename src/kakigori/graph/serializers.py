@@ -13,6 +13,13 @@ CLEF_BOTTOM_LINE = {
     "clefC": (2, 3),  # E3
     "clefG8vb": (2, 3),  # E3 — vocal tenor: treble sounding an octave down
     "clefG8va": (2, 5),  # E5 — treble sounding an octave up
+    # C clefs with a geometrically measured line (see _resolve_clef_class):
+    # the vision class is just 'clefC', but early-music parts move it around
+    "clefC1": (0, 4),  # bottom line C4 (soprano)
+    "clefC2": (5, 3),  # bottom line A3 (mezzo-soprano)
+    "clefC3": (3, 3),  # bottom line F3 (alto)
+    "clefC4": (1, 3),  # bottom line D3 (tenor)
+    "clefC5": (6, 2),  # bottom line B2 (baritone)
 }
 
 # Mid-piece clef-change glyphs and the clef they switch to
@@ -30,6 +37,11 @@ CLEF_KERN = {
     "clefC": "*clefC3",
     "clefG8vb": "*clefGv2",  # kern 'v' = sounding an octave below
     "clefG8va": "*clefG^2",  # kern '^' = sounding an octave above
+    "clefC1": "*clefC1",
+    "clefC2": "*clefC2",
+    "clefC3": "*clefC3",
+    "clefC4": "*clefC4",
+    "clefC5": "*clefC5",
 }
 
 REST_KERN = {
@@ -127,6 +139,25 @@ def _staff_sort_key(staff_node: dict, system_staves: list) -> float:
     if row is not None:
         return (row['bbox'][1] + row['bbox'][3]) / 2.0
     return (staff_node['bbox'][1] + staff_node['bbox'][3]) / 2.0
+
+
+def _resolve_clef_class(clef_class: str, clef_node: dict, staff_row_bbox) -> str:
+    """Measure a C clef's staff line and encode it in the class name.
+
+    The vision class is just 'clefC', but early-music parts move the C clef
+    between lines (soprano C1, mezzo C2, alto C3, tenor C4) and the pitch of
+    every note on the staff depends on it. The glyph is vertically symmetric
+    about its reference line, so its center IS the line. G and F clefs stay
+    on their standard lines (G2/F4) in this corpus.
+    """
+    if clef_class != 'clefC' or clef_node is None or staff_row_bbox is None:
+        return clef_class
+    y_top, y_bottom = staff_row_bbox[1], staff_row_bbox[3]
+    height = y_bottom - y_top
+    if height <= 0:
+        return clef_class
+    line = 1 + round(4.0 * (y_bottom - clef_node.get('cy', 0.0)) / height)
+    return f"clefC{max(1, min(5, line))}"
 
 
 def _nearest_duration(value: float) -> int:
@@ -454,11 +485,11 @@ class Spine:
             key_sig_found = cls._extract_key_signature(staff_node, system_descendants, children_map, nodes_map)
             meter_sig_found = cls._extract_meter_signature(staff_node, system_descendants, children_map, nodes_map)
             
-            clef_class = None
+            clef_class, clef_node = None, None
             staff_elements = [v for v, e in children_map.get(st_id, []) if e == 1]
             for el_id in staff_elements:
                 if nodes_map[el_id]['class'].startswith("clef"):
-                    clef_class = nodes_map[el_id]['class']
+                    clef_class, clef_node = nodes_map[el_id]['class'], nodes_map[el_id]
                     break
 
             if clef_class is None:
@@ -466,9 +497,14 @@ class Spine:
                     node = nodes_map.get(node_id)
                     if node and node['class'].startswith("clef"):
                         if (staff_node['bbox'][1] - 20 <= node['cy'] <= staff_node['bbox'][3] + 20):
-                            clef_class = node['class']
+                            clef_class, clef_node = node['class'], node
                             break
 
+            row = _find_staff_row(staff_node, system_staves)
+            clef_class = _resolve_clef_class(
+                clef_class, clef_node,
+                row['bbox'] if row is not None else staff_node.get('bbox'),
+            )
             clef_found = CLEF_KERN.get(clef_class, f"*{clef_class}" if clef_class else "*")
             spine.add_to_head(clef_found)
             spine.add_to_head(key_sig_found)
@@ -759,6 +795,8 @@ class MinimalHumdrumSerializer:
 
         self.context = HumdrumContext(self._build_sync_groups())
         self._head_initialized = False
+        # Pages buffered by add_page; serialized together in export_to_krn
+        self._pages = []
         # Per-page map: slur/tie node ID -> [(anchored event ID, cx), ...]
         self._span_anchors = {}
 
@@ -801,10 +839,15 @@ class MinimalHumdrumSerializer:
         return children
 
     def add_page(self, page_nodes: list):
-        """Process a single page's annotations and accumulate into the context."""
-        nodes = {n['id']: n for n in page_nodes}
-        children = self._build_children(nodes)
+        """Buffer a page. Serialization happens in export_to_krn, once every
+        page is known: optimized layouts hide resting staves, so the global
+        part count and each system's staff→part identity need cross-system
+        evidence that no single page provides."""
+        if page_nodes:
+            self._pages.append(page_nodes)
 
+    def _prepare_page_state(self, page_nodes: list, nodes: dict, children: dict):
+        """Per-page state consumed while serializing that page's measures."""
         # Median notehead height of the page: the grace test compares each
         # head against it, so "grace" means small relative to THIS score's
         # noteheads. Some render styles draw regular heads at ~0.8 staff
@@ -847,69 +890,164 @@ class MinimalHumdrumSerializer:
                         (parent_id, _anchor_key(parent))
                     )
 
-        # Find all systems on this page, sorted top-to-bottom
-        systems = [n for n in nodes.values() if n['class'] == 'system']
-        if not systems:
-            return
+    @staticmethod
+    def _system_rows(system: dict, measures: list, children: dict,
+                     nodes: dict) -> list:
+        """A system's staff rows (tight 5-line boxes), top to bottom — one
+        per VISIBLE part. Derived from the rows its measures' staff cells
+        actually sit on, NOT from bbox geometry alone: system bboxes overlap
+        on dense pages (5 stacked piano systems) and pure overlap
+        partitioning misassigned boundary rows. The system bbox still acts
+        as a y-filter: on the predicted path a wrong measure→staff edge can
+        drag in a cell from another system, and its far-away row would
+        inflate the row list past the part count."""
+        all_rows = [n for n in nodes.values() if n.get('class') == 'system-staff']
+        margin = 0.0
+        if all_rows:
+            margin = sum(r['bbox'][3] - r['bbox'][1] for r in all_rows) / len(all_rows)
+        y1, y2 = system['bbox'][1] - margin, system['bbox'][3] + margin
+        rows = {}
+        for measure_id in measures:
+            for v, e_class in children.get(measure_id, []):
+                if e_class != 1 or nodes.get(v, {}).get('class') != 'staff':
+                    continue
+                row = _find_staff_row(nodes[v], all_rows)
+                if row is not None and y1 <= row.get('cy', 0.0) <= y2:
+                    rows[row['id']] = row
+        return sorted(rows.values(), key=lambda r: r.get('cy', 0.0))
 
-        systems.sort(key=lambda s: s['cy'])
+    @staticmethod
+    def _system_measures(system: dict, children: dict, nodes: dict) -> list:
+        measures = [
+            v for v, e_class in children.get(system['id'], [])
+            if e_class == 1 and nodes.get(v, {}).get('class') == 'measure'
+        ]
+        measures.sort(key=lambda m_id: nodes[m_id]['cx'])
+        return measures
 
-        for system in systems:
-            # Get measures in this system, sorted left-to-right
-            measures = [
-                v for v, e_class in children.get(system['id'], [])
-                if e_class == 1 and nodes.get(v, {}).get('class') == 'measure'
-            ]
-            if not measures:
+    def _row_evidence(self, row: dict, nodes: dict) -> dict:
+        """Identity evidence printed on a staff row: the (leftmost) clef and
+        the key-signature accidental count restated at the system start."""
+        y1, y2 = row['bbox'][1], row['bbox'][3]
+        pad = (y2 - y1) / 2.0
+        clefs, naccid = [], 0
+        for n in nodes.values():
+            cls = n.get('class', '')
+            cy = n.get('cy', 0.0)
+            if not (y1 - pad <= cy <= y2 + pad):
                 continue
+            if cls in ('clefG', 'clefF', 'clefC', 'clefG8vb', 'clefG8va'):
+                clefs.append(n)
+            elif cls.startswith('keyAccid'):
+                naccid += 1
+        clefs.sort(key=lambda c: c.get('cx', 0.0))
+        clef_class = None
+        if clefs:
+            clef_class = _resolve_clef_class(clefs[0]['class'], clefs[0], row['bbox'])
+        return {'clef': clef_class, 'naccid': naccid}
 
-            measures.sort(key=lambda m_id: nodes[m_id]['cx'])
+    def _assign_rows_to_parts(self, rows: list, nodes: dict) -> dict:
+        """Map a system's staff rows to global part indices.
 
-            # Initialize spine headers from the first valid system/measure
-            if not self._head_initialized:
-                spines = Spine.create_from_measure(
-                    system['id'], measures[0], children, nodes
-                )
-                if spines:
-                    for spine in spines:
-                        self.context.add_spine(spine)
-                    self._head_initialized = True
+        A full system maps 1:1 top-to-bottom. A reduced system (optimized
+        layout: resting parts hidden) keeps the surviving parts' order, so
+        the assignment is a monotone alignment — solved by DP maximizing
+        agreement between each row's printed evidence (clef, key-accidental
+        count) and each part's current spine state.
+        """
+        parts = self.context.spines
+        n_rows, n_parts = len(rows), len(parts)
+        if n_rows >= n_parts:
+            return {row['id']: i for i, row in enumerate(rows[:n_parts])}
 
-            # Add each measure in this system to the corresponding spines
-            if self._head_initialized:
-                for measure_id in measures:
-                    self._add_measure_to_spines(measure_id, children, nodes)
+        evidence = [self._row_evidence(row, nodes) for row in rows]
 
-    def _add_measure_to_spines(self, measure_id: str, children: dict, nodes: dict):
-        """Create a Measure for each staff, populate with note tokens, and append to the spine."""
-        # 1. Grab all system-staff nodes to use their tight 5-line bounding boxes
-        all_system_staves = [n for n in nodes.values() if n.get('class') == 'system-staff']
+        def score(ev, spine):
+            s = 0.0
+            if ev['clef'] and spine.clef_type:
+                if ev['clef'] == spine.clef_type:
+                    s += 3.0
+                elif ev['clef'][:5] == spine.clef_type[:5]:
+                    s += 0.5  # same clef family, different line
+                else:
+                    s -= 3.0
+            if ev['naccid'] == len(spine.key_accidentals):
+                s += 0.5
+            return s
 
+        NEG = float('-inf')
+        # dp[i][j]: best score matching rows[i:] into parts[j:]
+        dp = [[NEG] * (n_parts + 1) for _ in range(n_rows + 1)]
+        choice = [[0] * (n_parts + 1) for _ in range(n_rows + 1)]
+        for j in range(n_parts + 1):
+            dp[n_rows][j] = 0.0
+        for i in range(n_rows - 1, -1, -1):
+            for j in range(n_parts - 1, -1, -1):
+                if n_parts - j < n_rows - i:
+                    continue  # not enough parts left for the remaining rows
+                take = score(evidence[i], parts[j]) + dp[i + 1][j + 1]
+                skip = dp[i][j + 1] if n_parts - (j + 1) >= n_rows - i else NEG
+                if take >= skip:
+                    dp[i][j], choice[i][j] = take, 1
+                else:
+                    dp[i][j], choice[i][j] = skip, 0
+
+        assignment, i, j = {}, 0, 0
+        while i < n_rows and j < n_parts:
+            if choice[i][j]:
+                assignment[rows[i]['id']] = j
+                i += 1
+            j += 1
+        return assignment
+
+    def _add_measure_to_spines(self, measure_id: str, children: dict, nodes: dict,
+                               rows: list, part_of_row: dict):
+        """Create a Measure for each staff, route it to the staff's PART
+        (via the system's row→part assignment, not its top-to-bottom index),
+        and pad parts hidden in this system with full-measure rests."""
         staves = [
             v for v, e_class in children.get(measure_id, [])
             if e_class == 1 and nodes.get(v, {}).get('class') == 'staff'
         ]
-        staves.sort(key=lambda s_id: _staff_sort_key(nodes[s_id], all_system_staves))
+        staves.sort(key=lambda s_id: _staff_sort_key(nodes[s_id], rows))
 
-        # 2. Find each staff's system-staff row (tight 5-line bbox, by y-overlap)
-        staff_rows = []
-        for staff_id in staves:
-            row = _find_staff_row(nodes[staff_id], all_system_staves)
+        # Each staff cell's system-staff row (tight 5-line bbox) and part.
+        # A full measure (one cell per part) maps by top-to-bottom ORDER —
+        # immune to row-matching noise from content bboxes that lean into a
+        # neighboring system. Row-identity mapping only decides REDUCED
+        # measures, where order alone cannot name the hidden parts.
+        full_measure = len(staves) == len(self.context.spines)
+        staff_rows, staff_parts = [], []
+        for idx, staff_id in enumerate(staves):
+            row = _find_staff_row(nodes[staff_id], rows)
             staff_rows.append(
                 row['bbox'] if row is not None
                 else nodes[staff_id].get('bbox', [0, 0, 0, 0])
             )
+            if full_measure:
+                staff_parts.append(idx)
+            else:
+                staff_parts.append(
+                    part_of_row.get(row['id']) if row is not None else None
+                )
 
         # Dynamics and pedal spans hang off the measure node itself; split
         # them per staff row
         dynamics_per_staff = self._collect_dynamics(measure_id, children, nodes, staff_rows)
         pedals_per_staff = self._collect_pedals(measure_id, children, nodes, staff_rows)
 
+        served = set()
         for spine_idx, staff_id in enumerate(staves):
-            if spine_idx >= len(self.context.spines):
+            part_idx = staff_parts[spine_idx]
+            if part_idx is None or part_idx >= len(self.context.spines):
                 continue
+            if part_idx in served:
+                # Two cells mapped onto one part (bad edge on the predicted
+                # path) — appending both would desynchronize the spine
+                continue
+            served.add(part_idx)
 
-            spine = self.context.spines[spine_idx]
+            spine = self.context.spines[part_idx]
             measure = Measure(measure_id)
             measure.dynamics = dynamics_per_staff.get(spine_idx, [])
             measure.pedals = pedals_per_staff.get(spine_idx, [])
@@ -989,12 +1127,29 @@ class MinimalHumdrumSerializer:
 
             spine.add_measure(measure)
 
+        # Parts hidden in this system (optimized layout) rest through the
+        # measure — pad them so every spine advances in lockstep
+        for part_idx, spine in enumerate(self.context.spines):
+            if part_idx in served:
+                continue
+            rest_measure = Measure(measure_id)
+            rest_measure.full_measure_rest = True
+            duration, dots = _value_to_duration(spine.meter_num / spine.meter_den)
+            rest_measure.add(
+                f"{duration}{'.' * dots}r", _note_value(duration, dots), 0.0, None
+            )
+            spine.add_measure(rest_measure)
+
     @staticmethod
     def _detect_signature_changes(spine, measure, staff_id: str,
                                   children: dict, nodes: dict):
         """Detect clef/key/meter restatements on a staff that differ from the
         spine's running state; emit them as interpretation rows and update
         the state so later measures use the new context."""
+        staff_rows = [n for n in nodes.values() if n.get('class') == 'system-staff']
+        row = _find_staff_row(nodes[staff_id], staff_rows) if staff_id in nodes else None
+        row_bbox = row['bbox'] if row is not None else nodes.get(staff_id, {}).get('bbox')
+
         for child_id, e_class in children.get(staff_id, []):
             if e_class != 1:
                 continue
@@ -1005,6 +1160,7 @@ class MinimalHumdrumSerializer:
             cx = node.get('cx', 0.0)
 
             if cls_name in CLEF_BOTTOM_LINE:
+                cls_name = _resolve_clef_class(cls_name, node, row_bbox)
                 if cls_name != spine.clef_type:
                     measure.interps.append((cx, CLEF_KERN[cls_name]))
                     spine.clef_type = cls_name
@@ -1253,9 +1409,18 @@ class MinimalHumdrumSerializer:
                 if e_class == 1 or is_tuplet_container:
                     descendants.add(child_id)
                     if child_cls in CLEF_CHANGE_MAP:
-                        clef_marks.append(
-                            (nodes[child_id].get('cx', 0.0), CLEF_CHANGE_MAP[child_cls])
-                        )
+                        rows = [n for n in nodes.values()
+                                if n.get('class') == 'system-staff']
+                        row = _find_staff_row(nodes[staff_id], rows) \
+                            if staff_id in nodes else None
+                        clef_marks.append((
+                            nodes[child_id].get('cx', 0.0),
+                            _resolve_clef_class(
+                                CLEF_CHANGE_MAP[child_cls], nodes[child_id],
+                                row['bbox'] if row is not None
+                                else nodes.get(staff_id, {}).get('bbox'),
+                            ),
+                        ))
                     ctx = child_id if is_tuplet_container else tuplet_ctx
                     b_ctx = child_id if child_cls.startswith('beam') else beam_ctx
                     if ctx is not None:
@@ -1679,7 +1844,11 @@ class MinimalHumdrumSerializer:
         if "clefF" in clef_type:
             bottom_idx, bottom_oct = 4, 2  # Bass clef bottom line: G2
         elif "clefC" in clef_type:
-            bottom_idx, bottom_oct = 3, 3  # Alto clef bottom line: F3
+            # C clef: middle C sits on the measured line (clefC1..clefC5,
+            # see _resolve_clef_class); default to alto (line 3)
+            line = int(clef_type[5]) if len(clef_type) > 5 and clef_type[5].isdigit() else 3
+            total_bottom = 28 - 2 * (line - 1)  # diatonic steps from C0 to the bottom line
+            bottom_idx, bottom_oct = total_bottom % 7, total_bottom // 7
         else:
             bottom_idx, bottom_oct = 2, 4  # Default to Treble clef bottom line: E4
 
@@ -1706,7 +1875,59 @@ class MinimalHumdrumSerializer:
             return note_name.upper() * 3
 
     def export_to_krn(self) -> str:
-        """Export the accumulated data as a single Humdrum **kern string."""
-        if not self._head_initialized:
+        """Serialize all buffered pages and export a Humdrum **kern string.
+
+        Pass 1 finds the global part count P (the widest system) and creates
+        the spines from that reference system. Pass 2 walks systems in
+        document order, mapping each system's rows onto parts (identity for
+        full systems, evidence-based monotone alignment for reduced ones)
+        and padding hidden parts with full-measure rests.
+        """
+        page_data = []
+        for page_nodes in self._pages:
+            nodes = {n['id']: n for n in page_nodes}
+            children = self._build_children(nodes)
+            systems = sorted(
+                (n for n in nodes.values() if n['class'] == 'system'),
+                key=lambda s: s['cy'],
+            )
+            page_data.append((page_nodes, nodes, children, systems))
+
+        # Pass 1: reference system = first system with the most staff rows
+        best_rows, ref = 0, None
+        for pi, (_, nodes, children, systems) in enumerate(page_data):
+            for system in systems:
+                measures = self._system_measures(system, children, nodes)
+                if not measures:
+                    continue
+                n_rows = len(self._system_rows(system, measures, children, nodes))
+                if n_rows > best_rows:
+                    best_rows, ref = n_rows, (pi, system, measures[0])
+
+        if ref is None:
             return "Error: No valid systems found across any page."
+
+        pi, ref_system, ref_measure = ref
+        _, nodes, children, _ = page_data[pi]
+        for spine in Spine.create_from_measure(
+                ref_system['id'], ref_measure, children, nodes) or []:
+            self.context.add_spine(spine)
+        if not self.context.spines:
+            return "Error: No valid systems found across any page."
+        self._head_initialized = True
+
+        # Pass 2: serialize in document order
+        for page_nodes, nodes, children, systems in page_data:
+            self._prepare_page_state(page_nodes, nodes, children)
+            for system in systems:
+                measures = self._system_measures(system, children, nodes)
+                if not measures:
+                    continue
+                rows = self._system_rows(system, measures, children, nodes)
+                part_of_row = self._assign_rows_to_parts(rows, nodes)
+                for measure_id in measures:
+                    self._add_measure_to_spines(
+                        measure_id, children, nodes, rows, part_of_row
+                    )
+
         return self.context.merge_spines()

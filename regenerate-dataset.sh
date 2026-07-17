@@ -32,10 +32,10 @@ N_MXL=$(ls "$DATA_DIR/filter"/*.mxl | wc -l)
 log "Regenerating $DATA_DIR from $N_MXL filtered MXL files."
 log "================================================================="
 
-log "Cleaning derived data (keeping filter/)..."
+log "Cleaning derived data (keeping filter/ and raw/)..."
 for entry in "$DATA_DIR"/*; do
     name=$(basename "$entry")
-    if [ "$name" != "filter" ]; then
+    if [ "$name" != "filter" ] && [ "$name" != "raw" ]; then
         log "  removing $entry"
         rm -rf "$entry"
     fi

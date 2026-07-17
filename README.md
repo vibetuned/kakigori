@@ -10,6 +10,43 @@ The system is split into three cooperating stages:
 
 A large **dataset** subsystem produces the training corpus by filtering and mutating real MusicXML files, generating fully synthetic exercises, rendering them with Verovio, and extracting ground-truth bounding boxes and graph edges.
 
+## Quick start — pretrained weights & inference
+
+Download the released weights from Hugging Face
+([detector](https://huggingface.co/vibetuned/kakigori-vision) ·
+[full pipeline](https://huggingface.co/vibetuned/kakigori-omr); model cards
+live in [model_cards/](model_cards/)):
+
+```bash
+./scripts/download-weights.sh
+# -> checkpoints/release/vision/model.safetensors  (detector, 109 classes)
+# -> checkpoints/release/omr/model.safetensors     (GNN wrapper)
+```
+
+Run the full pipeline on a PDF score (or a directory of page `.png`s with
+`--images pages/` instead of `--pdf`):
+
+```bash
+uv run infer-omr --pdf score.pdf \
+                 --detector-checkpoint checkpoints/release/vision \
+                 --gnn-checkpoint checkpoints/release/omr \
+                 --output-dir out/
+# out/score.krn                        — the Humdrum **kern transcription
+# out/page_NNNN.png + page_NNNN.json   — per-page detections
+```
+
+Detections only (vision stage by itself):
+
+```bash
+uv run infer-model --checkpoint checkpoints/release/vision \
+                   --pdf score.pdf --output-dir out/
+```
+
+Both scripts read the class list from `conf/config.json`; `infer-omr` also
+reads `conf/structure.json` for the serializer's node roles. Expect the
+best results on digitally rendered pages — real scans are outside the
+training distribution for now.
+
 ## Repository layout
 
 ```
@@ -145,8 +182,10 @@ All scripts are installed as `pyproject.toml` `[project.scripts]`, so once the p
 | `retrain-model` | Class-expansion fine-tune: widen the cls head, two-stage freeze schedule |
 | `eval-model` | Compute per-class mAP and log to TensorBoard |
 | `infer-model` | Run the detector across a PDF, emit PNG + JSON per page |
+| `infer-omr` | Full pipeline on a PDF or page images: detect → predict edges → repair → `**kern` |
 | `train-gnn` | Train the Phase-2 GNN on top of a frozen detector |
 | `validate-groundtruth` | Run the serializer directly on GT graphs to debug it independently of the GNN |
+| `validate-predictions` | End-to-end validation on GT boxes with predicted edges + repairs |
 | `compare-kern` | Score generated `**kern` against groundtruth MEI: per-measure pitch and rhythm match rates |
 
 ## Serializer status & TODO
@@ -217,9 +256,35 @@ Known gaps, roughly by impact:
       (rhythm 0%); the test now also requires the head to be small relative
       to the page's median notehead. Current totals: end-to-end
       **91.8% / 78.8%**, ceiling 95.5% / 94.6%.
-- [ ] Worst remaining end-to-end files lose whole regions (`QmbkhcJML…`
-      55/39, `Qmbkw5eNmB…` 65/65) — needs missing system/measure recovery
-      from layer/note-cluster evidence.
+- [x] Investigated the "whole-region loss" files — none actually had missing
+      systems (structure counts matched GT everywhere). Real causes, fixed
+      or closed: `QmbkhcJML…` was an early-music score whose C clefs sit on
+      different lines per part (soprano C1, mezzo C2…) while the vision
+      class is just `clefC` — the serializer now measures the clef's staff
+      line from the glyph position (`_resolve_clef_class`, `*clefC1`–`C5`),
+      taking that file from 57%/51% to 97%/95% at the ceiling. `Qmbkw5eNmB…`
+      is a broken source: 42 gestural-only accidentals (`accid.ges`), zero
+      printed ones, none in the SVG — unrecoverable by any OMR, same class
+      as the tablature file. Current totals: **end-to-end 92.7% / 80.1%**,
+      ceiling 96.8% / 96.1%.
+- [x] Staff-identity tracking for optimized layouts — done: the serializer
+      now buffers all pages, sizes the spine set from the widest system,
+      maps reduced systems' rows onto parts by monotone DP over printed
+      evidence (clef incl. measured C-clef line, key-accidental count), and
+      pads hidden parts with full-measure rests. Full measures still map by
+      order (immune to row-matching noise); on the predicted path the row
+      list is y-filtered by the system bbox and double-mapped parts are
+      dropped, or bad edges desynchronize spines. Ceilings: validation-small
+      96.8/96.1 → **98.4/97.7**, test-small 86.7/85.4 → **90.0/89.0** (zero
+      per-file regressions); end-to-end validation-small **93.2/80.4**,
+      test-small 82.3/75.0.
+- [ ] Large orchestral scores where the full part set NEVER appears in one
+      system (MEI numbers 25–31 parts, ≤16 visible concurrently) can't be
+      identified geometrically — needs instrument-label OCR to name rows.
+      Two such scores cap the test-small aggregate.
+- [ ] End-to-end comparisons carry a per-file noise floor (~±0.5) from
+      nondeterministic GNN inference (cuDNN); judge serializer heuristics by
+      the deterministic ceiling path or aggregate deltas well above noise.
 - [ ] Thin/small-glyph class group (`beamBroken`, `stem32`, `ledgerLines`,
       `meterSig`, digit time signatures, and now the `clefG8va` "8"): frequent
       or well-localized but low AP — needs `scale_ranges`/input-resolution

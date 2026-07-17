@@ -310,22 +310,46 @@ structural guards) brought the stack to 91.6% / 78.3%. Two measured
 negatives worth remembering: chord→note recovery by containment pulls in
 other-voice notes (net-negative, default-off as repair 11), and temporal
 chain bridging changes nothing (the serializer's cx fallback already
-orders identically — default-off as repair 12). A serializer fix on top
-(grace detection now relative to the page's median notehead height, not
-just staff space — one small-notehead render style serialized a whole file
-as grace notes) puts the current stack at **91.8% / 78.8%** against a
-ceiling of 95.5% / 94.6%. The residual gap is mostly rhythm on files where
-the GNN loses whole regions, plus the known ceiling residue (tablature,
-optimized-layout ensemble scores).
+orders identically — default-off as repair 12). Serializer hardening on top of the repairs, in order: grace detection
+relative to the page's median notehead height (one small-notehead render
+style serialized a whole file as grace notes); C-clef staff lines measured
+from the glyph's position (`*clefC1`–`*clefC5`; one 6-part early-music
+score went 57%/51% → 97%/95% at the ceiling); and staff-identity tracking
+for optimized layouts (pages buffered, spines sized from the widest
+system, reduced systems' rows mapped to parts by monotone DP over printed
+clef/key evidence, hidden parts padded with full-measure rests — full
+measures still map by order, and the predicted path y-filters rows and
+rejects double-mapped parts so bad edges can't desynchronize spines).
+Current stack: **93.2% / 80.4%** against a ceiling of **98.4% / 97.7%**
+(validation-small); held-out test-small: 82.3% / 75.0% against a
+90.0% / 89.0% ceiling. Investigating the worst files showed no
+actually-missing systems — the residue is broken sources (gestural-only
+accidentals, tablature) and orchestral scores whose full part set never
+appears in one system (identification needs label OCR).
+Caveat for future measurements: GNN inference is nondeterministic (cuDNN),
+giving a ~±0.5 per-file noise floor end-to-end — validate heuristics on
+the deterministic ceiling path or on aggregate deltas well above noise.
+
+**Held-out generalization** (`data/test-small`, 224 unseen scores / 484
+pages / 82.6k notes, curated from `raw/` with `filter-mxl`, 2026-07-17):
+detector mAP@.50 0.722 / .50:.95 0.637 (validation-small: 0.724/0.644) —
+no overfitting. Ceiling 90.0% / 89.0% with **median file 100% / 100%**
+(200 of 223 files ≥99% pitch); end-to-end 82.3% / 75.0%. The model-path
+cost over the ceiling matches validation-small, confirming the GNN +
+repairs transfer. The aggregate residue is two huge orchestral scores
+whose full part set never appears in a single system — geometric identity
+cannot name their rows (label OCR territory); together they hold ~12% of
+the corpus notes.
 
 > **Roadmap:** `MinimalHumdrumSerializer` stays the minimal variant and
-> `graph_repair` carries the hardening iterations (two so far). Next
-> candidates: recovering missing systems/measures from layer- and
-> note-cluster evidence (the worst remaining files lose whole regions) and
-> staff-identity tracking for optimized layouts. Temporal bridging is done
-> and measured: no effect (repair 12, default-off). The rhythm-0% outlier
-> is fixed (grace detection vs the page's median notehead height).
-> `validate-predictions` keeps stages swappable for A/B.
+> `graph_repair` carries the hardening iterations (two so far).
+> Missing-system recovery was investigated and not needed — structure
+> counts matched GT on every bad file; the real losses were C-clef lines,
+> grace misdetection, and staff identity in optimized layouts (all fixed)
+> plus broken sources. Temporal bridging is done and measured: no effect
+> (repair 12, default-off). Next candidate: instrument-label OCR to name
+> staff rows in never-full orchestral scores. `validate-predictions`
+> keeps stages swappable for A/B.
 
 Also useful: `graph/eval.py` (SER/CER/LER on kern text) for
 sequence-level comparison.

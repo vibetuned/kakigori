@@ -10,7 +10,7 @@ The flow is roughly:
 2. `dataset.OMRFullPageDataset` pairs images + JSON annotations + saved graphs into PyG-compatible samples.
 3. `model.ScoreGraphReconstructor` (GATv2) and `model.GraphVisualExtractor` (MultiScaleRoIAlign over the detector's PANet features) form the GNN. `model.GNNPhase2Model` wraps them with a frozen detector.
 4. `train.py` (CLI) trains the GNN via `trainer.GNNTrainer` using `losses.MultiClassEdgeFocalLoss`, `heuristics.generate_axis_aware_edges` for candidate proposal, and `metrics.GraphTopologyEvaluator` plus `compute_gnn_metrics` for evaluation.
-5. `infer.py` provides inferencer classes that detector → RoI → GNN → predicted edges, then hand off to `serializers.MinimalHumdrumSerializer` to emit `**kern`.
+5. `infer.py` (`infer-omr`) runs the full pipeline on PDFs or page images: detector → RoI → GNN → predicted edges → `graph_repair` → `serializers.MinimalHumdrumSerializer` → `**kern`.
 6. `validate_groundtruth.py` (CLI) is the offline path that re-uses `MinimalHumdrumSerializer` directly on GT graphs to sanity-check the serializer on perfect data.
 7. `eval.py` scores predicted `.krn` against ground-truth `.krn` with SER/CER/LER.
 
@@ -50,12 +50,12 @@ The flow is roughly:
 **Produces / used by:** Called by `trainer.GNNTrainer.compute_loss` and by `infer.py`.
 
 ### `infer.py`
-**Role:** End-to-end inference: detect → isolate systems → extract RoI features → GNN → serialize. Contains two inferencers stacked in the same file.
+**Role:** End-to-end inference CLI (`infer-omr`): PDF or page images → detector → GNN edges → graph repair → `**kern`. Rewritten for v0.1.0 on the `validate_predictions` mechanics — the earlier prototype inferencer classes it contained were dead code.
 **Key classes/functions:**
-- `FullPageOMRPipeline.process_page(image_path, node_roles)` — runs the full detector on a page, splits by `system` bbox, translates to relative coords, runs the GNN per system, then calls `_collapse_primitives` + `generate_kern_stream`.
-- `OMRGraphInferencer.process_system(image_path, json_path)` — single-system variant that loads precomputed JSON detections instead of running the detector, builds a `Data` object with the heuristics, predicts edges, and exports kern via `HumdrumSerializer`.
-**Preconditions:** Loaded detector (with `.extract_features`), RoI extractor checkpoint, GNN checkpoint, `class_list`, a `node_roles` dict, and (for `process_page`) modules referenced as `from serialization import HumdrumSerializer` and `generate_kern_stream` that no longer exist in the current tree.
-**Produces / used by:** Returns `**kern` strings. The pipeline classes reference symbols (`generate_kern_stream`, `_collapse_primitives`, top-level `from serialization import HumdrumSerializer`, `from .serializer import HumdrumSerializer`) that don't resolve in the current package layout — flagged as **ambiguous / likely stale**.
+- `detect_page_nodes(detector, page_image, ...)` — runs the detector on a letterboxed page and returns serializer-format nodes (`id`/`class`/`bbox`/`cx`/`cy`) in original page coordinates.
+- `main()` — loads the detection checkpoint and the GNN wrapper separately (two-model deployment: the wrapper's adapted neck only feeds RoI features), then per page: detect → `predict_page_edges` → `_inject_system_measure_edges` → `repair_page_edges`, and finally one `MinimalHumdrumSerializer` pass over all pages.
+**Preconditions:** detector checkpoint dir, GNN wrapper run dir, `conf/config.json`, `conf/structure.json`; `pypdfium2` for `--pdf` input.
+**Produces / used by:** Writes `page_NNNN.png`/`page_NNNN.json` (dataset annotation format, same as `infer-model`) and `<stem>.krn` into `--output-dir`.
 
 ### `losses.py`
 **Role:** Class-balanced focal loss for the 6-way edge classifier (down-weighting class 0 "No Edge" which dominates ~97% of candidates).
