@@ -33,6 +33,7 @@ uv run infer-omr --pdf score.pdf \
                  --output-dir out/
 # out/score.krn                        — the Humdrum **kern transcription
 # out/page_NNNN.png + page_NNNN.json   — per-page detections
+# --split writes one kern per page (page_NNNN.krn) instead of score.krn
 ```
 
 Detections only (vision stage by itself):

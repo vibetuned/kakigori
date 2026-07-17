@@ -55,7 +55,7 @@ The flow is roughly:
 - `detect_page_nodes(detector, page_image, ...)` — runs the detector on a letterboxed page and returns serializer-format nodes (`id`/`class`/`bbox`/`cx`/`cy`) in original page coordinates.
 - `main()` — loads the detection checkpoint and the GNN wrapper separately (two-model deployment: the wrapper's adapted neck only feeds RoI features), then per page: detect → `predict_page_edges` → `_inject_system_measure_edges` → `repair_page_edges`, and finally one `MinimalHumdrumSerializer` pass over all pages.
 **Preconditions:** detector checkpoint dir, GNN wrapper run dir, `conf/config.json`, `conf/structure.json`; `pypdfium2` for `--pdf` input.
-**Produces / used by:** Writes `page_NNNN.png`/`page_NNNN.json` (dataset annotation format, same as `infer-model`) and `<stem>.krn` into `--output-dir`.
+**Produces / used by:** Writes `page_NNNN.png`/`page_NNNN.json` (dataset annotation format, same as `infer-model`) and `<stem>.krn` into `--output-dir` — or one `page_NNNN.krn` per page with `--split`. Applies `bbox_repair` by default (`--no-bbox-repair` to disable).
 
 ### `losses.py`
 **Role:** Class-balanced focal loss for the 6-way edge classifier (down-weighting class 0 "No Edge" which dominates ~97% of candidates).

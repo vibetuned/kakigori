@@ -34,6 +34,7 @@ from tqdm import tqdm
 # Local imports
 from .serializers import MinimalHumdrumSerializer
 from .graph_repair import repair_page_edges
+from .bbox_repair import repair_page_boxes
 from .validate_predictions import (
     _load_gnn, predict_page_edges, _inject_system_measure_edges,
 )
@@ -96,8 +97,13 @@ def main():
     parser.add_argument("--conf-thresh", type=float, default=0.3)
     parser.add_argument("--iou-thresh", type=float, default=0.5)
     parser.add_argument("--dpi", type=int, default=300, help="DPI for PDF rendering.")
+    parser.add_argument("--split", action="store_true",
+                        help="Write one .krn per page (page_NNNN.krn) instead of "
+                             "a single document-level kern")
     parser.add_argument("--no-repair", action="store_true",
                         help="Disable the spatial graph-repair heuristics")
+    parser.add_argument("--no-bbox-repair", action="store_true",
+                        help="Disable detection-level structure box repairs")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -150,6 +156,8 @@ def main():
 
         if not page_nodes:
             continue
+        if not args.no_bbox_repair:
+            repair_page_boxes(page_nodes, page_prefix=f"p{page_idx}")
         page_edges = predict_page_edges(
             gnn_wrapper, page_nodes, img_path, class_to_idx, device,
             input_size=args.input_size,
@@ -165,33 +173,51 @@ def main():
     if not all_edges:
         raise SystemExit("No edges predicted — nothing to serialize.")
 
-    # 2. Serialize the whole document
-    id_to_idx = {nid: i for i, nid in enumerate(node_ids)}
-    rows = [(id_to_idx[u], id_to_idx[v], c) for u, v, c in all_edges
-            if u in id_to_idx and v in id_to_idx]
-    edge_index = torch.tensor(
-        [[r[0] for r in rows], [r[1] for r in rows]], dtype=torch.long)
-    edge_predictions = torch.tensor([r[2] for r in rows], dtype=torch.long)
+    # 2. Serialize — the whole document, or one kern per page with --split
+    def serialize(page_groups: list, edges: list, ids: list) -> str:
+        id_to_idx = {nid: i for i, nid in enumerate(ids)}
+        rows = [(id_to_idx[u], id_to_idx[v], c) for u, v, c in edges
+                if u in id_to_idx and v in id_to_idx]
+        edge_index = torch.tensor(
+            [[r[0] for r in rows], [r[1] for r in rows]], dtype=torch.long)
+        serializer = MinimalHumdrumSerializer(
+            edge_index=edge_index,
+            edge_predictions=torch.tensor([r[2] for r in rows], dtype=torch.long),
+            node_roles=node_roles,
+            pyg_node_ids=ids,
+        )
+        for page_nodes in page_groups:
+            serializer.add_page(page_nodes)
+        return serializer.export_to_krn()
 
-    serializer = MinimalHumdrumSerializer(
-        edge_index=edge_index,
-        edge_predictions=edge_predictions,
-        node_roles=node_roles,
-        pyg_node_ids=node_ids,
-    )
-    for page_nodes in all_pages:
-        serializer.add_page(page_nodes)
-
-    kern_stream = serializer.export_to_krn()
-    if kern_stream.startswith("Error"):
-        raise SystemExit(f"Serialization failed: {kern_stream}")
-
-    krn_path = output_dir / f"{stem}.krn"
-    with open(krn_path, "w", encoding="utf-8") as f:
-        f.write(kern_stream)
-        f.write("\n")
-    logger.info(f"Done. Wrote {krn_path} "
-                f"({len(node_ids)} detections, {len(rows)} edges, {len(pages)} pages).")
+    if args.split:
+        written = 0
+        for page_idx, page_nodes in enumerate(all_pages):
+            ids = [n["id"] for n in page_nodes]
+            id_set = set(ids)
+            page_edges = [(u, v, c) for u, v, c in all_edges
+                          if u in id_set and v in id_set]
+            kern_stream = serialize([page_nodes], page_edges, ids)
+            if kern_stream.startswith("Error"):
+                logger.warning(f"page {page_idx + 1}: {kern_stream}")
+                continue
+            with open(output_dir / f"page_{page_idx + 1:04d}.krn", "w",
+                      encoding="utf-8") as f:
+                f.write(kern_stream)
+                f.write("\n")
+            written += 1
+        logger.info(f"Done. Wrote {written}/{len(all_pages)} per-page .krn files "
+                    f"to {output_dir}/ ({len(node_ids)} detections).")
+    else:
+        kern_stream = serialize(all_pages, all_edges, node_ids)
+        if kern_stream.startswith("Error"):
+            raise SystemExit(f"Serialization failed: {kern_stream}")
+        krn_path = output_dir / f"{stem}.krn"
+        with open(krn_path, "w", encoding="utf-8") as f:
+            f.write(kern_stream)
+            f.write("\n")
+        logger.info(f"Done. Wrote {krn_path} ({len(node_ids)} detections, "
+                    f"{len(all_edges)} edges, {len(pages)} pages).")
 
 
 if __name__ == "__main__":

@@ -25,3 +25,4 @@ wheels/
 /old**
 /logs/
 **.log
+/out/
