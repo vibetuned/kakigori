@@ -1,0 +1,30 @@
+# GNN training — PHASE 4: box-jitter robustness curriculum on top of the
+# best previous phase. Gaussian pixel noise (640-canvas space) on GT boxes
+# during training simulates detector localization error; eval stays on
+# clean boxes so metrics remain comparable across phases.
+# Reference result (2026-07-16, on top of phase 2): clean-box f1_macro
+# 0.848 (best of all phases — the jitter regularizes) and better robustness
+# at every tested noise level (σ=0/1.5/3px: 0.860/0.850/0.820 held-out).
+
+img_dir: "data/train-small/imgs"
+ann_dir: "data/train-small/annotations"
+graph_dir: "data/train-small/graphs"
+config: "conf/config.json"
+
+detector_checkpoint: "checkpoints/run_003"
+
+unfreeze: "neck"     # keep the adaptation layer trainable under noise
+vision_lr: 0.00001
+box_jitter: 1.5      # px, substantial relative to ~5px noteheads at 640
+fine_tune: "checkpoints_gnn/run_002"   # phase-2 run (update to yours)
+
+output_dir: "checkpoints_gnn"
+logging_dir: "runs_gnn"
+epochs: 15
+batch_size: 2
+lr: 0.0003
+logging_steps: 10
+eval_steps: 2500
+save_steps: 250
+max_steps: -1
+seed: 42

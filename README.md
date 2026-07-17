@@ -190,6 +190,15 @@ Known gaps, roughly by impact:
       geometric pitch estimate (~1% of notes on dense scans).
 - [ ] Ties whose far end is missing from the annotations leave unbalanced
       `[` / `]` markers (2 unmatched opens in `QmbiBpt…`).
+- [ ] Optimized-layout scores (systems hiding resting staves) scramble the
+      index-based staff→spine mapping — needs staff-identity tracking
+      across systems (planned serializer iteration).
+- [ ] Tablature (`6stringTabClef`) and percussion clefs are out of scope
+      for the kern serializer.
+- [ ] Retrain the vision detector + GNN for the classes appended after
+      `run_003`/GNN `run_003` were trained (`clefG8vb`, `clefG8va`):
+      `retrain-model --old-num-classes 107`, then a GNN phase on top.
+      Until then the octave clefs only benefit the ground-truth path.
 - [ ] Double-dot detection is a bbox-width heuristic (width vs. staff space);
       unusual render scales could misclassify.
 - [ ] Unpitched/percussion notation (MEI `loc`-based notes) is not supported.

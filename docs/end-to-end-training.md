@@ -170,16 +170,18 @@ full rationale, monitoring guide, and hard-won lessons live in
 ./train.sh uv run train-gnn --train-config conf/train_gnn.yaml --resume
 ```
 
-with `conf/train_gnn.yaml` set per phase (pre-create the next
-`checkpoints_gnn/run_NNN` so `--resume` targets it rather than the previous
-run):
+with the per-phase config (pre-create the next `checkpoints_gnn/run_NNN`
+so `--resume` targets it rather than the previous run):
 
-| Phase | yaml | Notes |
+| Phase | config | Notes |
 | --- | --- | --- |
-| 1 | `unfreeze: "none"`, `lr: 0.001`, 30 epochs | GNN + RoI head from scratch, frozen detector |
-| 2 | `unfreeze: "neck"`, `fine_tune: <phase-1 run>`, `lr: 0.0003`, `vision_lr: 1e-5` | PANet adapts as a vision→graph adaptation layer |
-| 3 | `unfreeze: "full"` | only if phase 2 plateaus; tiny vision_lr |
-| 4 | add `box_jitter: <px>` | GT-box noise, narrows the gap to detector boxes |
+| 1 | `conf/train_gnn_phase1.yaml` | GNN + RoI head from scratch, frozen detector |
+| 2 | `conf/train_gnn_phase2.yaml` | PANet adapts as a vision→graph adaptation layer |
+| 3 | `conf/train_gnn_phase3.yaml` | in reserve — only if phase 2 plateaus early |
+| 4 | `conf/train_gnn_phase4.yaml` | GT-box noise, narrows the gap to detector boxes |
+
+Update each phase file's `fine_tune:` to point at the previous phase's
+actual run directory before launching.
 
 Common settings: `detector_checkpoint:` → the Stage-3 consolidation run;
 `img_dir`/`ann_dir`/`graph_dir` → the Stage-2 triplet; `config:` stays
@@ -219,30 +221,51 @@ serializer bugs, not model problems.
 
 ## Stage 6 — End-to-end test on *predicted* graphs
 
-This is the step that answers "does the graph model work". The intended flow:
+This is the step that answers "does the graph model work":
 
-1. Run the detector on validation pages (`uv run infer-model` emits per-page
-   JSON + PNG), or reuse ground-truth annotations to isolate the GNN's
-   contribution from detector noise.
-2. Build candidate edges with the same heuristics used in training, run the
-   GNN to get per-edge class predictions.
-3. Feed `MinimalHumdrumSerializer(edge_index, edge_predictions, node_roles,
-   node_ids)` exactly as `validate_groundtruth.py` does — it is agnostic to
-   whether `edge_predictions` are ground truth or model output.
-4. Score with `compare-kern` (pitch/rhythm vs MEI) and `graph/eval.py`
-   (SER/CER/LER on kern text).
+```
+uv run validate-predictions --graph_dir <d>/graphs --json_dir <d>/annotations \
+    --img_dir <d>/imgs --out_dir <d>/krn-pred \
+    --gnn_checkpoint checkpoints_gnn/run_NNN
+uv run compare-kern --mei_dir <d>/mei --krn_dir <d>/krn-pred
+```
 
-> **Status:** step 2's glue is currently stale. `graph/infer.py` predates the
-> current serializer — its imports reference a removed `serialization`
-> module and are partly commented out. The cleanest path is a small
-> `validate-predictions` CLI cloned from `validate_groundtruth.py` that
-> loads a GNN checkpoint, replaces `y` with predicted edge classes over the
-> heuristic candidates, and reuses everything else unchanged. Until that
-> exists, Stage 6 cannot run.
+`validate-predictions` mirrors `validate-groundtruth` but replaces the
+ground-truth edge labels with GNN predictions: per page it letterboxes the
+image, runs the (wrapper-checkpoint) detector features + heuristic
+candidates + GNN, maps predicted edges back to annotation node ids, injects
+the one scaffold the GNN structurally cannot predict (system→measure —
+system nodes are excluded from the per-system groups), and hands the result
+to `MinimalHumdrumSerializer`. Compare against the ceiling (`compare-kern`
+on `validate-groundtruth` output for the *same* dataset) to separate
+serializer limitations from model errors.
 
-A useful intermediate metric while that glue is being built: the GNN
-trainer's edge-classification report on a held-out dataset directory —
-if per-class edge F1 is low, no serializer will save the output.
+Predicted edges pass through `graph/graph_repair.py` before serialization:
+guarded spatial heuristics that recover the *geometric certainties* the GNN
+loses (note→notehead→stem chains, meterSig digits, keySig accidentals,
+staff context, orphaned events) without ever overriding a model prediction.
+Ownership means structural/modifier parenthood — temporal/sync neighbors
+never satisfy a guard — and class checks are exact (`"note"` must not
+prefix-match `"noteheadBlack"`; that single bug cost 42 pitch points).
+Repairs are individually toggleable (`enabled`/`loose`) for ablations;
+`--no-repair` gives the raw-GNN baseline.
+
+Reference numbers on `data/validation-small` (GT boxes, phase-4 GNN at
+edge macro-F1 0.86): ceiling (GT edges) 95.5% pitch / 94.3% rhythm;
+end-to-end **89.6% / 76.6%** (median file 97.9% pitch) — up from
+39.5% / 23.2% without repairs. The residual gap is mostly rhythm: broken
+temporal chains and duration context, plus the known ceiling residue
+(tablature, optimized-layout ensemble scores).
+
+> **Roadmap:** `MinimalHumdrumSerializer` stays the minimal variant and
+> `graph_repair` is the first hardening iteration. Next candidates:
+> bridging broken temporal chains geometrically (rhythm is now the gap),
+> recovering missing systems/measures from layer- and note-cluster
+> evidence, and staff-identity tracking for optimized layouts.
+> `validate-predictions` keeps both stages swappable for A/B comparison.
+
+Also useful: `graph/eval.py` (SER/CER/LER on kern text) for
+sequence-level comparison.
 
 ## Quick reference — what feeds what
 

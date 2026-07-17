@@ -1,8 +1,8 @@
 # Data args
 img_dir: "data/train-small/imgs"
 ann_dir: "data/train-small/annotations"
-synthetic_img_dir: "data/synthetic-new/imgs"
-synthetic_ann_dir: "data/synthetic-new/annotations"
+synthetic_img_dir: "data/synthetic-boost/imgs"
+synthetic_ann_dir: "data/synthetic-boost/annotations"
 use_synthetic: true
 synthetic_ratio: -9
 config: "conf/config.json"
@@ -15,7 +15,7 @@ out_indices: [0, 1, 2]
 
 # Class expansion args
 freeze_epochs: 10
-old_num_classes: 93
+old_num_classes: 107  # run_003 was trained pre clefG8vb/clefG8va (now 109)
 
 # Trainer args
 reg_weight: 5.0

@@ -1,0 +1,28 @@
+# GNN training — PHASE 3: FULL backbone unfreezing. IN RESERVE — not used
+# in the reference training: phase 2 plateaued at 0.843 with the neck alone,
+# and full unfreezing risks more detection-mAP drift for marginal edge
+# gains. Run it only if a later phase shows vision features are the
+# bottleneck, and re-check detector drift afterwards.
+
+img_dir: "data/train-small/imgs"
+ann_dir: "data/train-small/annotations"
+graph_dir: "data/train-small/graphs"
+config: "conf/config.json"
+
+detector_checkpoint: "checkpoints/run_003"
+
+unfreeze: "full"
+vision_lr: 0.000005  # even gentler than phase 2: the whole ConvNeXt moves
+box_jitter: 0.0
+fine_tune: "checkpoints_gnn/run_002"   # best neck-phase run (update to yours)
+
+output_dir: "checkpoints_gnn"
+logging_dir: "runs_gnn"
+epochs: 10
+batch_size: 2        # memory: full-page backbone activations are kept for backward
+lr: 0.0002
+logging_steps: 10
+eval_steps: 2500
+save_steps: 250
+max_steps: -1
+seed: 42

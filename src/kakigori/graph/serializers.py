@@ -11,6 +11,8 @@ CLEF_BOTTOM_LINE = {
     "clefG": (2, 4),  # E4
     "clefF": (4, 2),  # G2
     "clefC": (2, 3),  # E3
+    "clefG8vb": (2, 3),  # E3 — vocal tenor: treble sounding an octave down
+    "clefG8va": (2, 5),  # E5 — treble sounding an octave up
 }
 
 # Mid-piece clef-change glyphs and the clef they switch to
@@ -26,6 +28,8 @@ CLEF_KERN = {
     "clefG": "*clefG2",
     "clefF": "*clefF4",
     "clefC": "*clefC3",
+    "clefG8vb": "*clefGv2",  # kern 'v' = sounding an octave below
+    "clefG8va": "*clefG^2",  # kern '^' = sounding an octave above
 }
 
 REST_KERN = {
@@ -1660,6 +1664,12 @@ class MinimalHumdrumSerializer:
             bottom_idx, bottom_oct = 3, 3  # Alto clef bottom line: F3
         else:
             bottom_idx, bottom_oct = 2, 4  # Default to Treble clef bottom line: E4
+
+        # Octave clefs shift the sounding pitch by a full octave
+        if "8vb" in clef_type:
+            bottom_oct -= 1
+        elif "8va" in clef_type:
+            bottom_oct += 1
 
         total = bottom_idx + step
 

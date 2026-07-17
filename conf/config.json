@@ -106,6 +106,8 @@
         "dynamicFF",
         "dynamicFFF",
         "dynamicSforzato",
-        "dynamicForzando"
+        "dynamicForzando",
+        "clefG8vb",
+        "clefG8va"
     ]
 }

@@ -1,0 +1,30 @@
+# GNN training — PHASE 2: the PANet neck trains as a vision→graph adaptation
+# layer (ConvNeXt stays frozen), warm-started from phase 1. GT boxes.
+# Reference result (2026-07-16): f1_macro 0.825 → 0.843, every class up.
+# Detector drift check afterwards is MANDATORY (see docs/graph.md §3):
+# extract the adapted detector from the wrapper and run eval-model — the
+# adapted neck cost ~2-3 detection mAP; deploy with TWO necks (original for
+# detection heads, adapted for GNN RoI) since the backbone stays shared.
+
+img_dir: "data/train-small/imgs"
+ann_dir: "data/train-small/annotations"
+graph_dir: "data/train-small/graphs"
+config: "conf/config.json"
+
+detector_checkpoint: "checkpoints/run_003"
+
+unfreeze: "neck"
+vision_lr: 0.00001
+box_jitter: 0.0
+fine_tune: "checkpoints_gnn/run_001"   # phase-1 run (update to yours)
+
+output_dir: "checkpoints_gnn"
+logging_dir: "runs_gnn"
+epochs: 15           # refines a converged head; less than the from-scratch 30
+batch_size: 2
+lr: 0.0003           # gentler than phase 1: a fresh 1e-3 cosine would perturb
+logging_steps: 10
+eval_steps: 2500
+save_steps: 250
+max_steps: -1
+seed: 42

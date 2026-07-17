@@ -22,6 +22,8 @@
         "clefG",
         "clefF",
         "clefC",
+        "clefG8vb",
+        "clefG8va",
         "gClefChange",
         "fClefChange",
         "cClefChange",

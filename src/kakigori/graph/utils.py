@@ -86,6 +86,9 @@ def split_into_systems(abs_boxes, labels, gt_edges, class_to_idx):
                 "labels": sys_labels,
                 "edge_targets": sys_gt_tensor,
                 "system_bbox": sys_box,
+                # Page-level indices of this system's nodes: inference needs
+                # them to map predicted candidate edges back to node ids
+                "node_indices": sys_original_indices,
             }
         )
 

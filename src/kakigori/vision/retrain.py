@@ -306,29 +306,58 @@ def main():
         sr = args.scale_ranges
         scale_ranges = [(sr[0], sr[1]), (sr[2], sr[3]), (sr[4], sr[5])]
 
-    # --- Initialize Trainer ---
-    logger.info(f"--- STAGE 1: Training frozen network for {args.freeze_epochs} epochs ---")
-    training_args.num_train_epochs = args.freeze_epochs
-        
-    trainer = OMRTrainer(
-        model=model,
-        args=training_args,
-        train_dataset=train_dataset,
-        data_collator=omr_collate_fn,
-        scale_ranges=scale_ranges,
-        base_gamma=args.base_gamma,
-        max_gamma=args.max_gamma,
-        custom_sampler=custom_sampler,
-    )
-    trainer.train()
+    # --- Stage-aware crash resume ---
+    # The supervisor (train.sh) relaunches after segfaults; without resume a
+    # crash restarts the whole two-stage schedule. A marker file records
+    # that stage 2 began; each stage resumes from its own checkpoints, and
+    # partial checkpoints (no trainer_state.json) are discarded.
+    import shutil
+
+    def _last_complete_checkpoint(directory):
+        ckpt = get_last_checkpoint(str(directory))
+        while ckpt is not None and not (Path(ckpt) / "trainer_state.json").exists():
+            logger.warning(f"Discarding incomplete checkpoint: {ckpt}")
+            shutil.rmtree(ckpt)
+            ckpt = get_last_checkpoint(str(directory))
+        return ckpt
+
+    stage2_marker = run_dir / "STAGE2_STARTED"
+    stage2_dir = run_dir / "stage2"
+
+    if not stage2_marker.exists():
+        logger.info(f"--- STAGE 1: Training frozen network for {args.freeze_epochs} epochs ---")
+        training_args.num_train_epochs = args.freeze_epochs
+
+        trainer = OMRTrainer(
+            model=model,
+            args=training_args,
+            train_dataset=train_dataset,
+            data_collator=omr_collate_fn,
+            scale_ranges=scale_ranges,
+            base_gamma=args.base_gamma,
+            max_gamma=args.max_gamma,
+            custom_sampler=custom_sampler,
+        )
+        trainer.train(resume_from_checkpoint=_last_complete_checkpoint(run_dir))
+        stage2_marker.touch()
+    else:
+        logger.info("--- STAGE 1 already completed (marker found), skipping ---")
+        # Carry the latest weights forward: stage-2 checkpoint if one exists,
+        # otherwise the last stage-1 checkpoint
+        stage2_ckpt = _last_complete_checkpoint(stage2_dir) if stage2_dir.exists() else None
+        if stage2_ckpt is None:
+            load_checkpoint(model, str(run_dir), device=torch.device("cpu"), eval=False)
+
     logger.info("--- STAGE 2: Unfreezing network for fine-tuning ---")
     for param in model.parameters():
         param.requires_grad = True
-        
+
     remaining_epochs = args.epochs - args.freeze_epochs
     training_args.num_train_epochs = remaining_epochs
     training_args.learning_rate = args.lr_unfrozen
-    
+    stage2_dir.mkdir(parents=True, exist_ok=True)
+    training_args.output_dir = str(stage2_dir)
+
     # We must re-instantiate the Trainer so it builds a new optimizer with the unfrozen parameters
     trainer_unfrozen = OMRTrainer(
         model=model,
@@ -340,7 +369,7 @@ def main():
         max_gamma=args.max_gamma,
         custom_sampler=custom_sampler,
     )
-    trainer_unfrozen.train()
+    trainer_unfrozen.train(resume_from_checkpoint=_last_complete_checkpoint(stage2_dir))
     trainer_unfrozen.save_model()
 
 

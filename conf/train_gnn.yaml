@@ -1,5 +1,7 @@
-# Default Configuration for GNN Phase 2 Trainer
-# This file is passed via --train-config to the training script
+# Default Configuration for the GNN trainer — currently set to the LAST run
+# (phase 4). The canonical per-phase configurations live in
+# conf/train_gnn_phase{1,2,3,4}.yaml; pass one of those via --train-config
+# to reproduce a specific phase of the curriculum (docs/graph.md §3).
 
 # --- Data Arguments ---
 img_dir: "data/train-small/imgs"

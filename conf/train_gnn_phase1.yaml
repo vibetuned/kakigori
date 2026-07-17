@@ -1,0 +1,31 @@
+# GNN training — PHASE 1: frozen vision, GT boxes, GNN + RoI from scratch.
+# Reference result (2026-07-16, detector checkpoints/run_003, train-small
+# 2500 graphs): eval f1_macro 0.825 after 30 epochs (~2.2 h @ ~20 it/s).
+# See docs/graph.md §3 for the curriculum and §5 for the training lessons.
+
+# --- Data ---
+img_dir: "data/train-small/imgs"
+ann_dir: "data/train-small/annotations"
+graph_dir: "data/train-small/graphs"
+config: "conf/config.json"
+
+# --- Vision backbone (frozen this phase) ---
+detector_checkpoint: "checkpoints/run_003"
+
+# --- Phase control ---
+unfreeze: "none"
+vision_lr: 0.00001   # unused while frozen; kept for uniformity
+box_jitter: 0.0
+# no fine_tune: phase 1 trains the GNN head from scratch
+
+# --- Trainer ---
+output_dir: "checkpoints_gnn"
+logging_dir: "runs_gnn"
+epochs: 30
+batch_size: 2
+lr: 0.001            # GATv2 from-scratch peak
+logging_steps: 10
+eval_steps: 2500     # one eval pass over the 5% split takes ~12 s
+save_steps: 250      # tighter than default: consumer-hardware segfault cadence
+max_steps: -1
+seed: 42
