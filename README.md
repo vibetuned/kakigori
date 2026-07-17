@@ -45,7 +45,11 @@ uv run infer-model --checkpoint checkpoints/release/vision \
 Both scripts read the class list from `conf/config.json`; `infer-omr` also
 reads `conf/structure.json` for the serializer's node roles. Expect the
 best results on digitally rendered pages — real scans are outside the
-training distribution for now.
+training distribution for now. Honest v0.1.0 expectation for the fully
+detection-driven path: the best scores transcribe at ~90% pitch accuracy,
+the median is ~33% — the edge model has not yet been trained on detection
+noise (see the roadmap in the TODO section); with ground-truth boxes the
+same graph+serializer stack reaches 93% / 80%.
 
 ## Repository layout
 
@@ -282,6 +286,20 @@ Known gaps, roughly by impact:
       system (MEI numbers 25–31 parts, ≤16 visible concurrently) can't be
       identified geometrically — needs instrument-label OCR to name rows.
       Two such scores cap the test-small aggregate.
+- [x] Detection-driven measurement + bbox repair (pre-release gate) — done:
+      `validate-detections` measures the honest `infer-omr` path, and
+      `graph/bbox_repair.py` recovers detector-missed structure (band-NMS
+      FP filtering; systems from uncovered bands; measures from barline
+      x-clusters; staff rows from fixed-line-clef geometry, which is exact;
+      cells from measure×row intersections) plus graph repair 13 (orphan
+      beam/tuplet/layer subtrees → containing staff). validation-small:
+      5.1%/3.2% (104/201 scores) → **29.0%/23.3%** (201/201, median 33%,
+      best files 90–93%); GT-box path unchanged.
+- [ ] **v0.2.0 headline**: train the GNN on DETECTED boxes with
+      groundtruth-matched edges (match GT nodes onto detections to derive
+      labels). The detection-driven gap is now dominated by the edge model
+      meeting detection noise it never saw — box-jitter (σ=1.5 px) does not
+      simulate misses, false positives, or class confusion.
 - [ ] End-to-end comparisons carry a per-file noise floor (~±0.5) from
       nondeterministic GNN inference (cuDNN); judge serializer heuristics by
       the deterministic ceiling path or aggregate deltas well above noise.

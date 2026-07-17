@@ -57,14 +57,16 @@ def _y_gap(a, b):
     return 0.0
 
 
-ALL_REPAIRS = frozenset(range(1, 13))
+ALL_REPAIRS = frozenset(range(1, 14))
 
 # Production set. Repairs 11 (chord->note membership) and 12 (temporal chain
 # bridging) are implemented but excluded: on validation-small 11 measured
 # net-negative (pulled other-voice notes into chord bboxes, -1 to -2 rhythm
 # on 7 files vs +0.5 on 2) and 12 measured exactly zero (the serializer's
 # cx-order fallback already yields identical output). Keep them for ablation.
-DEFAULT_REPAIRS = frozenset(range(1, 11))
+# 13 (orphan containers -> staff) exists for the detection-driven path where
+# container chains break constantly; guarded, so near-no-op on GT boxes.
+DEFAULT_REPAIRS = frozenset(range(1, 11)) | {13}
 
 
 # Empirically tuned on validation-small (see docs/graph.md): repair 1 uses
@@ -309,6 +311,25 @@ def repair_page_edges(page_nodes: list, edges: list, enabled=DEFAULT_REPAIRS,
         owner = next((c for c in chords if _contains(c, nx, ny, pad=2.0)), None)
         if owner is not None:
             add(owner, note, 1)
+
+    # --- 13. orphan structural subtrees -> containing staff cell. Repair 8
+    # rescues parentless EVENTS, but on the detection-driven path a note is
+    # often held by a detected beam/tuplet/layer whose own chain to a staff
+    # never materialized (layer detection is weak) — the whole subtree
+    # silently drops. Attach the parentless CONTAINER to the staff cell
+    # holding its center.
+    if 13 in enabled:
+        container_prefixes = ("beam", "tuplet", "layer")
+        for cont in page_nodes:
+            cls = cont.get("class", "")
+            if not cls.startswith(container_prefixes):
+                continue
+            if cont["id"] in has_parent_struct:
+                continue
+            cx, cy = _center(cont)
+            owner = next((s for s in staves if _contains(s, cx, cy, pad=10.0)), None)
+            if owner is not None:
+                add(owner, cont, 1)
 
     # --- 12. temporal chain bridging. Missing Class-3 edges don't drop
     # events (the serializer falls back to cx order) but they corrupt

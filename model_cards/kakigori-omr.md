@@ -51,21 +51,30 @@ sync-text 0.89, simultaneity 0.84, temporal 0.79, modifier 0.70).
 
 `compare-kern` matches per-staff/per-measure multisets of sounding pitches
 and pitch+duration pairs against MEI groundtruth. "Ceiling" uses
-ground-truth boxes and edges (serializer alone); "end-to-end" uses
-ground-truth boxes with predicted edges + repairs.
+ground-truth boxes and edges (serializer alone); "predicted edges" uses
+ground-truth boxes with predicted edges + repairs; "detection-driven" is
+the honest `infer-omr` path — detector boxes only, nothing from the
+annotations.
 
-| set | ceiling pitch/rhythm | end-to-end pitch/rhythm |
-| --- | --- | --- |
-| validation-small (49k notes) | 98.4% / 97.7% | 93.2% / 80.4% |
-| test-small (83k notes, unseen) | 90.0% / 89.0% | 82.3% / 75.0% |
+| set | ceiling | predicted edges | detection-driven |
+| --- | --- | --- | --- |
+| validation-small (49k notes) | 98.4% / 97.7% | 93.2% / 80.4% | 29.0% / 23.3% |
+| test-small (83k notes, unseen) | 90.0% / 89.0% | 82.3% / 75.0% | — |
 
-Median file on the unseen set: 100% / 100% (200 of 223 files ≥99% pitch).
+Median file on the unseen set (predicted edges): 100% / 100% (200 of 223
+files ≥99% pitch). On the detection-driven path the best files reach
+90–93% and the median is 33%: detection-level box repairs (synthesizing
+missed systems, measures from barlines, staff rows from clef geometry)
+recovered it from a 5% baseline, and the remaining gap is the edge model
+meeting detection noise it was never trained on — closing it (training
+the GNN on detected boxes with matched groundtruth edges) is the v0.2.0
+roadmap headline.
 
 ## Known limitations
 
-- Inference from **detected** boxes (the `infer-omr` path) is rougher than
-  the ground-truth-box numbers above; the box-jitter curriculum narrows
-  but does not close that gap.
+- Inference from **detected** boxes (the `infer-omr` path) is much rougher
+  than the ground-truth-box numbers — see the table above for the honest
+  measurement.
 - Large orchestral scores whose full part set never appears in a single
   system cannot be staff-identified geometrically (needs instrument-label
   OCR) — the two such scores in the test set score far below average.

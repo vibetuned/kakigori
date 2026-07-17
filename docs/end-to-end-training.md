@@ -341,15 +341,32 @@ whose full part set never appears in a single system — geometric identity
 cannot name their rows (label OCR territory); together they hold ~12% of
 the corpus notes.
 
-> **Roadmap:** `MinimalHumdrumSerializer` stays the minimal variant and
-> `graph_repair` carries the hardening iterations (two so far).
-> Missing-system recovery was investigated and not needed — structure
-> counts matched GT on every bad file; the real losses were C-clef lines,
-> grace misdetection, and staff identity in optimized layouts (all fixed)
-> plus broken sources. Temporal bridging is done and measured: no effect
-> (repair 12, default-off). Next candidate: instrument-label OCR to name
-> staff rows in never-full orchestral scores. `validate-predictions`
-> keeps stages swappable for A/B.
+**Stage 6b — the detection-driven path** (`validate-detections`, the
+honest `infer-omr` measurement: detector boxes only). Baseline was 5.1% /
+3.2% with only 104/201 scores serializing — structural detection at
+inference thresholds misses 64% of measures, 44% of systems, 38% of staff
+rows. `graph/bbox_repair.py` recovers the skeleton before the graph is
+built: band-NMS FP filtering (systems/rows never y-overlap; one 0.30-score
+"blanket" system turned a solo piece into a phantom duet), systems from
+uncovered structure bands, measures from barline x-clusters (barlines
+detect at ~0.86), staff rows from fixed-line-clef geometry (a clef bbox
+determines its row EXACTLY — constants have zero variance), and cells from
+measure×row intersections. Together with graph repair 13 (orphan
+beam/tuplet/layer subtrees → containing staff; on detections, container
+chains break constantly): **29.0% / 23.3%**, 201/201 scores, median 33%,
+best files 90–93%. The GT-box path is unaffected by any of it. The
+remaining gap is the edge model meeting detection noise it never saw —
+v0.2.0: train the GNN on detected boxes with GT-matched edge labels.
+
+> **Roadmap:** `MinimalHumdrumSerializer` stays the minimal variant;
+> `graph_repair` (edges) and `bbox_repair` (detections) carry the
+> hardening iterations. Missing-system recovery on the GT-box path was
+> investigated and not needed, but IS needed and implemented on the
+> detection path (bbox repairs 1/4/5). Temporal bridging: measured, no
+> effect (repair 12, default-off). Next: GNN trained on detections
+> (v0.2.0 headline), instrument-label OCR for never-full orchestral
+> scores. `validate-predictions`/`validate-detections` keep every stage
+> swappable for A/B.
 
 Also useful: `graph/eval.py` (SER/CER/LER on kern text) for
 sequence-level comparison.
