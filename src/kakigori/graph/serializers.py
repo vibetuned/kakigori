@@ -805,6 +805,20 @@ class MinimalHumdrumSerializer:
         nodes = {n['id']: n for n in page_nodes}
         children = self._build_children(nodes)
 
+        # Median notehead height of the page: the grace test compares each
+        # head against it, so "grace" means small relative to THIS score's
+        # noteheads. Some render styles draw regular heads at ~0.8 staff
+        # space, which a staff-space-only threshold misread as all-grace
+        # (one validation file serialized every note with 'q': rhythm 0%).
+        head_heights = sorted(
+            n['bbox'][3] - n['bbox'][1]
+            for n in page_nodes
+            if n.get('class') in ('noteheadBlack', 'noteheadHalf', 'noteheadWhole')
+        )
+        self._page_median_head_h = (
+            head_heights[len(head_heights) // 2] if head_heights else None
+        )
+
         # Index spanning curves by their anchored events so the open/close
         # decision can compare the two end notes directly. Anchors are keyed
         # by (system row, cx): a tie across a system break ends on a note
@@ -1446,10 +1460,14 @@ class MinimalHumdrumSerializer:
                 notehead_dur = NOTEHEAD_BASE_DURATION[cls]
                 notehead_cy = child.get('cy', notehead_cy)
                 notehead_cx = child.get('cx', notehead_cx)
-                # Grace noteheads are drawn at ~0.75x scale; a regular
-                # notehead is about as tall as one staff space
+                # Grace noteheads are drawn at ~0.75x scale. Test against
+                # the staff space AND the page's median head height — some
+                # render styles draw regular heads at only ~0.8 staff space,
+                # so the absolute test alone flags whole scores as grace.
                 notehead_h = child['bbox'][3] - child['bbox'][1]
-                if staff_space > 0 and notehead_h < 0.85 * staff_space:
+                median_h = getattr(self, '_page_median_head_h', None)
+                if (staff_space > 0 and notehead_h < 0.85 * staff_space
+                        and (median_h is None or notehead_h < 0.85 * median_h)):
                     is_grace = True
 
             if cls in STEM_DURATION:

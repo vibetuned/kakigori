@@ -1,0 +1,41 @@
+# GNN training — PHASE 5: class-expansion adaptation (107 -> 109 glyph
+# classes, clefG8vb/clefG8va) on top of the phase-4 model.
+#
+# Unlike the vision retrain (retrain-model: new OUTPUT head channels, frozen
+# stage, bias prior), GNN classes are INPUTS: only class_embedding gains rows.
+# old_num_classes triggers a gnn.*-only warm start — the old wrapper's
+# detector/neck weights are stale because the detector itself moved
+# (run_003 -> run_006 class expansion + octave consolidations), which is the
+# real reason this phase exists: the neck re-adapts to the new backbone while
+# the fresh embedding rows train on the regenerated graphs.
+# New rows init from a template class: octave clefs are structurally
+# interchangeable with clefG (same role, same edges), so its embedding is a
+# far better start than random/mean.
+
+img_dir: "data/train-small/imgs"
+ann_dir: "data/train-small/annotations"
+graph_dir: "data/train-small/graphs"    # regenerated 2026-07-17 with octave-clef labels
+config: "conf/config.json"              # 109 classes
+
+detector_checkpoint: "checkpoints/run_006"   # octave-consolidated detector
+
+unfreeze: "neck"     # re-adapt PANet to the run_006 backbone
+vision_lr: 0.00001
+box_jitter: 1.5      # keep the phase-4 robustness curriculum
+
+fine_tune: "checkpoints_gnn/run_003"    # phase-4 model (f1_macro 0.848)
+old_num_classes: 107
+new_class_templates:
+  clefG8vb: clefG
+  clefG8va: clefG
+
+output_dir: "checkpoints_gnn"
+logging_dir: "runs_gnn"
+epochs: 15
+batch_size: 2
+lr: 0.0003
+logging_steps: 10
+eval_steps: 2500
+save_steps: 250
+max_steps: -1
+seed: 42

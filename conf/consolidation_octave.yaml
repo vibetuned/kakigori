@@ -1,0 +1,46 @@
+# Consolidation fine-tune after the 109-class expansion (run_004): targeted
+# recovery of clefG8va, which came out of the class-expansion retrain at
+# AP 0.019 (only 361 real instances; synthetic-boost predated the octave-clef
+# mapping so its 8va/8vb pages were unlabeled).
+# Data fixes feeding this run:
+#   - synthetic-boost annotations re-extracted with the current mapping
+#     (1088 pages contain E052/8vb, 153 contain E053/8va)
+#   - data/synthetic-octave: new batch via apply_octave_clefs mutation
+#     (65% weighted toward 8va)
+#   - data/synthetic-combined: symlink merge of both synthetic sets
+
+# Data args
+img_dir: "data/train-small/imgs"
+ann_dir: "data/train-small/annotations"
+synthetic_img_dir: "data/synthetic-combined/imgs"
+synthetic_ann_dir: "data/synthetic-combined/annotations"
+use_synthetic: true
+synthetic_ratio: -9
+config: "conf/config.json"
+input_size: 640
+num_workers: 4
+
+# Model args
+use_bottom_up: false
+out_indices: [0, 1, 2]
+
+# Trainer args
+reg_weight: 5.0
+cls_weight: 1.0
+max_gamma: 3.0    # Final gamma for focal loss
+base_gamma: 2.0   # Initial gamma for focal loss
+scale_ranges: null
+
+# Training args
+output_dir: "checkpoints"
+logging_dir: "runs"
+epochs: 20
+batch_size: 4
+lr: 0.00005
+logging_steps: 50
+save_steps: 500
+max_steps: -1
+seed: 42
+resume: false
+resume_from_checkpoint: null
+fine_tune: "checkpoints/run_004/stage2/"

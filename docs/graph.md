@@ -75,6 +75,7 @@ failure is attributable:
 | 2 | PANet neck trains (adaptation layer) | ground truth | `unfreeze: "neck"`, `vision_lr`, `fine_tune: <phase-1 run>` |
 | 3 | full backbone trains | ground truth | `unfreeze: "full"` — only if phase 2 plateaus |
 | 4 | best of 2/3 | GT + noise | `box_jitter: <px>` simulates detector localization error |
+| 5 | neck re-adapts to a *new* detector | GT + noise | `old_num_classes`, `new_class_templates` — after a glyph-class expansion |
 
 Rationale: the neck is the cheapest place for the vision features to adapt
 to the relational task, and keeping ConvNeXt frozen protects the detector —
@@ -88,6 +89,18 @@ gap before building that machinery.
 Each phase warm-starts from the previous run via `fine_tune:` (accepts an
 HF checkpoint dir). Unfrozen vision params train in their own optimizer
 param group at `vision_lr` (~1e-5), far below the GNN head's LR.
+
+Phase 5 handles the case where the *detector* changed after the GNN was
+trained — typically a glyph-class expansion (`retrain-model`). Two
+asymmetries with the vision retrain are worth internalizing: classes are
+GNN **inputs** (one `class_embedding` row each, no output head to widen, no
+frozen stage needed), and the old checkpoint's adapted neck is **stale** the
+moment the backbone underneath moves, so `old_num_classes:` loads only the
+`gnn.*` weights and lets the neck re-adapt from the new detector's own
+weights. Seed each new embedding row from its closest existing relative
+(`new_class_templates: {clefG8va: clefG}`) — the octave clefs connect to
+staves and measures exactly like a plain clef, so the copied row starts
+nearly converged.
 
 ## 4. How to tell it is learning (and the two failure attractors)
 

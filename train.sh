@@ -39,6 +39,12 @@ while true; do
         break
     else
         echo "[$(date +'%Y-%m-%d %H:%M:%S')] Process crashed with Exit Code: $EXIT_CODE."
+        # Without --resume our trainers create a FRESH run dir on relaunch and
+        # silently redo the whole run — append it so the restart actually resumes.
+        if [[ " ${CMD[*]} " != *" --resume"* ]]; then
+            CMD+=(--resume)
+            echo "Command lacked --resume; restarting as: ${CMD[*]}"
+        fi
         echo "Restarting in 60 seconds to resume from the latest checkpoint..."
         sleep 60
     fi

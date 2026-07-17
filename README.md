@@ -195,10 +195,35 @@ Known gaps, roughly by impact:
       across systems (planned serializer iteration).
 - [ ] Tablature (`6stringTabClef`) and percussion clefs are out of scope
       for the kern serializer.
-- [ ] Retrain the vision detector + GNN for the classes appended after
-      `run_003`/GNN `run_003` were trained (`clefG8vb`, `clefG8va`):
-      `retrain-model --old-num-classes 107`, then a GNN phase on top.
-      Until then the octave clefs only benefit the ground-truth path.
+- [x] Retrain the vision detector for the appended octave clefs — done
+      (`run_004` class expansion → `run_006` octave consolidations, valsmall
+      mAP@.50 0.724). `clefG8vb` AP 0.986; `clefG8va` plateaus at 0.317:
+      localization is perfect (IoU ≈ 0.9) but the ~3 px "8" above the clef is
+      below the 640 px input's resolving power, so classification votes split
+      toward `clefG`/`clefG8vb` — same family as the thin-shape item below.
+- [x] Retrain the GNN with the 109-class embedding — done (GNN `run_004` via
+      `conf/train_gnn_phase5.yaml`: `old_num_classes` + `new_class_templates`
+      seed the new embedding rows from `clefG`; f1_macro 0.856, the best of
+      all phases).
+- [x] Second graph-repair iteration against the per-file swings — done:
+      edge-level diagnosis traced them to missed `measure→staff` links and
+      guard-blocked stem/flag repairs; repair 10 + selective structural
+      guards take end-to-end from 89.7% / 76.6% to 91.6% / 78.3%.
+      Temporal-chain bridging was implemented and measured: zero effect
+      (repair 12, default-off); chord→note containment measured net-negative
+      (repair 11, default-off).
+- [x] Grace-note misdetection on small-notehead render styles — fixed: the
+      staff-space-only threshold flagged one whole file as grace notes
+      (rhythm 0%); the test now also requires the head to be small relative
+      to the page's median notehead. Current totals: end-to-end
+      **91.8% / 78.8%**, ceiling 95.5% / 94.6%.
+- [ ] Worst remaining end-to-end files lose whole regions (`QmbkhcJML…`
+      55/39, `Qmbkw5eNmB…` 65/65) — needs missing system/measure recovery
+      from layer/note-cluster evidence.
+- [ ] Thin/small-glyph class group (`beamBroken`, `stem32`, `ledgerLines`,
+      `meterSig`, digit time signatures, and now the `clefG8va` "8"): frequent
+      or well-localized but low AP — needs `scale_ranges`/input-resolution
+      investigation rather than more data.
 - [ ] Double-dot detection is a bbox-width heuristic (width vs. staff space);
       unusual render scales could misclassify.
 - [ ] Unpitched/percussion notation (MEI `loc`-based notes) is not supported.

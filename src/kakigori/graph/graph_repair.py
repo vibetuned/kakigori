@@ -4,15 +4,20 @@ The GNN owns the genuinely relational decisions (temporal order, sync,
 which note a slur belongs to). This module owns the *geometric certainties*
 that measured recall showed the prediction path losing — sub-glyph
 containment (note→notehead→stem, mRest→restWhole, meterSig→digits,
-keySig→accidentals), staff-level context attachment, and orphaned events.
+keySig→accidentals), staff-level context attachment, orphaned events, and
+measure→staff cells (repair 10 — a single missed link there drops a whole
+measure of one staff and shifts spine alignment for the rest of the piece).
 
 Every repair is GUARDED: it only adds an edge when the child has no parent
 of the appropriate kind, so model predictions are never overridden. All
 geometry runs in the original annotation coordinate space.
 
-This is the first of the planned serializer-hardening iterations; later
-ones may recover missing systems from layer/measure evidence and missing
-measures from note clusters.
+Second hardening iteration (2026-07-17, measured per-config on
+validation-small, phase-5 stack): baseline 89.7/76.6 → structural-only
+guards for stems/flags/events +0.3/+0.5 → +measure→staff = **91.6/78.3**.
+Still open: recovering missing systems from layer/measure evidence and
+missing measures from note clusters (files where the GNN loses whole
+regions), staff-identity tracking for optimized layouts.
 """
 
 STEM_CLASSES = {"stem4", "stem8", "stem16", "stem32"}
@@ -52,7 +57,14 @@ def _y_gap(a, b):
     return 0.0
 
 
-ALL_REPAIRS = frozenset(range(1, 10))
+ALL_REPAIRS = frozenset(range(1, 13))
+
+# Production set. Repairs 11 (chord->note membership) and 12 (temporal chain
+# bridging) are implemented but excluded: on validation-small 11 measured
+# net-negative (pulled other-voice notes into chord bboxes, -1 to -2 rhythm
+# on 7 files vs +0.5 on 2) and 12 measured exactly zero (the serializer's
+# cx-order fallback already yields identical output). Keep them for ablation.
+DEFAULT_REPAIRS = frozenset(range(1, 11))
 
 
 # Empirically tuned on validation-small (see docs/graph.md): repair 1 uses
@@ -60,10 +72,16 @@ ALL_REPAIRS = frozenset(range(1, 10))
 # FIRST-MATCH owner assignment; all other repairs keep the conservative
 # any-parent guard. Both nearest-center owners and kind-guards everywhere
 # were tried and measured 6 points worse end-to-end.
-DEFAULT_LOOSE = frozenset(range(2, 10))
+DEFAULT_LOOSE = frozenset(range(2, 13))
+
+# Repairs whose loose guard tests STRUCTURAL parenthood only (a glyph whose
+# only predicted edge is temporal/sync still needs its owner): stems, flags,
+# orphan events. Everywhere else any-edge measured better — see the guard
+# comment inside repair_page_edges.
+STRUCT_GUARD_REPAIRS = frozenset({2, 3, 8})
 
 
-def repair_page_edges(page_nodes: list, edges: list, enabled=ALL_REPAIRS,
+def repair_page_edges(page_nodes: list, edges: list, enabled=DEFAULT_REPAIRS,
                       loose=DEFAULT_LOOSE) -> int:
     """Extend `edges` (list of (u_id, v_id, cls)) in place. Returns the
     number of edges added. `enabled` selects which numbered repairs run;
@@ -87,9 +105,17 @@ def repair_page_edges(page_nodes: list, edges: list, enabled=ALL_REPAIRS,
         return out
 
     id_to_class = {n["id"]: n["class"] for n in page_nodes}
-    has_parent = {v for _, v, _ in edges}
-    # Ownership means STRUCTURAL/MODIFIER parenthood; temporal (3) and sync
-    # (4/5) neighbors must not satisfy kind guards
+    # Two parent-notions, chosen per repair (measured on validation-small):
+    # - STRUCT_GUARD_REPAIRS test structural/modifier parenthood only —
+    #   edge-level diagnosis on the phase-5 stack showed stems/flags whose
+    #   only neighbor was a sync/temporal edge were never repaired, silently
+    #   costing their notes' durations (repairs 2/3) or timeline presence (8).
+    # - All other repairs keep the any-edge test: for co-located glyph pairs
+    #   and modifiers, ANY predicted edge means the model knows the glyph,
+    #   and a geometric re-attach measured worse (spurious accidentals via
+    #   repair 9, lost meter rows via 5/7).
+    has_parent_any = {v for _, v, _ in edges}
+    has_parent_struct = {v for _, v, cls in edges if cls in (1, 2)}
     struct_parents_of = {}
     for u, v, cls in edges:
         if cls in (1, 2):
@@ -100,7 +126,9 @@ def repair_page_edges(page_nodes: list, edges: list, enabled=ALL_REPAIRS,
         """Guard for repair `repair_no`: kind-specific by default, or the
         conservative any-parent check when the repair is in `loose`."""
         if repair_no in loose:
-            return child_id in has_parent
+            if repair_no in STRUCT_GUARD_REPAIRS:
+                return child_id in has_parent_struct
+            return child_id in has_parent_any
         return has_parent_kind(child_id, *kinds)
 
     def has_parent_kind(child_id, *kinds):
@@ -116,8 +144,9 @@ def repair_page_edges(page_nodes: list, edges: list, enabled=ALL_REPAIRS,
     def add(u, v, cls):
         nonlocal added
         edges.append((u["id"], v["id"], cls))
-        has_parent.add(v["id"])
+        has_parent_any.add(v["id"])
         if cls in (1, 2):
+            has_parent_struct.add(v["id"])
             struct_parents_of.setdefault(v["id"], set()).add(u["id"])
         added += 1
 
@@ -228,7 +257,7 @@ def repair_page_edges(page_nodes: list, edges: list, enabled=ALL_REPAIRS,
     for event in of(*EVENT_CLASSES):
         if 8 not in enabled:
             break
-        if event["id"] in has_parent:
+        if event["id"] in has_parent_struct:
             continue
         ex, ey = _center(event)
         owner = next((s for s in staves if _contains(s, ex, ey, pad=10.0)), None)
@@ -240,7 +269,7 @@ def repair_page_edges(page_nodes: list, edges: list, enabled=ALL_REPAIRS,
     for mod in of(*MODIFIER_CLASSES):
         if 9 not in enabled:
             break
-        if mod["id"] in has_parent:
+        if mod["id"] in has_parent_any:
             continue
         mx, my = _center(mod)
         best, best_d = None, float("inf")
@@ -251,5 +280,84 @@ def repair_page_edges(page_nodes: list, edges: list, enabled=ALL_REPAIRS,
                 best_d, best = d, a
         if best is not None and best_d < 60.0:
             add(best, mod, 2)
+
+    # --- 10. measure -> staff cells (geometric certainty: every measure of a
+    # system intersects every staff row; one missed link drops that staff's
+    # whole measure AND shifts spine alignment for the rest of the piece —
+    # the dominant single-edge failure in the phase-5 regression files).
+    measures = of("measure")
+    for staff in of("staff"):
+        if 10 not in enabled:
+            break
+        if has_parent_kind(staff["id"], "measure"):
+            continue
+        sx, sy = _center(staff)
+        owner = next((m for m in measures if _contains(m, sx, sy, pad=4.0)), None)
+        if owner is not None:
+            add(owner, staff, 1)
+
+    # --- 11. chord -> member notes (containment). A member note that loses
+    # this edge serializes as a separate event or not at all — either way the
+    # chord's pitch multiset is wrong.
+    chords = of("chord")
+    for note in notes:
+        if 11 not in enabled:
+            break
+        if has_parent_kind(note["id"], "chord"):
+            continue
+        nx, ny = _center(note)
+        owner = next((c for c in chords if _contains(c, nx, ny, pad=2.0)), None)
+        if owner is not None:
+            add(owner, note, 1)
+
+    # --- 12. temporal chain bridging. Missing Class-3 edges don't drop
+    # events (the serializer falls back to cx order) but they corrupt
+    # in-measure accidental carry, which follows event order. Bridge in cx
+    # order within a staff cell, only from an event with no outgoing to an
+    # event with no incoming temporal edge — model chains are never cut.
+    if 12 in enabled:
+        temporal_out = {u for u, _, cls in edges if cls == 3}
+        temporal_in = {v for _, v, cls in edges if cls == 3}
+        # Resolve each top-level event's staff by walking structural parents
+        # (staff -> layer -> beam/tuplet -> event); events owned by another
+        # event (chord members) stay out of the chain, like the serializer's
+        # top-level filter.
+        def staff_of(node_id, _seen=None):
+            if _seen is None:
+                _seen = set()
+            for p in struct_parents_of.get(node_id, ()):
+                if p in _seen:
+                    continue
+                _seen.add(p)
+                p_cls = id_to_class.get(p, "")
+                if p_cls == "staff":
+                    return p
+                if p_cls in EVENT_CLASSES:
+                    return None
+                found = staff_of(p, _seen)
+                if found is not None:
+                    return found
+            return None
+
+        by_staff = {}
+        for ev in of(*EVENT_CLASSES):
+            owner_evt = any(
+                id_to_class.get(p) in EVENT_CLASSES
+                for p in struct_parents_of.get(ev["id"], ())
+            )
+            if owner_evt:
+                continue
+            s = staff_of(ev["id"])
+            if s is not None:
+                by_staff.setdefault(s, []).append(ev)
+        for evs in by_staff.values():
+            evs.sort(key=lambda e: _center(e)[0])
+            for a, b in zip(evs, evs[1:]):
+                if a["id"] in temporal_out or b["id"] in temporal_in:
+                    continue
+                edges.append((a["id"], b["id"], 3))
+                temporal_out.add(a["id"])
+                temporal_in.add(b["id"])
+                added += 1
 
     return added

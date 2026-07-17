@@ -79,6 +79,14 @@ def parse_args():
     parser.add_argument("--resume", action="store_true", help="Auto-detect and resume from the last checkpoint.")
     parser.add_argument("--resume-from-checkpoint", type=str, default=None, help="Path to a specific checkpoint to resume from.")
     parser.add_argument("--fine-tune", type=str, default=None, help="Path to a checkpoint to fine-tune from.")
+    parser.add_argument(
+        "--old-num-classes", type=int, default=None,
+        help="Class-expansion fine-tune: the fine_tune checkpoint was trained with this "
+             "many glyph classes. Loads only its gnn.* weights (the detector comes fresh "
+             "from --detector-checkpoint) and widens class_embedding to the current class "
+             "count. New rows init from `new_class_templates: {new: existing}` in the yaml, "
+             "or the mean of the old rows.",
+    )
 
     parser.set_defaults(**yaml_defaults)
     args, unknown = parser.parse_known_args(remaining_argv)
@@ -183,7 +191,46 @@ def main():
         n_vision = sum(p.numel() for p in detector.parameters() if p.requires_grad)
         logger.info(f"Vision unfreeze='{args.unfreeze}': {n_vision/1e6:.1f}M vision params train at lr={args.vision_lr}")
 
-    if args.fine_tune:
+    if args.fine_tune and args.old_num_classes and args.old_num_classes != num_classes:
+        # Class-expansion warm start: unlike the vision retrain (new OUTPUT head
+        # channels, two-stage freeze), GNN classes are INPUTS — only the
+        # class_embedding table changes shape. The old wrapper's detector/neck
+        # weights are stale relative to the new --detector-checkpoint, so only
+        # the gnn.* weights carry over.
+        logger.info(
+            f"Class-expansion load from {args.fine_tune}: "
+            f"{args.old_num_classes} -> {num_classes} classes (gnn.* weights only)"
+        )
+        ckpt = Path(args.fine_tune)
+        if ckpt.is_dir():
+            last = get_last_checkpoint(str(ckpt))
+            if last is not None:
+                ckpt = Path(last)
+        weights = ckpt / "model.safetensors" if ckpt.is_dir() else ckpt
+        from safetensors.torch import load_file
+        state = load_file(weights, device="cpu")
+        gnn_state = {k[len("gnn."):]: v for k, v in state.items() if k.startswith("gnn.")}
+
+        old_emb = gnn_state["class_embedding.weight"]
+        assert old_emb.shape[0] == args.old_num_classes, (
+            f"checkpoint embedding has {old_emb.shape[0]} rows, expected {args.old_num_classes}"
+        )
+        new_emb = model_wrapper.gnn.class_embedding.weight.detach().clone()
+        new_emb[: args.old_num_classes] = old_emb
+        templates = getattr(args, "new_class_templates", None) or {}
+        for i in range(args.old_num_classes, num_classes):
+            name = class_list[i]
+            template = templates.get(name)
+            if template:
+                new_emb[i] = old_emb[class_list.index(template)]
+                logger.info(f"  '{name}' embedding row initialized from '{template}'")
+            else:
+                new_emb[i] = old_emb.mean(dim=0)
+                logger.info(f"  '{name}' embedding row initialized from mean of old rows")
+        gnn_state["class_embedding.weight"] = new_emb
+        model_wrapper.gnn.load_state_dict(gnn_state)
+        logger.info(f"  Loaded GNN weights: {weights}")
+    elif args.fine_tune:
         logger.info(f"Loading wrapper weights from {args.fine_tune} for fine-tuning...")
         # Warm-start the whole wrapper (detector + RoI + GNN) from a previous
         # phase's HF checkpoint dir or weights file — the phase curriculum

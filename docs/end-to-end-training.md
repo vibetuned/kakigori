@@ -125,7 +125,7 @@ uv run eval-model --checkpoint checkpoints/run_NNN \
                   --img-dir <val>/imgs --ann-dir <val>/annotations
 ```
 
-This prints per-class mAP/IoU (grouped via `conf/hierarchy.json`). Two
+This prints per-class mAP/IoU (grouped via `conf/hierarchy.json`). Three
 distinct causes of a weak class, with different remedies:
 
 - **Rare in the corpus** (few training examples) → generate synthetic data
@@ -133,6 +133,15 @@ distinct causes of a weak class, with different remedies:
 - **Badly annotated** (extraction bug, wrong bbox) → inspect Stage-2 output
   with `visualize-dataset` for that class first; more data won't fix wrong
   boxes.
+- **Below the input's resolving power** → if the class differs from a common
+  one only by a few pixels at `input_size` 640, data stops helping once
+  localization is solid. Diagnose by matching predictions to GT boxes: when
+  every GT box has a high-IoU prediction but the class votes go to the
+  look-alike, you've hit this. Seen with `clefG8va` (a ~3 px "8" above an
+  otherwise identical treble clef): three synthetic rounds took it
+  0.019 → 0.117 → 0.317 and plateaued while its data exceeded `clefG8vb`'s
+  (which sits at 0.986). The fix is input resolution / `scale_ranges` work,
+  not a fourth round.
 
 ### 3c. Generate targeted synthetic data
 
@@ -160,6 +169,31 @@ the first training step (seen on newer GPUs) is an environment problem, not
 a model problem — upgrade the pinned wheels with
 `uv lock --upgrade-package torch --upgrade-package torchvision && uv sync`.
 
+### 3e. Class expansion (adding glyphs after a trained run)
+
+When classes are appended to `conf/config.json` (see the README's
+"how to add a glyph"), widen the newest consolidated checkpoint instead of
+retraining from scratch:
+
+```
+uv run retrain-model --train-config conf/update_model.yaml   # old_num_classes: N
+```
+
+`retrain-model` copies the old head weights positionally (hence *append*
+classes, never reorder), gives the new slots the focal bias prior, and runs a
+two-stage schedule: frozen backbone at `lr` to fit the new heads, then full
+unfreeze at `lr_unfrozen` (stage-2 checkpoints land in `run_NNN/stage2/`;
+both stages crash-resume independently). Before launching, make sure **every
+annotation source actually contains the new labels** — real *and* synthetic:
+a synthetic set extracted before the new SMuFL mapping contributes zero
+signal even if its SVGs contain the glyph, and re-extracting is cheap
+(`rm -rf <set>/annotations`, then `extract-annotations` — no re-render
+needed). Then re-enter the 3b–3d loop for the new classes. Reference run:
+107 → 109 (`clefG8vb`/`clefG8va`, 2026-07-17): expansion `run_004` valsmall
+mAP@.50 0.704 (vs 0.687 before — no regression), octave-boost consolidations
+`run_005`/`run_006` → 0.724, `clefG8vb` 0.986, `clefG8va` capped at 0.317 by
+input resolution (see 3b).
+
 ## Stage 4 — Train the GNN (phased)
 
 The GNN trains in four phases that release one constraint at a time — the
@@ -179,9 +213,22 @@ so `--resume` targets it rather than the previous run):
 | 2 | `conf/train_gnn_phase2.yaml` | PANet adapts as a vision→graph adaptation layer |
 | 3 | `conf/train_gnn_phase3.yaml` | in reserve — only if phase 2 plateaus early |
 | 4 | `conf/train_gnn_phase4.yaml` | GT-box noise, narrows the gap to detector boxes |
+| 5 | `conf/train_gnn_phase5.yaml` | class expansion: after a detector class change (3e) |
 
 Update each phase file's `fine_tune:` to point at the previous phase's
 actual run directory before launching.
+
+Phase 5 exists because a class change ripples differently through the GNN
+than through the detector: glyph classes are GNN *inputs* (a
+`class_embedding` row each), not outputs, so there is no head to widen and
+no frozen stage — `old_num_classes:` in the yaml makes `train-gnn` load only
+the old checkpoint's `gnn.*` weights, widen the embedding, and seed each new
+row from a look-alike class via `new_class_templates:` (octave clefs copy
+`clefG` — same structural role). The old wrapper's adapted neck is
+deliberately dropped: the detector underneath moved, and re-adapting the
+neck to it (with `unfreeze: neck` + the phase-4 jitter) is the actual work
+of this phase. Regenerate annotations *and* graphs (Stage 2) before it so
+the new classes exist as nodes.
 
 Common settings: `detector_checkpoint:` → the Stage-3 consolidation run;
 `img_dir`/`ann_dir`/`graph_dir` → the Stage-2 triplet; `config:` stays
@@ -250,19 +297,35 @@ prefix-match `"noteheadBlack"`; that single bug cost 42 pitch points).
 Repairs are individually toggleable (`enabled`/`loose`) for ablations;
 `--no-repair` gives the raw-GNN baseline.
 
-Reference numbers on `data/validation-small` (GT boxes, phase-4 GNN at
-edge macro-F1 0.86): ceiling (GT edges) 95.5% pitch / 94.3% rhythm;
-end-to-end **89.6% / 76.6%** (median file 97.9% pitch) — up from
-39.5% / 23.2% without repairs. The residual gap is mostly rhythm: broken
-temporal chains and duration context, plus the known ceiling residue
-(tablature, optimized-layout ensemble scores).
+Reference numbers on `data/validation-small` (GT boxes; ceiling with GT
+edges 95.5% pitch / 94.3% rhythm): the 107-class stack reached 89.6% /
+76.6% (median file 97.9% pitch), up from 39.5% / 23.2% without repairs.
+The 109-class stack (detector `run_006` + phase-5 GNN at f1_macro 0.856)
+initially landed at 89.7% / 76.6% with individual files swinging up to
+±26 pitch points; edge-level diagnosis of those swings (compare predicted
+edges against the graph `.pt` labels, per relation family) attributed them
+to missed `measure→staff` links and stems/flags blocked from repair by the
+any-edge guard, and the second repair iteration (repair 10 + selective
+structural guards) brought the stack to 91.6% / 78.3%. Two measured
+negatives worth remembering: chord→note recovery by containment pulls in
+other-voice notes (net-negative, default-off as repair 11), and temporal
+chain bridging changes nothing (the serializer's cx fallback already
+orders identically — default-off as repair 12). A serializer fix on top
+(grace detection now relative to the page's median notehead height, not
+just staff space — one small-notehead render style serialized a whole file
+as grace notes) puts the current stack at **91.8% / 78.8%** against a
+ceiling of 95.5% / 94.6%. The residual gap is mostly rhythm on files where
+the GNN loses whole regions, plus the known ceiling residue (tablature,
+optimized-layout ensemble scores).
 
 > **Roadmap:** `MinimalHumdrumSerializer` stays the minimal variant and
-> `graph_repair` is the first hardening iteration. Next candidates:
-> bridging broken temporal chains geometrically (rhythm is now the gap),
-> recovering missing systems/measures from layer- and note-cluster
-> evidence, and staff-identity tracking for optimized layouts.
-> `validate-predictions` keeps both stages swappable for A/B comparison.
+> `graph_repair` carries the hardening iterations (two so far). Next
+> candidates: recovering missing systems/measures from layer- and
+> note-cluster evidence (the worst remaining files lose whole regions) and
+> staff-identity tracking for optimized layouts. Temporal bridging is done
+> and measured: no effect (repair 12, default-off). The rhythm-0% outlier
+> is fixed (grace detection vs the page's median notehead height).
+> `validate-predictions` keeps stages swappable for A/B.
 
 Also useful: `graph/eval.py` (SER/CER/LER on kern text) for
 sequence-level comparison.

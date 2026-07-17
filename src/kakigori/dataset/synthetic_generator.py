@@ -363,6 +363,40 @@ def apply_clef_changes(score):
     return score
 
 
+# Overridable per batch via --octave-rate / --octave-8va-weight (see main)
+OCTAVE_CLEF_RATE = 0.40
+OCTAVE_8VA_WEIGHT = 0.65
+
+
+def apply_octave_clefs(score):
+    """Switch a treble part onto an octave treble clef (8va/8vb) partway
+    through — feeds the rare clefG8va/clefG8vb classes. Weighted toward 8va,
+    which barely occurs in the real corpus. The clef re-renders at every
+    following system start, so one change yields several instances."""
+    for part in score.parts:
+        measures = list(part.getElementsByClass(music21.stream.Measure))
+        if len(measures) < 4 or random.random() > OCTAVE_CLEF_RATE:
+            continue
+        current = part.recurse().getElementsByClass(music21.clef.Clef).first()
+        # Treble8v*Clef subclasses TrebleClef — octaveChange guards re-application
+        if not isinstance(current, music21.clef.TrebleClef) or current.octaveChange:
+            continue
+        new_clef = (
+            music21.clef.Treble8vaClef()
+            if random.random() < OCTAVE_8VA_WEIGHT
+            else music21.clef.Treble8vbClef()
+        )
+        idx = random.randint(1, max(1, len(measures) // 2))
+        try:
+            measures[idx].insert(0.0, new_clef)
+            if random.random() < 0.4:
+                back = random.randint(idx + 1, len(measures) - 1)
+                measures[back].insert(0.0, music21.clef.TrebleClef())
+        except music21.exceptions21.StreamException:
+            pass
+    return score
+
+
 def mutate_score(score):
     """Master pipeline for orchestrating the mutations safely."""
     score = apply_rhythmic_mutations(score)
@@ -370,6 +404,7 @@ def mutate_score(score):
     score = apply_spanners(score)
     score = apply_barlines(score)
     score = apply_clef_changes(score)
+    score = apply_octave_clefs(score)
 
     try:
         for part in score.parts:
@@ -408,6 +443,12 @@ def _process_file_worker(args):
     return process_file(mxl_path, output_dir)
 
 
+def _init_worker(octave_rate, octave_8va_weight):
+    global OCTAVE_CLEF_RATE, OCTAVE_8VA_WEIGHT
+    OCTAVE_CLEF_RATE = octave_rate
+    OCTAVE_8VA_WEIGHT = octave_8va_weight
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Generate synthetic dataset by coercing musicXML files."
@@ -418,6 +459,18 @@ def main():
     )
     parser.add_argument(
         "--num_files", type=int, default=1000, help="Number of files to generate"
+    )
+    parser.add_argument(
+        "--octave-rate",
+        type=float,
+        default=OCTAVE_CLEF_RATE,
+        help="Per-part probability of switching onto an octave treble clef",
+    )
+    parser.add_argument(
+        "--octave-8va-weight",
+        type=float,
+        default=OCTAVE_8VA_WEIGHT,
+        help="Share of octave clefs that are 8va (rest are 8vb)",
     )
     args = parser.parse_args()
 
@@ -444,7 +497,10 @@ def main():
         json.dump(SVG_TO_MUSIC21_MAPPING, f, indent=2)
 
     with multiprocessing.Pool(
-        processes=multiprocessing.cpu_count(), maxtasksperchild=10
+        processes=multiprocessing.cpu_count(),
+        maxtasksperchild=10,
+        initializer=_init_worker,
+        initargs=(args.octave_rate, args.octave_8va_weight),
     ) as pool:
         tasks = [(f, output_path) for f in mxl_files]
         results = pool.imap_unordered(_process_file_worker, tasks)
