@@ -1,0 +1,42 @@
+# LITE detector — stage B of the 0.2.0 roadmap (docs/roadmap-0.2.0.md).
+# 99 classes (conf-lite/config.json), from scratch on the piano/single-staff
+# corpus (data/train-lite: 9,699 pages from 9,500 curated scores).
+# Gate: mAP >= the full model on shared classes, with structure classes
+# (system / system-staff / measure / staff) materially better — they drove
+# the detection-driven failures that bbox_repair patches.
+
+# Data args
+img_dir: "data/train-lite/imgs"
+ann_dir: "data/train-lite/annotations"
+synthetic_img_dir: "data/synthetic-boost/imgs"
+synthetic_ann_dir: "data/synthetic-boost/annotations"
+use_synthetic: false
+synthetic_ratio: 4
+config: "conf-lite/config.json"
+input_size: 640
+num_workers: 4
+
+# Model args
+use_bottom_up: false
+out_indices: [0, 1, 2]
+
+# Trainer args
+reg_weight: 5.0
+cls_weight: 1.0
+max_gamma: 4.0    # Final gamma for focal loss
+base_gamma: 2.0   # Initial gamma for focal loss
+scale_ranges: null  # scale/resolution changes ruled out by docs/experiments/vision
+
+# Training args
+output_dir: "checkpoints_lite"
+logging_dir: "runs_lite"
+epochs: 40
+batch_size: 4
+lr: 0.0001
+logging_steps: 50
+save_steps: 500
+max_steps: -1
+seed: 42
+resume: false
+resume_from_checkpoint: null
+fine_tune: null

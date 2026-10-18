@@ -257,7 +257,7 @@ def main():
         logging_first_step=True,
         lr_scheduler_type="cosine",
         warmup_ratio=0.1,
-        fp16=True,
+        bf16=True,  # native on Ampere+; fp16's loss scaler only added overhead
         dataloader_pin_memory=True,
         dataloader_num_workers=4,  # PNG decode + letterbox off the main process
     )

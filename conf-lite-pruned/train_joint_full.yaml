@@ -1,0 +1,30 @@
+# JOINT model — stage C variant B: FULL backbone + neck + heads + GNN train.
+# L = det_weight*L_det (page) + edge_weight*mean(L_edge)
+# (per system, accumulated then backpropagated together). Warm start from
+# the lite GNN phase-2 wrapper (its detector copy carries the adapted neck).
+# Loss scales at start: L_det ~1.2, L_edge ~0.01 -> weights balance them
+# roughly 50:50 while keeping detection as a live anchor.
+img_dir: "data/train-lite/imgs"
+ann_dir: "data/train-lite/annotations"
+graph_dir: "data/train-lite/graphs"
+config: "conf-lite-pruned/config.json"
+detector_checkpoint: "checkpoints_lite/run_003_pruned"
+fine_tune: "checkpoints_gnn_lite/run_002_pruned"
+unfreeze: "full"
+vision_lr: 0.00001
+head_lr: 0.00003
+box_jitter: 1.5
+det_weight: 0.5
+edge_weight: 10.0
+cls_weight: 1.0
+reg_weight: 5.0
+max_gamma: 4.0   # v6: match the vision recipe — peak sharpness for 1-cell-wide classes (duplicate-peak diagnosis)
+output_dir: "checkpoints_joint"
+logging_dir: "runs_joint"
+epochs: 15
+batch_size: 2
+lr: 0.0003
+logging_steps: 10
+eval_steps: 5000
+save_steps: 250
+seed: 42

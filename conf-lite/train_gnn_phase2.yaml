@@ -1,0 +1,28 @@
+# LITE GNN — PHASE 2: PANet neck adapts as a vision→graph layer on top of
+# the converged phase-1 head (docs/graph.md curriculum).
+# Phase-1 reference (run_001, 2026-07-18): structural 0.934, modifier 0.777,
+# temporal 0.822, simultaneity 0.467 (scarce: grand-staff minority only),
+# sync-text 0 by construction (no syl/verse in lite), 6-class macro 0.665.
+
+img_dir: "data/train-lite/imgs"
+ann_dir: "data/train-lite/annotations"
+graph_dir: "data/train-lite/graphs"
+config: "conf-lite/config.json"
+
+detector_checkpoint: "checkpoints_lite/run_003"
+
+unfreeze: "neck"
+vision_lr: 0.00001
+box_jitter: 0.0
+fine_tune: "checkpoints_gnn_lite/run_001"
+
+output_dir: "checkpoints_gnn_lite"
+logging_dir: "runs_gnn_lite"
+epochs: 15
+batch_size: 2
+lr: 0.0003
+logging_steps: 10
+eval_steps: 2500
+save_steps: 250
+max_steps: -1
+seed: 42

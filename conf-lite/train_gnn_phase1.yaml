@@ -1,0 +1,28 @@
+# LITE GNN — PHASE 1: GATv2 edge classifier from scratch on the lite corpus,
+# frozen lite detector, ground-truth boxes (docs/graph.md curriculum).
+# 99 classes (conf-lite), 9,699 pages / 9,500 graphs. Note: lite has no
+# syl/verse, so edge class 4 (sync-text) never occurs — f1_sync_text will
+# read 0 by construction; judge on the other classes.
+# Reference: the full model's phase 1 reached f1_macro 0.825.
+
+img_dir: "data/train-lite/imgs"
+ann_dir: "data/train-lite/annotations"
+graph_dir: "data/train-lite/graphs"
+config: "conf-lite/config.json"
+
+detector_checkpoint: "checkpoints_lite/run_003"
+
+unfreeze: "none"
+vision_lr: 0.00001
+box_jitter: 0.0
+
+output_dir: "checkpoints_gnn_lite"
+logging_dir: "runs_gnn_lite"
+epochs: 30
+batch_size: 2
+lr: 0.001
+logging_steps: 10
+eval_steps: 2500
+save_steps: 250
+max_steps: -1
+seed: 42

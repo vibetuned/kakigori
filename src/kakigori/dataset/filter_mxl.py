@@ -52,8 +52,55 @@ def get_classes_from_svg(svg_content: str) -> set:
     return classes
 
 
-def check_mxl_for_classes(mxl_path: Path, target_classes: set) -> bool:
-    """Renders MXL to SVG in memory and checks if any target class is present."""
+def _lite_xml_ok(xml: str) -> bool:
+    """Cheap string-level gates for the LITE corpus — run before any
+    rendering so a 250k-file scan stays tractable.
+
+    Keeps: exactly one part, laid out on a single staff or a piano grand
+    staff (2 staves). Rejects tablature/percussion, and broken sources
+    whose alterations exist only gesturally (many <alter> values, zero
+    printed <accidental>, no key signature to explain them — such pitches
+    are not on the page and no OMR can recover them)."""
+    if xml.count("<score-part ") != 1:
+        return False
+    if "<staves>" in xml:
+        if "<staves>2</staves>" not in xml:
+            return False
+        for n in ("3", "4", "5"):
+            if f"<staves>{n}</staves>" in xml:
+                return False
+    if ">TAB<" in xml or "percussion" in xml.lower():
+        return False
+    n_alter = xml.count("<alter>") - xml.count("<alter>0<")
+    if n_alter > 10 and xml.count("<accidental") == 0:
+        import re
+        fifths = re.findall(r"<fifths>(-?\d+)</fifths>", xml)
+        if not any(f != "0" for f in fifths):
+            return False
+
+    # More than one voice on a staff is usually a MuseScore visual-editor
+    # artifact in this corpus (and breaks the LITE track's linear temporal
+    # chains) — reject any staff carrying two distinct voice numbers
+    try:
+        import xml.etree.ElementTree as ET
+        root = ET.fromstring(xml.encode("utf-8"))
+        for part in root.iter("part"):
+            staff_voices = {}
+            for note in part.iter("note"):
+                v = note.findtext("voice") or "1"
+                s = note.findtext("staff") or "1"
+                staff_voices.setdefault(s, set()).add(v)
+            if any(len(vs) > 1 for vs in staff_voices.values()):
+                return False
+    except ET.ParseError:
+        return False
+    return True
+
+
+def check_mxl_for_classes(mxl_path: Path, target_classes: set,
+                          max_pages: int = 0, lite: bool = False) -> bool:
+    """Renders MXL to SVG in memory and checks if any target class is
+    present; optionally gates on page count and the LITE corpus rules."""
     if not target_classes:
         return False
 
@@ -75,18 +122,38 @@ def check_mxl_for_classes(mxl_path: Path, target_classes: set) -> bool:
                 return False
             data = zf.read(xml_name).decode("utf-8")
 
+        if lite and not _lite_xml_ok(data):
+            return False
+
         if not tk.loadData(data):
             return False
 
         page_count = tk.getPageCount()
+        if max_pages and page_count > max_pages:
+            return False
+        matched = False
         for page in range(1, page_count + 1):
             svg = tk.renderToSVG(page)
+
+            # Corrupted layouts render the whole piece as an unreadable
+            # smear. Two flavors, two signatures: no-line-break sources cram
+            # absurdly many measures into one system; single-measure sources
+            # (no barlines encoded at all) cram the whole piece into ONE
+            # measure with hundreds of notes overlapping.
+            if lite:
+                n_sys = svg.count('class="system"')
+                n_meas = svg.count('class="measure"')
+                n_note = svg.count('class="note"')
+                if n_sys and n_meas / n_sys > 15:
+                    return False
+                if n_meas and n_note / n_meas > 40:
+                    return False
+
             found_classes = get_classes_from_svg(svg)
-
             if target_classes.intersection(found_classes):
-                return True
+                matched = True
 
-        return False
+        return matched
 
     except zipfile.BadZipFile:
         pass
@@ -96,18 +163,18 @@ def check_mxl_for_classes(mxl_path: Path, target_classes: set) -> bool:
     return False
 
 
-def _check_isolated_func(q, m_path, target_classes):
+def _check_isolated_func(q, m_path, target_classes, max_pages, lite):
     """Isolated function to prevent verovio crashes from taking down main process."""
-    result = check_mxl_for_classes(m_path, target_classes)
+    result = check_mxl_for_classes(m_path, target_classes, max_pages, lite)
     q.put(result)
 
 
 def _check_isolated(args):
     """Spawns process for single file check."""
-    mxl_path, target_classes = args
+    mxl_path, target_classes, max_pages, lite = args
     q = multiprocessing.Queue()
     p = multiprocessing.Process(
-        target=_check_isolated_func, args=(q, mxl_path, target_classes)
+        target=_check_isolated_func, args=(q, mxl_path, target_classes, max_pages, lite)
     )
     p.start()
     p.join(timeout=15)  # 15s timeout
@@ -154,6 +221,25 @@ def main():
         default=100,
         help="Maximum number of files to copy (default: 100)",
     )
+    parser.add_argument(
+        "--max-pages",
+        type=int,
+        default=0,
+        help="Reject scores rendering to more than N pages (0 = no limit)",
+    )
+    parser.add_argument(
+        "--lite",
+        action="store_true",
+        help="LITE corpus gates: exactly one part on a single staff or a "
+             "piano grand staff; rejects tablature/percussion and broken "
+             "sources with gestural-only accidentals",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Shuffle seed (corpus dirs are ordered; sampling must not be)",
+    )
     args = parser.parse_args()
 
     input_path = Path(args.input_dir)
@@ -177,6 +263,11 @@ def main():
         logger.info(f"No .mxl files found in {input_path}")
         return
 
+    # Standard library imports
+    import random
+
+    random.Random(args.seed).shuffle(mxl_files)
+
     logger.info(
         f"Found {len(mxl_files)} MXL files to process. Target: {args.num_files} files."
     )
@@ -187,7 +278,7 @@ def main():
     # Standard library imports
     from concurrent.futures import ThreadPoolExecutor
 
-    tasks = [(f, target_classes) for f in mxl_files]
+    tasks = [(f, target_classes, args.max_pages, args.lite) for f in mxl_files]
 
     with ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
         futures = {executor.submit(_check_isolated, task): task[0] for task in tasks}

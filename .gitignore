@@ -13,10 +13,8 @@ wheels/
 .ipynb_checkpoints/
 
 /data/
-/checkpoints/
-/checkpoints_gnn/
-/runs/
-/runs_gnn/
+/checkpoints**
+/runs**
 .rsyncignore
 /inference_out/
 /docs/_book/
@@ -26,3 +24,4 @@ wheels/
 /logs/
 **.log
 /out/
+/examples/

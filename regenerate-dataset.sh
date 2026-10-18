@@ -20,6 +20,8 @@ set -euo pipefail
 
 DATA_DIR="${1:-data/train-small}"
 WITH_GRAPHS="${WITH_GRAPHS:-0}"
+# Conf directory: point CONF at conf-lite for the LITE dataset track
+CONF="${CONF:-conf}"
 
 log() { echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*"; }
 
@@ -55,7 +57,7 @@ N_IMGS=$(ls "$DATA_DIR/imgs" | wc -l)
 for attempt in 1 2 3; do
     uv run extract-annotations \
         --svg_dir "$DATA_DIR/svgs" --img_dir "$DATA_DIR/imgs" \
-        --out_dir "$DATA_DIR/annotations"
+        --out_dir "$DATA_DIR/annotations" --config "$CONF/config.json"
     N_ANN=$(ls "$DATA_DIR/annotations" 2>/dev/null | wc -l)
     if [ "$N_ANN" -ge "$N_IMGS" ]; then
         break
@@ -70,7 +72,7 @@ if [ "$WITH_GRAPHS" = "1" ]; then
 
     log "Stage 4: generating ground-truth graphs..."
     uv run generate-graphs "$DATA_DIR/mei" "$DATA_DIR/annotations" \
-        --out_dir "$DATA_DIR/graphs" --roles_file conf/structure.json
+        --out_dir "$DATA_DIR/graphs" --roles_file "$CONF/structure.json"
 else
     log "Stages 3-4 skipped (set WITH_GRAPHS=1 to also export MEI + graphs)."
 fi

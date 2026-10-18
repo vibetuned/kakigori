@@ -10,11 +10,17 @@ from torch.utils.data import Dataset, DataLoader
 
 
 class OMRFullPageDataset(Dataset):
-    def __init__(self, img_dir, json_dir, graph_dir, class_list, input_size=640):
+    def __init__(self, img_dir, json_dir, graph_dir, class_list, input_size=640,
+                 class_remap=None):
         self.img_dir = Path(img_dir)
         self.json_dir = Path(json_dir)
         self.graph_dir = Path(graph_dir)
         self.class_to_idx = {c: i for i, c in enumerate(class_list)}
+        # Optional annotation-class -> config-class mapping (e.g. noise
+        # classes merged into a single "sink" class). Remapped classes are
+        # never graph nodes: they lose their edges and re-enter only as
+        # isolated detection-supervised nodes.
+        self.class_remap = class_remap or {}
         # The detector was trained on letterboxed input_size images; feeding
         # full-resolution pages would put its features out of distribution
         # (and cost ~15x the compute)
@@ -80,9 +86,41 @@ class OMRFullPageDataset(Dataset):
         for i, node_id in enumerate(node_ids):
             if node_id in ann_map:
                 ann = ann_map[node_id]
+                cls = ann["class"]
+                # Classes absent from the config (pruned) or remapped to a
+                # noise class must not stay graph nodes: skipping them here
+                # also drops their edges via the keep mask below.
+                if cls not in self.class_to_idx or cls in self.class_remap:
+                    continue
                 boxes.append(ann["bbox"])
-                labels.append(self.class_to_idx[ann["class"]])
+                labels.append(self.class_to_idx[cls])
                 valid_node_indices.append(i)
+
+        # Harmonize the node space with detection: append every annotation
+        # that never became a graph node as an ISOLATED node — present in
+        # the box/label set, referenced by no GT edge, so every candidate
+        # touching it trains toward class 0. Without this, such classes
+        # (a) get their neck features sacrificed during joint training
+        # (barlineSingle 0.99 -> 0.10: no edge-loss pressure protects them)
+        # and (b) appear at inference (detections include them) despite
+        # never being seen in edge training. ONLY classes whose ids never
+        # appear in the graph node space qualify: 'note' shares its xml:id
+        # with its notehead (the graph node exists, shadowed), and notes
+        # MUST keep edge extrapolation at inference — teaching
+        # note-labeled -> class 0 would suppress the serializer's event
+        # anchors. Appended AFTER the graph-matched nodes so edge index
+        # remapping is untouched. Membership is tested against the KEPT
+        # graph nodes (not raw node_ids) so classes dropped from the graph
+        # by class_remap fall through to isolation as their remapped class.
+        kept_node_ids = {node_ids[i] for i in valid_node_indices}
+        for ann in json_data.get("annotations", []):
+            cls = self.class_remap.get(ann.get("class"), ann.get("class"))
+            if cls not in self.class_to_idx:
+                continue
+            if ann.get("id") in kept_node_ids:
+                continue
+            boxes.append(ann["bbox"])
+            labels.append(self.class_to_idx[cls])
 
         # Remap boxes into letterboxed canvas coordinates
         if boxes:
@@ -112,10 +150,29 @@ class OMRFullPageDataset(Dataset):
         else:
             edges_tensor = torch.empty((0, 3), dtype=torch.long)
 
+        # Full annotation set for DETECTION supervision (joint training).
+        # The graph-filtered boxes above exclude classes that never become
+        # graph nodes (note anchors, barlines): supervising detection on
+        # them actively unlearned those classes (note AP 0.93 -> 0.01).
+        det_boxes, det_labels = [], []
+        for ann in json_data.get("annotations", []):
+            cls = self.class_remap.get(ann.get("class"), ann.get("class"))
+            if cls in self.class_to_idx:
+                det_boxes.append(ann["bbox"])
+                det_labels.append(self.class_to_idx[cls])
+        if det_boxes:
+            det_boxes_tensor = torch.tensor(det_boxes, dtype=torch.float32)
+            det_boxes_tensor[:, [0, 2]] = det_boxes_tensor[:, [0, 2]] * scale + pad_x
+            det_boxes_tensor[:, [1, 3]] = det_boxes_tensor[:, [1, 3]] * scale + pad_y
+        else:
+            det_boxes_tensor = torch.empty((0, 4), dtype=torch.float32)
+
         return {
             "image": img_tensor,
             "boxes": boxes_tensor,
             "labels": labels_tensor,
             "edges": edges_tensor,
+            "det_boxes": det_boxes_tensor,
+            "det_labels": torch.tensor(det_labels, dtype=torch.long),
             "file_name": sample["img"].name,
         }

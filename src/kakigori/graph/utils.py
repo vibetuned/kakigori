@@ -21,13 +21,19 @@ def omr_collate_fn(batch):
     # but for full pages it is often safer to just return the list.
     # Assuming your model handles a list of image tensors:
 
-    return {
+    out = {
         "images": images,  # List of (3, H, W) tensors
         "boxes": boxes_list,  # List of (N, 4) tensors
         "labels": labels_list,  # List of (N) tensors
         "edges": edges_list,  # List of (E, 3) tensors
         "file_names": file_names,
     }
+    # Full annotation boxes for detection supervision (joint training);
+    # absent in older cached items, so pass through only when present
+    if batch and "det_boxes" in batch[0]:
+        out["det_boxes"] = [item["det_boxes"] for item in batch]
+        out["det_labels"] = [item["det_labels"] for item in batch]
+    return out
 def split_into_systems(abs_boxes, labels, gt_edges, class_to_idx):
     """
     Groups full-page boxes into systems and re-indexes the ground truth edges.
