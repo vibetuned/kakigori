@@ -8,20 +8,20 @@ from pathlib import Path
 import torch
 from tqdm import tqdm
 
-# Local imports (assuming your combined class is in serializers.py)
-from .serializers import MinimalHumdrumSerializer
+from musicset.views.kern import MinimalHumdrumSerializer
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
-def _load_and_resolve_nodes(json_dir: Path, json_filenames: list) -> tuple[dict, list[set]]:
+def _load_and_resolve_nodes(json_dir: Path, json_filenames: list) -> tuple[dict, list[list]]:
     """Load JSON annotation files in order, resolving pseudo-ID collisions.
 
     Returns:
         node_map: dict mapping resolved node IDs to their annotation dicts.
-        page_node_ids: list of sets, one per JSON file, tracking which IDs belong to each page.
+        page_node_ids: list of id lists, one per JSON file, in annotation order
+            (a set here made the serializer's input order follow string hashing).
     """
     node_map = {}
     page_node_ids = []
@@ -30,13 +30,13 @@ def _load_and_resolve_nodes(json_dir: Path, json_filenames: list) -> tuple[dict,
         json_path = json_dir / json_filename
         if not json_path.exists():
             logger.warning(f"Missing JSON annotation: {json_filename}")
-            page_node_ids.append(set())
+            page_node_ids.append([])
             continue
 
         with open(json_path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
-        page_ids = set()
+        page_ids = []
         for ann in data.get("annotations", []):
             if "id" not in ann:
                 continue
@@ -47,17 +47,17 @@ def _load_and_resolve_nodes(json_dir: Path, json_filenames: list) -> tuple[dict,
                 pseudo_id = f"{base_id}_{ann['class']}_{len(node_map)}"
                 ann["id"] = pseudo_id
                 node_map[pseudo_id] = ann
-                page_ids.add(pseudo_id)
+                page_ids.append(pseudo_id)
             else:
                 node_map[base_id] = ann
-                page_ids.add(base_id)
+                page_ids.append(base_id)
 
         page_node_ids.append(page_ids)
 
     return node_map, page_node_ids
 
 
-def _build_page_nodes(node_map: dict, page_ids: set, valid_node_ids: set) -> list:
+def _build_page_nodes(node_map: dict, page_ids: list, valid_node_ids: set) -> list:
     """Filter a page's nodes to those present in the graph and enrich with center coordinates."""
     processed = []
     for node_id in page_ids:
@@ -90,11 +90,8 @@ def process_single_graph(graph_path: Path, json_dir: Path, out_dir: Path, node_r
             return False
 
         # 3. Initialize serializer once and feed pages one at a time
-        serializer = MinimalHumdrumSerializer(
-            edge_index=edge_index,
-            edge_predictions=edge_predictions,
-            node_roles=node_roles,
-            pyg_node_ids=graph_data["node_ids"],
+        serializer = MinimalHumdrumSerializer.from_pyg(
+            edge_index, edge_predictions, node_roles, graph_data["node_ids"]
         )
 
         for page_ids in page_node_ids:

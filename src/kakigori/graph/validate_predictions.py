@@ -12,7 +12,7 @@ from tqdm import tqdm
 from safetensors.torch import load_file
 
 # Local imports
-from .serializers import MinimalHumdrumSerializer
+from musicset.views.kern import MinimalHumdrumSerializer
 from .graph_repair import repair_page_edges
 from .validate_groundtruth import _load_and_resolve_nodes, _build_page_nodes
 from .utils import split_into_systems
@@ -187,22 +187,10 @@ def process_single_graph(graph_path: Path, json_dir: Path, img_dir: Path,
         if not all_edges:
             return False
 
-        # 2. Assemble (edge_index, predictions) in the serializer's format
-        id_to_idx = {nid: i for i, nid in enumerate(graph_data["node_ids"])}
-        rows = [
-            (id_to_idx[u], id_to_idx[v], c)
-            for u, v, c in all_edges
-            if u in id_to_idx and v in id_to_idx
-        ]
-        edge_index = torch.tensor([[r[0] for r in rows], [r[1] for r in rows]],
-                                  dtype=torch.long)
-        edge_predictions = torch.tensor([r[2] for r in rows], dtype=torch.long)
-
+        # 2. Serialize the predicted edges between known nodes
+        known = set(graph_data["node_ids"])
         serializer = MinimalHumdrumSerializer(
-            edge_index=edge_index,
-            edge_predictions=edge_predictions,
-            node_roles=node_roles,
-            pyg_node_ids=graph_data["node_ids"],
+            [(u, v, c) for u, v, c in all_edges if u in known and v in known], node_roles
         )
         for page_nodes in pages:
             if page_nodes:

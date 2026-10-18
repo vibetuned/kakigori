@@ -28,7 +28,7 @@ from PIL import Image
 from tqdm import tqdm
 
 # Local imports
-from .serializers import MinimalHumdrumSerializer
+from musicset.views.kern import MinimalHumdrumSerializer
 from .graph_repair import repair_page_edges
 from .bbox_repair import repair_page_boxes
 from .infer import detect_page_nodes
@@ -89,18 +89,9 @@ def process_score(stem: str, page_paths: list, out_dir: Path, node_roles: dict,
         if not all_edges:
             return False
 
-        id_to_idx = {nid: i for i, nid in enumerate(node_ids)}
-        rows = [(id_to_idx[u], id_to_idx[v], c) for u, v, c in all_edges
-                if u in id_to_idx and v in id_to_idx]
-        edge_index = torch.tensor(
-            [[r[0] for r in rows], [r[1] for r in rows]], dtype=torch.long)
-        edge_predictions = torch.tensor([r[2] for r in rows], dtype=torch.long)
-
+        known = set(node_ids)
         serializer = MinimalHumdrumSerializer(
-            edge_index=edge_index,
-            edge_predictions=edge_predictions,
-            node_roles=node_roles,
-            pyg_node_ids=node_ids,
+            [(u, v, c) for u, v, c in all_edges if u in known and v in known], node_roles
         )
         for page_nodes in all_pages:
             serializer.add_page(page_nodes)

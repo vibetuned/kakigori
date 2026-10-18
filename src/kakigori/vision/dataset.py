@@ -6,7 +6,6 @@ import random
 from pathlib import Path
 
 # Third party imports
-import cv2
 import numpy as np
 import torch
 import torchvision.transforms.functional as TF
@@ -124,12 +123,10 @@ class OMRDataset(Dataset):
         # 1. C++ Albumentations pass
         img = self.scanner_pipeline(image=img)["image"]
 
-        # 2. NumPy / OpenCV manual passes
-        if np.random.rand() < 0.4:
-            kernel_size = np.random.choice([2, 3])
-            kernel = np.ones((kernel_size, kernel_size), np.uint8)
-            img = cv2.dilate(img, kernel, iterations=1)
-
+        # 2. NumPy manual passes. No morphology here: at 640 px stems, barlines
+        # and staff lines are under a pixel wide, and cv2.dilate (a max filter,
+        # it grows the paper) erased most of them while their boxes stayed in
+        # the targets (docs/experiments/vision/augmentation_dilate.ipynb)
         if np.random.rand() < 0.3:
             sp_amount = np.random.uniform(0.001, 0.005)
             mask = np.random.rand(h, w)
