@@ -8,18 +8,15 @@ requires-python = ">=3.14"
 dependencies = [
     "accelerate>=1.1.0",
     "brotli>=1.2.0",
-    "cairosvg>=2.8.2",
     "fonttools>=4.61.1",
     "numpy>=2.0.0",
     "Pillow>=11.0.0",
-    "svgpathtools>=1.7.2",
     "timm>=1.0.25",
     "torch>=2.7.0",
     "torchvision>=0.22.0",
     "transformers>=4.48.3",
     "tqdm>=4.67.3",
     "pypdfium2>=4.30.0",
-    "verovio>=6.0.1",
     "torchmetrics>=1.8.2",
     "pycocotools>=2.0.11",
     "opencv-contrib-python>=4.13.0.92",
@@ -30,12 +27,11 @@ dependencies = [
     "pandas>=3.0.1",
     "plotly>=6.5.2",
     "nbformat>=5.10.4",
-    "music21>=9.1.0",
     "scikit-learn>=1.8.0",
     "torch-geometric>=2.7.0",
     "ipysigma>=0.24.6",
     "jupyter>=1.1.1",
-    "musicset",
+    "musicset[synth]",
 ]
 
 [dependency-groups]
@@ -82,19 +78,6 @@ local-folder = "Local folder imports"
 
 
 [project.scripts]
-render-dataset = "kakigori.dataset.render_dataset:main"
-export-dataset = "kakigori.dataset.export_dataset:main"
-generate-graphs = "kakigori.dataset.generate_graphs:main"
-visualize-graphs = "kakigori.dataset.visualize_graphs:main"
-visualize-graphs-pysigma = "kakigori.dataset.visualize_graphs_pysigma:main"
-extract-annotations = "kakigori.dataset.extract_annotations:main"
-inject-mids = "kakigori.dataset.inject_mxl_ids:main"
-extract-classes = "kakigori.dataset.extract_classes:main"
-visualize-dataset = "kakigori.dataset.visualize_dataset:main"
-synthetic-generator = "kakigori.dataset.synthetic_generator:main"
-synthetic-writer = "kakigori.dataset.synthetic_writer:main"
-synthetic-arranger = "kakigori.dataset.synthetic_arranger:main"
-filter-mxl = "kakigori.dataset.filter_mxl:main"
 train-model = "kakigori.vision.train:main"
 eval-model = "kakigori.vision.eval:main"
 infer-model = "kakigori.vision.infer:main"

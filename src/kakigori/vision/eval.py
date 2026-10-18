@@ -17,7 +17,7 @@ from torchmetrics.detection.mean_ap import MeanAveragePrecision
 
 # Local folder imports
 from .model import MusicDetector
-from .utils import omr_collate_fn, load_checkpoint, decode_model_outputs
+from .utils import omr_collate_fn, load_checkpoint, decode_model_outputs, detector_for_checkpoint
 from .dataset import OMRDataset
 
 logging.basicConfig(
@@ -206,8 +206,9 @@ def main():
         collate_fn=omr_collate_fn,
     )
 
-    model = MusicDetector(
-        num_classes=len(class_list),
+    model = detector_for_checkpoint(
+        args.checkpoint,
+        len(class_list),
         use_bottom_up=args.use_bottom_up,
         out_indices=args.out_indices,
     )

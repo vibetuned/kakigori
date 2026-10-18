@@ -2,7 +2,7 @@
 
 ## Pipeline overview
 
-The `vision` package implements a CenterNet-style multi-scale OMR detector. `dataset.py` loads rendered score pages and their bbox annotations into letterboxed tensors; `model.py` (with helpers in `layers.py`) wraps a timm backbone, a PANet neck, and three decoupled heads that emit classification heatmaps + box regressions at three scales; `trainer.py` (with `losses.py`) assigns each ground-truth box to a scale by area, then computes focal classification loss plus CIoU regression loss. `train.py` / `retrain.py` are CLI entry points around that trainer; `eval.py` measures per-class mAP; `infer.py` runs the trained model over a PDF; `visualize.py` is an interactive PySide6 GUI for inspecting boxes, heatmaps and feature maps. `utils.py` holds shared helpers (collate, checkpoint loading, NMS-based decoding, ratio sampler), and `calculate_areas.py` is an offline tool for choosing the per-scale area thresholds the trainer consumes.
+The `vision` package implements a CenterNet-style multi-scale OMR detector. `dataset.py` loads rendered score pages and their bbox annotations into letterboxed tensors; `model.py` (with helpers in `layers.py`, backbone in `regla.py`) wraps a ReGLA backbone on one grey channel, a PANet neck, and three decoupled heads that emit classification heatmaps + box regressions at three scales; `trainer.py` (with `losses.py`) assigns each ground-truth box to a scale by area, then computes focal classification loss plus CIoU regression loss. `train.py` / `retrain.py` are CLI entry points around that trainer; `eval.py` measures per-class mAP; `infer.py` runs the trained model over a PDF; `visualize.py` is an interactive PySide6 GUI for inspecting boxes, heatmaps and feature maps. `utils.py` holds shared helpers (collate, checkpoint loading, NMS-based decoding, ratio sampler), and `calculate_areas.py` is an offline tool for choosing the per-scale area thresholds the trainer consumes.
 
 ## Modules
 
@@ -48,9 +48,14 @@ The `vision` package implements a CenterNet-style multi-scale OMR detector. `dat
 **Produces / used by:** Used by `trainer.py`.
 
 ### `model.py`
-**Role:** `MusicDetector` — the end-to-end network: timm `convnext_base.dinov3_lvd1689m` backbone (pretrained, `features_only`) → `PANetNeck` (hidden_dim=128) → three `DecoupledHead`s, one per fused scale.
-**Key classes/functions:** `MusicDetector(num_classes, use_bottom_up, out_indices)`.
-**Preconditions:** `num_classes` must match the checkpoint at load time; `out_indices` selects which three backbone stages to extract (callers pass `[0,1,2]` or `[1,2,3]` depending on the run).
+**Role:** `MusicDetector` — the end-to-end network: backbone (ReGLA `regla_m` by default, one grey input channel, trained from scratch; or a timm model name such as the 0.1.x `convnext_base.dinov3_lvd1689m`, which takes grey pages repeated to RGB) → `PANetNeck` (hidden_dim=128) → three `DecoupledHead`s, one per fused scale. `detect_backbone(state_dict)` reads which backbone a checkpoint holds from its weight names and shapes; `utils.detector_for_checkpoint()` builds a matching detector, so every loader (eval, infer, retrain, GNN, joint) follows the checkpoint and the released 0.1.x weights still load.
+**Key classes/functions:** `MusicDetector(num_classes, use_bottom_up, out_indices, backbone)`, `detect_backbone`.
+**Preconditions:** `num_classes` must match the checkpoint at load time; `out_indices` selects which three backbone stages to extract (`[0,1,2]`: strides 4/8/16; ReGLA builds only the stages it returns).
+
+### `regla.py`
+**Role:** ReGLA (Li et al., arXiv 2602.05262): stem to 1/4, stages 1-2 of ELRF blocks (DW3x3 -> 1x1 4C -> GELU -> DW5x5 -> 1x1 C -> GELU, residual: a 7x7 receptive field), stages 3-4 of ReLU attention blocks (CPE, RGMA, DW3x3 + GELU). RGMA: v = sigmoid(W_v x) is both value and gate, Q, K = ReLU(W_qk x), out = x + Norm(Q(K^T v) / Q(K^T 1) * v): global attention linear in the number of tokens, computed in fp32. Variants `regla_t/s/m/l/x` follow the paper's Table 1. Not in the paper (no code or supplement) and chosen here: two-conv stem, 3x3 stride-2 downsampling, channel LayerNorm (the GNN trainers keep the detector in eval mode and run it one page at a time; `norm="bn"` exists), single-head attention, layer scale 1e-2. With all four stages and a 1000-class head the variants count ~72% of the paper's parameters (regla_m 6.8M vs 9.6M), consistent with one unpublished per-block component (likely an attention output projection).
+**Key classes/functions:** `ReGLA(variant, in_chans, out_indices, norm, heads)`, `ELRF`, `RGMA`, `AttentionBlock`, `VARIANTS`.
+**Produces / used by:** Feature maps at the requested stages (`channels` lists their widths). regla_m stages 1-3: 3.0M parameters (the detector 3.3M, vs 60.5M with ConvNeXt-B); a batch-4 640px bf16 training step on an RTX 5090: 29 ms / 3.1 GiB vs 41 ms / 5.7 GiB.
 **Produces / used by:** Returns a list of 3 dicts `{"cls": (B,C,H,W), "reg": (B,4,H,W)}`. Consumed by `trainer.py`, `eval.py`, `infer.py`, `visualize.py`.
 
 ### `retrain.py`
@@ -62,7 +67,7 @@ The `vision` package implements a CenterNet-style multi-scale OMR detector. `dat
 ### `train.py`
 **Role:** Primary training CLI — initializes a fresh `MusicDetector` (or loads weights via `--fine-tune` for simple warm-start without head expansion), wraps it in `OMRTrainer`, and runs HF Trainer with cosine LR + bf16. Supports `--resume` / `--resume-from-checkpoint` for HF-Trainer-style resumption. Reads YAML defaults from `--train-config` first so CLI args can override them.
 **Key classes/functions:** `parse_args()`, `main()`.
-**Preconditions:** Image/annotation directories on disk; `conf/config.json` with `target_classes`. `--fine-tune` is optional here (unlike `retrain.py`); if omitted the model starts from timm-pretrained backbone weights with random heads/neck.
+**Preconditions:** Image/annotation directories on disk; `conf/config.json` with `target_classes`. `--fine-tune` is optional here (unlike `retrain.py`); if omitted the model starts from scratch with `--backbone` (default `regla_m`; a timm name starts from its pretrained weights). With `--fine-tune` the backbone comes from the checkpoint.
 **Produces / used by:** `run_NNN/` directories under `--output-dir` containing HF checkpoints, plus TensorBoard scalars under `<logging-dir>/run_NNN/`.
 
 ### `trainer.py`

@@ -10,6 +10,8 @@ from tqdm import tqdm
 
 from musicset.views.kern import MinimalHumdrumSerializer
 
+from kakigori.graph.graph_io import graph_files as list_graphs, load_graph
+
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
@@ -77,7 +79,7 @@ def process_single_graph(graph_path: Path, json_dir: Path, out_dir: Path, node_r
     """Loads a graph and its associated JSONs, calculates centers, and exports **kern."""
     try:
         # 1. Load the PyG graph dictionary
-        graph_data = torch.load(graph_path, weights_only=False)
+        graph_data = load_graph(graph_path)
         edge_index = graph_data["edge_index"]
         edge_predictions = graph_data["y"]
         valid_node_ids = set(graph_data["node_ids"])
@@ -118,7 +120,7 @@ def process_single_graph(graph_path: Path, json_dir: Path, out_dir: Path, node_r
 
 def main():
     parser = argparse.ArgumentParser(description="Generate Humdrum **kern from PyG graphs and JSONs.")
-    parser.add_argument("--graph_dir", type=str, default="data/output_graphs", help="Dir with .pt files")
+    parser.add_argument("--graph_dir", type=str, default="data/output_graphs", help="Dir with graph files (.json or .pt)")
     parser.add_argument("--json_dir", type=str, default="data/annotations", help="Dir with .json files")
     parser.add_argument("--out_dir", type=str, default="data/output_kern", help="Output directory for .krn")
     parser.add_argument("--roles_file", type=str, default="conf/structure.json", help="Path to node roles")
@@ -142,7 +144,7 @@ def main():
     with open(roles_path, "r", encoding="utf-8") as f:
         node_roles = json.load(f)
 
-    graph_files = list(graph_dir.glob("*.pt"))
+    graph_files = list_graphs(graph_dir)
     logger.info(f"Found {len(graph_files)} graphs to process.")
 
     success_count = 0

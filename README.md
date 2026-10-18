@@ -8,7 +8,7 @@ The system is split into three cooperating stages:
 2. **Graph** — a graph neural network reads the detector's output and predicts the typed relationships between primitives (which stem belongs to which notehead, which notes share a beam, which lyric attaches to which note, which measures synchronize across staves).
 3. **Serialization** — the predicted score graph is converted to `**kern` text.
 
-A large **dataset** subsystem produces the training corpus by filtering and mutating real MusicXML files, generating fully synthetic exercises, rendering them with Verovio, and extracting ground-truth bounding boxes and graph edges.
+The training corpus comes from [musicset](../musicset): it selects and mutates real MusicXML files, generates synthetic scores, engraves them with Verovio (fixed or varied fonts, staff sizes and line weights), and extracts ground-truth bounding boxes, graph edges and `**kern`.
 
 ## Quick start — pretrained weights & inference
 
@@ -56,16 +56,19 @@ same graph+serializer stack reaches 93% / 80%.
 
 ```
 src/kakigori/
-├── dataset/    # MXL → SVG/PNG + annotation JSONs + ground-truth graphs
 ├── vision/    # Multi-scale primitive detector (training, eval, inference, viewer)
 ├── graph/     # Phase-2 GNN over detector output + Humdrum serializer
 └── matching/  # Exploratory flow-matching image restoration (currently unused)
 ```
 
+Datasets (rendering, annotations, graphs, **kern groundtruth, scan-like
+augmentation, synthetic scores) come from [musicset](../musicset), a dependency
+of this package: see [docs/modules/dataset.md](docs/modules/dataset.md).
+
 Per-module documentation lives in [docs/modules/](docs/modules/):
 - [vision.md](docs/modules/vision.md)
 - [graph.md](docs/modules/graph.md)
-- [dataset.md](docs/modules/dataset.md)
+- [dataset.md](docs/modules/dataset.md) (datasets with musicset)
 - [matching.md](docs/modules/matching.md)
 
 For the full corpus → detector → GNN → `**kern` recipe, see the
@@ -76,24 +79,18 @@ design, phase curriculum, and training lessons are explained in
 ## Pipeline
 
 ```
-       .mxl files (real or synthetic)
+       .mxl files (real, or musicset synth)
                 │
    ┌────────────┴────────────┐
-   │ filter-mxl              │  drop files lacking target SMuFL classes
-   │ inject-mids             │  stamp every MXL element with a stable id=
-   │ synthetic-{arranger,    │  optional augmentation:
-   │   generator, writer}   │   per-measure / whole-score / from-scratch
+   │ musicset select         │  lite gates, voice caps, holdout exclusion
+   │ musicset synth          │  optional: exercises, piano, counterpoint,
+   │                         │   mutations of real scores
    └────────────┬────────────┘
                 │
    ┌────────────┴────────────┐
-   │ render-dataset          │  Verovio → SVG → CairoSVG → PNG (per page)
-   │ export-dataset          │  Verovio → MEI + Humdrum .krn
-   └────────────┬────────────┘
-                │
-   ┌────────────┴────────────┐
-   │ extract-classes         │  bootstrap target-class vocabulary
-   │ extract-annotations    │  SVG → per-page bbox JSON (vision targets)
-   │ generate-graphs        │  MEI + bbox JSON → PyG .pt (GNN ground truth)
+   │ musicset build          │  stable ids → Verovio (fixed or varied
+   │   --labels conf-lite    │   engraving) → PNG pages, bbox JSONs,
+   │   --graph --kern        │   MEI, ground-truth graphs, **kern
    └────────────┬────────────┘
                 │
        ┌────────┴────────┐
@@ -106,7 +103,9 @@ design, phase curriculum, and training lessons are explained in
    └────────┘       └──────────┘
 ```
 
-`visualize-dataset`, `visualize-graphs`, and `visualize-graphs-pysigma` are PySide6 viewers for inspecting each stage's outputs. `visualize-model` (under `vision/`) is an interactive detector inspector with bbox / heatmap / feature-map views.
+`musicset view` browses a dataset (pages with boxes, graph edges, the score
+graph, augmentation next to real scans). `visualize-model` (under `vision/`) is
+an interactive detector inspector with bbox / heatmap / feature-map views.
 
 ## Configuration
 
@@ -134,19 +133,13 @@ Four config files need the new class (e.g. adding SMuFL U+E52D as `dynamicMF`):
 3. `hierarchy.json` — add to the appropriate visibility/TensorBoard group.
 4. `structure.json` — add to the right `node_roles` bucket.
 
-Then regenerate the derived data. Both extraction steps **silently skip
-existing output files** (and still count them as successes), so delete the old
-outputs first:
-
-```
-rm <annotations_dir>/*.json && extract-annotations --svg_dir … --img_dir … --out_dir <annotations_dir>
-rm <graphs_dir>/*.pt      && generate-graphs <mei_dir> <annotations_dir> --out_dir <graphs_dir>
-```
-
-Regenerating the graphs is not optional: annotation IDs are de-collided
-positionally at load time, so `.pt` graphs built against the old JSONs stop
-matching the new ones. Finally rerun `validate-groundtruth` + `compare-kern`
-and check the pitch/rhythm totals are unchanged. Note that the vision model
+Then rebuild the datasets (`./regenerate-dataset.sh data/<set>`): musicset
+fingerprints the label set, so a changed conf re-projects the bbox JSONs and
+graphs from the stored canonical pages without re-rendering, and graphs are
+always rebuilt against the new JSONs (annotation IDs are de-collided
+positionally, so a graph only matches the JSONs it was built from). Finally
+rerun `validate-groundtruth` + `compare-kern` and check the pitch/rhythm
+totals are unchanged. Note that the vision model
 must be fine-tuned (`retrain-model --old-num-classes N`) before the *detector*
 can emit the new class; the ground-truth pipeline works immediately.
 
@@ -154,28 +147,23 @@ can emit the new class; the ground-truth pipeline works immediately.
 
 All scripts are installed as `pyproject.toml` `[project.scripts]`, so once the package is installed they are on `$PATH`.
 
-### Dataset construction
+### Datasets
+
+Built with musicset (installed with this package; `uv run musicset --help`):
 
 | Command | What it does |
 | --- | --- |
-| `filter-mxl` | Keep only MXL files whose Verovio render contains target classes |
-| `inject-mids` | Add stable `id=` attributes to every MusicXML element |
-| `synthetic-arranger` | One random per-measure mutation per score |
-| `synthetic-generator` | Aggressive whole-score probabilistic mutations |
-| `synthetic-writer` | Generate brand-new piano scale/chord exercises from scratch |
-| `render-dataset` | MXL → per-page SVG + PNG via Verovio + CairoSVG |
-| `export-dataset` | MXL → MEI + Humdrum `.krn` via Verovio |
-| `extract-classes` | Scan SVGs and emit the union of class tokens |
-| `extract-annotations` | Compute per-class bounding boxes from SVG → JSON |
-| `generate-graphs` | Build PyG ground-truth graphs from MEI + bbox JSON |
+| `musicset select` | Filter and sample sources: `--lite` gates, voice caps, holdout exclusion |
+| `musicset build` | Engrave and annotate: PNG pages, bbox JSONs (`--labels conf-lite`), MEI, graphs (`--graph`), **kern (`--kern`); `--profile varied` for render variety |
+| `musicset synth` | Synthetic MusicXML: exercises, piano pieces, counterpoint, mutations of real scores |
+| `musicset augment` | Scan-like copies of a built dataset (boxes moved with the ink) |
+| `./regenerate-dataset.sh` | `musicset build` with this repo's layout and confs (see the script) |
 
 ### Inspection
 
 | Command | What it shows |
 | --- | --- |
-| `visualize-dataset` | PNG + bbox annotations with class visibility toggles |
-| `visualize-graphs` | Graph edges overlaid on the score image |
-| `visualize-graphs-pysigma` | Force-directed Sigma.js view of graph topology |
+| `musicset view` | Pages + boxes, graph edges, score graph, augmentation vs real scans |
 | `visualize-model` | Detector inspector: boxes, heatmaps, feature maps |
 
 ### Training

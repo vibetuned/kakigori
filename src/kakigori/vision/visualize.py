@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
 # Local folder imports
 from .infer import preprocess
 from .model import MusicDetector
-from .utils import load_checkpoint, decode_model_outputs
+from .utils import detector_for_checkpoint, load_checkpoint, decode_model_outputs
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -764,7 +764,7 @@ def main():
 
     # --- Load model ---
     logger.info(f"Loading model from {args.checkpoint}")
-    model = MusicDetector(num_classes=num_classes, use_bottom_up=args.use_bottom_up)
+    model = detector_for_checkpoint(args.checkpoint, num_classes, use_bottom_up=args.use_bottom_up)
     load_checkpoint(model, args.checkpoint, device)
 
     window = ModelVisualizer(

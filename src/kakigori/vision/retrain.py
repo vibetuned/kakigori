@@ -19,7 +19,7 @@ from transformers.trainer_utils import get_last_checkpoint
 
 # Local folder imports
 from .model import MusicDetector
-from .utils import RatioSampler, omr_collate_fn, load_checkpoint
+from .utils import RatioSampler, omr_collate_fn, load_checkpoint, detector_for_checkpoint
 from .dataset import OMRDataset
 from .trainer import OMRTrainer
 
@@ -247,8 +247,9 @@ def main():
 
     # --- Initialize Model ---
     # 1. Initialize with old architecture size
-    model = MusicDetector(
-        num_classes=args.old_num_classes,
+    model = detector_for_checkpoint(
+        args.fine_tune,
+        args.old_num_classes,
         use_bottom_up=args.use_bottom_up,
         out_indices=tuple(args.out_indices),
     )

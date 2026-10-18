@@ -43,7 +43,7 @@ from .heuristics import generate_axis_aware_edges, map_gt_to_candidates
 from .model import GraphVisualExtractor, ScoreGraphReconstructor, GNNPhase2Model
 from kakigori.vision.trainer import OMRTrainer
 from kakigori.vision.losses import DynamicFocalLoss, CIoULoss
-from kakigori.vision.utils import load_checkpoint
+from kakigori.vision.utils import detector_for_checkpoint, load_checkpoint
 from kakigori.vision.model import MusicDetector
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -345,10 +345,12 @@ def main():
         full_ds, [train_size, len(full_ds) - train_size])
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    detector = MusicDetector(num_classes=num_classes)
     if args.detector_checkpoint:
+        detector = detector_for_checkpoint(args.detector_checkpoint, num_classes)
         load_checkpoint(detector, args.detector_checkpoint,
                         device=torch.device("cpu"), eval=False)
+    else:
+        detector = MusicDetector(num_classes=num_classes)
 
     gnn = ScoreGraphReconstructor(
         node_in_dim=256 + 4 + 32, num_classes=num_classes, class_embed_dim=32)

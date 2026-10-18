@@ -74,7 +74,7 @@ The flow is roughly:
 **Key classes/functions:**
 - `GraphVisualExtractor` — `MultiScaleRoIAlign` over PANet feature maps (`'0','1','2'`), flatten + Linear → 256-d node visual feature. Expects boxes in normalized `[cx,cy,w,h]`, denormalizes internally.
 - `ScoreGraphReconstructor` — 3-layer GATv2 backbone + concat-pair MLP edge classifier producing logits for `num_edge_classes` (6). Owns the `class_embedding` lookup.
-- `GNNPhase2Model` — wrapper around detector + RoI extractor + GNN with an `unfreeze` mode implementing the phase curriculum: `"none"` (detector fully frozen), `"neck"` (PANet trains as an adaptation layer, ConvNeXt frozen), `"full"` (backbone + neck train). The detector stays in eval mode in every phase (LayerNorm-based, so eval only disables droppath while unfrozen weights still receive gradients); `train()` returns `self` per the `nn.Module` contract.
+- `GNNPhase2Model` — wrapper around detector + RoI extractor + GNN with an `unfreeze` mode implementing the phase curriculum: `"none"` (detector fully frozen), `"neck"` (PANet trains as an adaptation layer, backbone frozen), `"full"` (backbone + neck train). The detector stays in eval mode in every phase (the backbone is LayerNorm-based, ReGLA by default as ConvNeXt was, so eval mode changes nothing there while unfrozen weights still receive gradients); `train()` returns `self` per the `nn.Module` contract.
 **Preconditions:** `node_in_dim = roi_dim(256) + bbox(4) + class_embed_dim(32) = 292`; bbox coords are normalized to [0,1] by the trainer before concat. Detector must already be loaded with weights before wrapping.
 **Produces / used by:** Instantiated in `train.py`; the wrapper is what `GNNTrainer` calls.
 

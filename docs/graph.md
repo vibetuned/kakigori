@@ -46,7 +46,7 @@ edge F1 translates quite directly into kern quality.
 
 The GNN never touches raw pixels itself. Per page:
 
-1. The **frozen detector** (ConvNeXt + PANet) produces multi-scale feature
+1. The **frozen detector** (ReGLA + PANet; ConvNeXt in 0.1.x) produces multi-scale feature
    maps for the letterboxed 640×640 page — the same resolution and
    letterbox convention it was trained with (this matters; see lesson 1).
 2. The page is **split into systems**; the GNN learns per system, not per
@@ -78,7 +78,7 @@ failure is attributable:
 | 5 | neck re-adapts to a *new* detector | GT + noise | `old_num_classes`, `new_class_templates` — after a glyph-class expansion |
 
 Rationale: the neck is the cheapest place for the vision features to adapt
-to the relational task, and keeping ConvNeXt frozen protects the detector —
+to the relational task, and keeping the backbone frozen protects the detector —
 the same backbone serves detection at inference, so **after any unfrozen
 phase re-run `eval-model` and check detector mAP for drift**. Phase 4
 narrows the gap to inference, where boxes come from the detector instead of

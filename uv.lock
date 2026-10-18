@@ -1229,13 +1229,11 @@ dependencies = [
     { name = "accelerate" },
     { name = "albumentationsx" },
     { name = "brotli" },
-    { name = "cairosvg" },
     { name = "fonttools" },
     { name = "ipysigma" },
     { name = "jupyter" },
     { name = "matplotlib" },
-    { name = "music21" },
-    { name = "musicset" },
+    { name = "musicset", extra = ["synth"] },
     { name = "nbformat" },
     { name = "numpy" },
     { name = "opencv-contrib-python" },
@@ -1247,7 +1245,6 @@ dependencies = [
     { name = "pyside6" },
     { name = "pyyaml" },
     { name = "scikit-learn" },
-    { name = "svgpathtools" },
     { name = "timm" },
     { name = "torch" },
     { name = "torch-geometric" },
@@ -1255,7 +1252,6 @@ dependencies = [
     { name = "torchvision" },
     { name = "tqdm" },
     { name = "transformers" },
-    { name = "verovio" },
 ]
 
 [package.dev-dependencies]
@@ -1274,13 +1270,11 @@ requires-dist = [
     { name = "accelerate", specifier = ">=1.1.0" },
     { name = "albumentationsx", specifier = ">=2.0.18" },
     { name = "brotli", specifier = ">=1.2.0" },
-    { name = "cairosvg", specifier = ">=2.8.2" },
     { name = "fonttools", specifier = ">=4.61.1" },
     { name = "ipysigma", specifier = ">=0.24.6" },
     { name = "jupyter", specifier = ">=1.1.1" },
     { name = "matplotlib", specifier = ">=3.10.8" },
-    { name = "music21", specifier = ">=9.1.0" },
-    { name = "musicset", editable = "../musicset" },
+    { name = "musicset", extras = ["synth"], editable = "../musicset" },
     { name = "nbformat", specifier = ">=5.10.4" },
     { name = "numpy", specifier = ">=2.0.0" },
     { name = "opencv-contrib-python", specifier = ">=4.13.0.92" },
@@ -1292,7 +1286,6 @@ requires-dist = [
     { name = "pyside6", specifier = ">=6.10.2" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "scikit-learn", specifier = ">=1.8.0" },
-    { name = "svgpathtools", specifier = ">=1.7.2" },
     { name = "timm", specifier = ">=1.0.25" },
     { name = "torch", specifier = ">=2.7.0", index = "https://download.pytorch.org/whl/cu130" },
     { name = "torch-geometric", specifier = ">=2.7.0" },
@@ -1300,7 +1293,6 @@ requires-dist = [
     { name = "torchvision", specifier = ">=0.22.0", index = "https://download.pytorch.org/whl/cu130" },
     { name = "tqdm", specifier = ">=4.67.3" },
     { name = "transformers", specifier = ">=4.48.3" },
-    { name = "verovio", specifier = ">=6.0.1" },
 ]
 
 [package.metadata.requires-dev]
@@ -1581,9 +1573,15 @@ dependencies = [
     { name = "verovio" },
 ]
 
+[package.optional-dependencies]
+synth = [
+    { name = "music21" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "cairosvg", specifier = ">=2.8.2" },
+    { name = "music21", marker = "extra == 'synth'", specifier = ">=9.9.1" },
     { name = "networkx", marker = "extra == 'viz'", specifier = ">=3.2" },
     { name = "numpy", specifier = ">=2.5.4" },
     { name = "pillow", specifier = ">=11.0.0" },
@@ -1594,7 +1592,7 @@ requires-dist = [
     { name = "tqdm", specifier = ">=4.67.0" },
     { name = "verovio", specifier = ">=6.3.0" },
 ]
-provides-extras = ["viz"]
+provides-extras = ["viz", "synth"]
 
 [package.metadata.requires-dev]
 dev = [

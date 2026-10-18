@@ -13,12 +13,14 @@ from safetensors.torch import load_file
 
 # Local imports
 from musicset.views.kern import MinimalHumdrumSerializer
+
+from kakigori.graph.graph_io import graph_files as list_graphs, load_graph
 from .graph_repair import repair_page_edges
 from .validate_groundtruth import _load_and_resolve_nodes, _build_page_nodes
 from .utils import split_into_systems
 from .heuristics import generate_axis_aware_edges
 from .model import GraphVisualExtractor, ScoreGraphReconstructor, GNNPhase2Model
-from kakigori.vision.model import MusicDetector
+from kakigori.vision.model import MusicDetector, detect_backbone
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -49,7 +51,11 @@ def _load_gnn(checkpoint_dir: str, device):
     num_classes = weights["gnn.class_embedding.weight"].shape[0]
 
     model = GNNPhase2Model(
-        MusicDetector(num_classes=num_classes),
+        MusicDetector(
+            num_classes=num_classes,
+            backbone=detect_backbone(weights, prefix="detector."),
+            pretrained=False,
+        ),
         GraphVisualExtractor(),
         ScoreGraphReconstructor(
             node_in_dim=256 + 4 + 32, num_classes=num_classes, class_embed_dim=32
@@ -64,12 +70,12 @@ def _load_gnn(checkpoint_dir: str, device):
 
 def _letterbox_page(img_path: Path, input_size: int):
     """Same convention as OMRFullPageDataset / vision letterboxing."""
-    image = Image.open(img_path).convert("RGB")
+    image = Image.open(img_path).convert("L")
     orig_w, orig_h = image.size
     scale = min(input_size / orig_w, input_size / orig_h)
     new_w, new_h = int(round(orig_w * scale)), int(round(orig_h * scale))
     image = image.resize((new_w, new_h), Image.BILINEAR)
-    canvas = Image.new("RGB", (input_size, input_size), (114, 114, 114))
+    canvas = Image.new("L", (input_size, input_size), 114)
     pad_x = (input_size - new_w) // 2
     pad_y = (input_size - new_h) // 2
     canvas.paste(image, (pad_x, pad_y))
@@ -155,7 +161,7 @@ def process_single_graph(graph_path: Path, json_dir: Path, img_dir: Path,
                          out_dir: Path, node_roles: dict, model,
                          class_to_idx: dict, device, repair: bool = True) -> bool:
     try:
-        graph_data = torch.load(graph_path, weights_only=False)
+        graph_data = load_graph(graph_path)
         valid_node_ids = set(graph_data["node_ids"])
         json_filenames = graph_data.get("json_files", [])
         node_map, page_node_ids = _load_and_resolve_nodes(json_dir, json_filenames)
@@ -217,7 +223,7 @@ def main():
         "Same layout as validate-groundtruth but with model predictions "
         "replacing the ground-truth edge labels."
     )
-    parser.add_argument("--graph_dir", type=str, required=True, help="Dir with .pt files (for node ids and page lists)")
+    parser.add_argument("--graph_dir", type=str, required=True, help="Dir with graph files, .json or .pt (for node ids and page lists)")
     parser.add_argument("--json_dir", type=str, required=True, help="Dir with annotation .json files")
     parser.add_argument("--img_dir", type=str, required=True, help="Dir with page .png images")
     parser.add_argument("--out_dir", type=str, required=True, help="Output directory for predicted .krn")
@@ -240,7 +246,7 @@ def main():
     img_dir, out_dir = Path(args.img_dir), Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    graph_files = sorted(graph_dir.glob("*.pt"))
+    graph_files = list_graphs(graph_dir)
     logger.info(f"Predicting + serializing {len(graph_files)} scores...")
     success = 0
     for g_path in tqdm(graph_files, desc="End-to-end kern"):

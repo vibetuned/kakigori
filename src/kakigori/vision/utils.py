@@ -76,6 +76,56 @@ def omr_collate_fn(batch):
     return {"pixel_values": images, "labels": list(targets)}
 
 
+def resolve_weights(checkpoint_path: str) -> Path | None:
+    """The weights file of a checkpoint: an HF Trainer output dir (its last
+    checkpoint-NNNN), a run dir, or a direct path to the weights."""
+    ckpt = Path(checkpoint_path)
+    if ckpt.is_dir():
+        last = get_last_checkpoint(str(ckpt))
+        if last is not None:
+            ckpt = Path(last)
+    for name in ("model.safetensors", "pytorch_model.bin"):
+        weights = (ckpt / name) if ckpt.is_dir() else ckpt
+        if weights.exists():
+            return weights
+    return None
+
+
+def checkpoint_backbone(checkpoint_path: str, prefix: str = "") -> str:
+    """The backbone a detector checkpoint holds (``prefix``: 'detector.' for
+    GNN wrapper checkpoints), read from the weight names and shapes only."""
+    # Local folder imports
+    from .model import detect_backbone
+
+    weights = resolve_weights(checkpoint_path)
+    if weights is None:
+        raise FileNotFoundError(f"no weights under {checkpoint_path}")
+    if weights.suffix == ".safetensors":
+        # Third party imports
+        from safetensors import safe_open
+
+        with safe_open(str(weights), "pt") as f:
+            shapes = {
+                k: torch.empty(f.get_slice(k).get_shape(), device="meta")
+                for k in f.keys()
+                if k.startswith(f"{prefix}backbone.")
+            }
+    else:
+        shapes = torch.load(weights, map_location="meta", weights_only=False)
+    return detect_backbone(shapes, prefix=prefix)
+
+
+def detector_for_checkpoint(checkpoint_path: str, num_classes: int, prefix: str = "", **kwargs):
+    """An (unloaded) MusicDetector shaped like the checkpoint's detector:
+    the same backbone, no pretrained download. Load it with load_checkpoint."""
+    # Local folder imports
+    from .model import MusicDetector
+
+    backbone = checkpoint_backbone(checkpoint_path, prefix=prefix)
+    logger.info(f"  Detector backbone: {backbone}")
+    return MusicDetector(num_classes=num_classes, backbone=backbone, pretrained=False, **kwargs)
+
+
 def load_checkpoint(
     model, checkpoint_path: str, device: torch.device, eval: bool = True
 ):

@@ -22,7 +22,7 @@ from tqdm import tqdm
 
 # Local folder imports
 from .model import MusicDetector
-from .utils import load_checkpoint, decode_model_outputs
+from .utils import detector_for_checkpoint, load_checkpoint, decode_model_outputs
 from .dataset import _letterbox
 
 logging.basicConfig(
@@ -64,7 +64,8 @@ def pdf_to_pages(pdf_path: Path, dpi: int = 300) -> list[Image.Image]:
 def preprocess(
     image: Image.Image, input_size: int, device: torch.device
 ) -> tuple[torch.Tensor, dict]:
-    """Letterbox + normalise a PIL image. Returns (tensor, padding metadata)."""
+    """Letterbox a PIL image as one grey channel. Returns (tensor, padding metadata)."""
+    image = image.convert("L")
     orig_w, orig_h = image.size
     scale = min(input_size / orig_w, input_size / orig_h)
     new_w = int(round(orig_w * scale))
@@ -73,7 +74,7 @@ def preprocess(
     pad_y = (input_size - new_h) // 2
 
     img_lb, _ = _letterbox(image, input_size, torch.zeros(0, 4))
-    tensor = TF.to_tensor(img_lb).unsqueeze(0).to(device)  # (1, 3, H, W)
+    tensor = TF.to_tensor(img_lb).unsqueeze(0).to(device)  # (1, 1, H, W)
 
     meta = {
         "orig_w": orig_w,
@@ -129,8 +130,9 @@ def main():
 
     # --- Load model ---
     logger.info(f"Loading model from {args.checkpoint}")
-    model = MusicDetector(
-        num_classes=num_classes,
+    model = detector_for_checkpoint(
+        args.checkpoint,
+        num_classes,
         use_bottom_up=args.use_bottom_up,
         out_indices=args.out_indices,
     )

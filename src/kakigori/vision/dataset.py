@@ -71,7 +71,7 @@ class OMRDataset(Dataset):
         img_path, ann_path = self.samples[idx]
 
         try:
-            image = Image.open(img_path).convert("RGB")
+            image = Image.open(img_path).convert("L")
         except (OSError, SyntaxError) as e:
             print(f"Warning: Skipping corrupted image {img_path}: {e}")
             return self.__getitem__(random.randint(0, len(self.samples) - 1))
@@ -119,9 +119,12 @@ class OMRDataset(Dataset):
         """Apply augmentations using the pre-initialized pipeline."""
         img = np.array(image)
         h, w = img.shape[:2]
+        grey = img.ndim == 2
 
-        # 1. C++ Albumentations pass
-        img = self.scanner_pipeline(image=img)["image"]
+        # 1. C++ Albumentations pass (on an explicit channel axis)
+        img = self.scanner_pipeline(image=img[..., None] if grey else img)["image"]
+        if grey:
+            img = img.reshape(h, w)
 
         # 2. NumPy manual passes. No morphology here: at 640 px stems, barlines
         # and staff lines are under a pixel wide, and cv2.dilate (a max filter,
@@ -146,6 +149,8 @@ class OMRDataset(Dataset):
 
             if np.random.rand() < 0.5:
                 grad = 1.0 - grad
+            if grey:
+                grad = grad[..., 0]
 
             intensity = np.random.uniform(10, 35)
             img = np.clip(
@@ -178,8 +183,8 @@ def _letterbox(
     # Resize without distortion
     image = image.resize((new_w, new_h), Image.BILINEAR)
 
-    # Paste onto a grey canvas of the target size
-    canvas = Image.new("RGB", (size, size), (114, 114, 114))
+    # Paste onto a grey canvas of the target size (same mode as the page)
+    canvas = Image.new(image.mode, (size, size), 114 if image.mode == "L" else (114, 114, 114))
     pad_x = (size - new_w) // 2
     pad_y = (size - new_h) // 2
     canvas.paste(image, (pad_x, pad_y))

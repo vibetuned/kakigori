@@ -18,7 +18,7 @@ from transformers.trainer_utils import get_last_checkpoint
 
 # Local folder imports
 from .model import MusicDetector
-from .utils import RatioSampler, omr_collate_fn, load_checkpoint
+from .utils import RatioSampler, omr_collate_fn, load_checkpoint, detector_for_checkpoint
 from .dataset import OMRDataset
 from .trainer import OMRTrainer
 
@@ -76,6 +76,12 @@ def parse_args():
     parser.add_argument("--num-workers", type=int, default=4)
 
     # Model args
+    parser.add_argument(
+        "--backbone",
+        default="regla_m",
+        help="regla_t/s/m/l/x (one grey channel, from scratch) or a timm model name; "
+        "ignored with --fine-tune (taken from the checkpoint)",
+    )
     parser.add_argument("--use-bottom-up", action="store_true")
     parser.add_argument(
         "--out-indices",
@@ -240,11 +246,22 @@ def main():
             logger.warning("Invalid synthetic ratio. Using real data only.")
 
     # --- Initialize Model ---
-    model = MusicDetector(
-        num_classes=num_classes,
-        use_bottom_up=args.use_bottom_up,
-        out_indices=tuple(args.out_indices),
-    )
+    if args.fine_tune:
+        model = detector_for_checkpoint(
+            args.fine_tune,
+            num_classes,
+            use_bottom_up=args.use_bottom_up,
+            out_indices=tuple(args.out_indices),
+        )
+    else:
+        model = MusicDetector(
+            num_classes=num_classes,
+            use_bottom_up=args.use_bottom_up,
+            out_indices=tuple(args.out_indices),
+            backbone=args.backbone,
+        )
+    n_params = sum(p.numel() for p in model.parameters())
+    logger.info(f"Detector: {model.backbone_name} backbone, {n_params / 1e6:.2f}M parameters")
 
     if args.fine_tune:
         logger.info(

@@ -17,6 +17,10 @@ input_size: 640
 num_workers: 4
 
 # Model args
+# ReGLA (arXiv 2602.05262) from scratch on one grey channel: regla_t/s/m/l/x
+# (stages 1-3 of regla_m: 3.0M params, vs 60.1M for the ConvNeXt-B DINOv3
+# stages of the 0.1.x detectors)
+backbone: regla_m
 use_bottom_up: false
 out_indices: [0, 1, 2]
 

@@ -19,7 +19,7 @@ from .trainer import GNNTrainer, compute_gnn_metrics
 from .dataset import OMRFullPageDataset
 from .utils import omr_collate_fn
 from .model import GraphVisualExtractor, ScoreGraphReconstructor, GNNPhase2Model
-from kakigori.vision.utils import load_checkpoint
+from kakigori.vision.utils import detector_for_checkpoint, load_checkpoint
 from kakigori.vision.model import MusicDetector
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -160,11 +160,8 @@ def main():
     # Initialize Models
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    detector = MusicDetector(
-        num_classes=num_classes,
-    )
-
     if args.detector_checkpoint:
+        detector = detector_for_checkpoint(args.detector_checkpoint, num_classes)
         logger.info(
             f"Loading weights from {args.detector_checkpoint} for fine-tuning (forcing CPU to save VRAM)..."
         )

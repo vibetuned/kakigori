@@ -1,27 +1,34 @@
 #!/bin/bash
-# Kakigori Dataset Regeneration Script
+# Build a dataset directory from its curated sources with musicset.
 #
-# Wipes everything in a dataset directory EXCEPT filter/ (the curated .mxl
-# sources) and rebuilds the derived data with the current symbol/annotation
-# configuration:
+#   filter/*.mxl -> imgs/ annotations/ graphs/ mei/ kern/  (what training reads)
+#                   pages/ manifest/ injected/ svgs/       (musicset's own records)
 #
-#   filter/*.mxl -> injected/       (inject-mids: stable ids, needed by graphs)
-#                -> svgs/ + imgs/   (render-dataset, from injected/)
-#                -> annotations/    (extract-annotations)
-# and, with WITH_GRAPHS=1, additionally:
-#                -> mei/ + krn/     (export-dataset, from injected/)
-#                -> graphs/         (generate-graphs)
+# Builds are resumable and never stale: a score is skipped only when its
+# manifest matches the current settings, and a changed conf re-projects
+# annotations/ and graphs/ from pages/ without rendering. Nothing is deleted,
+# so evaluation outputs kept in the directory (krn-det/, ...) survive.
 #
 # Usage:
-#   ./regenerate-dataset.sh [DATA_DIR]                # default: data/train-small
-#   WITH_GRAPHS=1 ./regenerate-dataset.sh data/validation-test
+#   ./regenerate-dataset.sh [DATA_DIR]            # default: data/train-lite
+#   SEED=1 ./regenerate-dataset.sh data/validation-lite
+#   PROFILE=fixed CONF=conf ./regenerate-dataset.sh data/train-small
+#
+# Environment:
+#   CONF      label set: a conf directory (default conf-lite)
+#   PROFILE   varied (a font, staff size, line weights, spacing, page per
+#             score; default) or fixed (Verovio's default look)
+#   SEED      seed of the varied profile (default 0)
+#   VARIANTS  engravings per score (default 1)
+#   WORKERS   parallel scores (default: musicset's, half the spare cores)
 
 set -euo pipefail
 
-DATA_DIR="${1:-data/train-small}"
-WITH_GRAPHS="${WITH_GRAPHS:-0}"
-# Conf directory: point CONF at conf-lite for the LITE dataset track
-CONF="${CONF:-conf}"
+DATA_DIR="${1:-data/train-lite}"
+CONF="${CONF:-conf-lite}"
+PROFILE="${PROFILE:-varied}"
+SEED="${SEED:-0}"
+VARIANTS="${VARIANTS:-1}"
 
 log() { echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*"; }
 
@@ -29,60 +36,19 @@ if [ ! -d "$DATA_DIR/filter" ] || ! ls "$DATA_DIR/filter"/*.mxl >/dev/null 2>&1;
     log "ERROR: $DATA_DIR/filter does not exist or contains no .mxl files."
     exit 1
 fi
-
-N_MXL=$(ls "$DATA_DIR/filter"/*.mxl | wc -l)
-log "Regenerating $DATA_DIR from $N_MXL filtered MXL files."
-log "================================================================="
-
-log "Cleaning derived data (keeping filter/ and raw/)..."
-for entry in "$DATA_DIR"/*; do
-    name=$(basename "$entry")
-    if [ "$name" != "filter" ] && [ "$name" != "raw" ]; then
-        log "  removing $entry"
-        rm -rf "$entry"
-    fi
-done
-
-log "Stage 0: injecting stable element ids..."
-uv run inject-mids "$DATA_DIR/filter" --out_dir "$DATA_DIR/injected"
-
-log "Stage 1: rendering MXL -> SVG + PNG..."
-uv run render-dataset "$DATA_DIR/injected" \
-    --svg_dir "$DATA_DIR/svgs" --img_dir "$DATA_DIR/imgs"
-
-log "Stage 2: extracting bbox annotations from SVGs..."
-# The extractor skips already-written JSONs, so retrying only reprocesses
-# failures (transient errors right after the render stage have been observed)
-N_IMGS=$(ls "$DATA_DIR/imgs" | wc -l)
-for attempt in 1 2 3; do
-    uv run extract-annotations \
-        --svg_dir "$DATA_DIR/svgs" --img_dir "$DATA_DIR/imgs" \
-        --out_dir "$DATA_DIR/annotations" --config "$CONF/config.json"
-    N_ANN=$(ls "$DATA_DIR/annotations" 2>/dev/null | wc -l)
-    if [ "$N_ANN" -ge "$N_IMGS" ]; then
-        break
-    fi
-    log "  attempt $attempt: $N_ANN/$N_IMGS annotations written, retrying missing pages..."
-done
-
-if [ "$WITH_GRAPHS" = "1" ]; then
-    log "Stage 3: exporting MEI groundtruth..."
-    uv run export-dataset "$DATA_DIR/injected" \
-        --mei_dir "$DATA_DIR/mei" --krn_dir "$DATA_DIR/krn"
-
-    log "Stage 4: generating ground-truth graphs..."
-    uv run generate-graphs "$DATA_DIR/mei" "$DATA_DIR/annotations" \
-        --out_dir "$DATA_DIR/graphs" --roles_file "$CONF/structure.json"
-else
-    log "Stages 3-4 skipped (set WITH_GRAPHS=1 to also export MEI + graphs)."
+if [ -d "$DATA_DIR/graphs" ] && ls "$DATA_DIR/graphs"/*.pt >/dev/null 2>&1; then
+    log "WARNING: $DATA_DIR/graphs holds .pt graphs from the old pipeline; the GNN"
+    log "         dataset prefers JSON but delete them to avoid mixing the two."
 fi
 
-log "================================================================="
-log "Done. Summary for $DATA_DIR:"
-log "  svgs:        $(ls "$DATA_DIR/svgs" 2>/dev/null | wc -l) files"
-log "  imgs:        $(ls "$DATA_DIR/imgs" 2>/dev/null | wc -l) files"
-log "  annotations: $(ls "$DATA_DIR/annotations" 2>/dev/null | wc -l) files"
-if [ "$WITH_GRAPHS" = "1" ]; then
-    log "  mei:         $(ls "$DATA_DIR/mei" 2>/dev/null | wc -l) files"
-    log "  graphs:      $(ls "$DATA_DIR/graphs" 2>/dev/null | wc -l) files"
-fi
+log "Building $DATA_DIR from $(ls "$DATA_DIR/filter"/*.mxl | wc -l) sources" \
+    "(labels $CONF, profile $PROFILE, seed $SEED, variants $VARIANTS)"
+
+uv run musicset build "$DATA_DIR/filter" "$DATA_DIR" \
+    --labels "$CONF" --graph --kern \
+    --profile "$PROFILE" --seed "$SEED" --variants "$VARIANTS" \
+    ${WORKERS:+--workers "$WORKERS"}
+
+log "Done. imgs: $(ls "$DATA_DIR/imgs" | wc -l), annotations: $(ls "$DATA_DIR/annotations" | wc -l)," \
+    "graphs: $(ls "$DATA_DIR/graphs" | wc -l), mei: $(ls "$DATA_DIR/mei" | wc -l)" \
+    "(rejections in $DATA_DIR/failures.jsonl)"

@@ -8,6 +8,8 @@ import torchvision.transforms.functional as TF
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 
+from kakigori.graph.graph_io import find_graph, load_graph
+
 
 class OMRFullPageDataset(Dataset):
     def __init__(self, img_dir, json_dir, graph_dir, class_list, input_size=640,
@@ -32,13 +34,10 @@ class OMRFullPageDataset(Dataset):
             stem = img_path.stem
             json_path = self.json_dir / f"{stem}.json"
 
-            # Handle the naming convention (e.g., 'score_page1' vs 'score')
-            stem_no_page = stem.split("_page")[0]
-            graph_path = self.graph_dir / f"{stem_no_page}.pt"
-            if not graph_path.exists():
-                graph_path = self.graph_dir / f"{stem}.pt"
+            # One graph per score ('score.json' for 'score_page1.png')
+            graph_path = find_graph(self.graph_dir, stem)
 
-            if json_path.exists() and graph_path.exists():
+            if json_path.exists() and graph_path is not None:
                 self.samples.append(
                     {"img": img_path, "json": json_path, "graph": graph_path}
                 )
@@ -52,19 +51,19 @@ class OMRFullPageDataset(Dataset):
         # --- A. Load Vision Data ---
         # Letterbox to the detector's training resolution: aspect-preserving
         # resize on a grey canvas, same convention as vision/dataset._letterbox
-        image = Image.open(sample["img"]).convert("RGB")
+        image = Image.open(sample["img"]).convert("L")
         orig_w, orig_h = image.size
         scale = min(self.input_size / orig_w, self.input_size / orig_h)
         new_w, new_h = int(round(orig_w * scale)), int(round(orig_h * scale))
         image = image.resize((new_w, new_h), Image.BILINEAR)
-        canvas = Image.new("RGB", (self.input_size, self.input_size), (114, 114, 114))
+        canvas = Image.new("L", (self.input_size, self.input_size), 114)
         pad_x = (self.input_size - new_w) // 2
         pad_y = (self.input_size - new_h) // 2
         canvas.paste(image, (pad_x, pad_y))
-        img_tensor = TF.to_tensor(canvas)  # Shape: (3, input_size, input_size)
+        img_tensor = TF.to_tensor(canvas)  # Shape: (1, input_size, input_size)
 
         # --- B. Load Relational Data ---
-        graph_data = torch.load(sample["graph"], weights_only=False)
+        graph_data = load_graph(sample["graph"])
         edge_index = graph_data["edge_index"]  # Shape: (2, E)
         edge_labels = graph_data["y"]  # Shape: (E)
         node_ids = graph_data["node_ids"]  # List of strings

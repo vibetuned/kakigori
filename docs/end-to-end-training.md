@@ -5,7 +5,7 @@ measurable `**kern` output. Each stage lists the command, what it consumes and
 produces, and how to check it worked before moving on.
 
 ```
-MXL corpus ─▶ curate ─▶ render/export ─▶ annotations ─▶ graphs
+MXL corpus ─▶ musicset select ─▶ musicset build ─▶ imgs + annotations + graphs
                                                           │
               detector (vision) ◀── imgs + annotations ───┤
                      │ frozen                             │
@@ -16,11 +16,14 @@ MXL corpus ─▶ curate ─▶ render/export ─▶ annotations ─▶ graphs
 
 Conventions: all commands run from the repo root with `uv run`. A "dataset
 directory" always means the parallel triplet `imgs/` (PNG), `annotations/`
-(JSON), `graphs/` (PyG `.pt`), plus `mei/` and `krn/` groundtruth where noted.
+(JSON), `graphs/` (JSON; old sets: PyG `.pt`), plus `mei/` and `kern/`
+groundtruth, all built by [musicset](modules/dataset.md) from the curated
+sources in `filter/`.
 
 ## Prerequisites
 
-- `uv sync` completed (PyTorch ≥ 2.7 CUDA wheels, Verovio ≥ 6.0, music21).
+- `uv sync` completed (PyTorch ≥ 2.7 CUDA wheels; musicset brings Verovio ≥ 6.3
+  and music21). Run musicset's `scripts/install-fonts.sh` once per machine.
 - A GPU. Vision training defaults to batch 4 @ 640px; the GNN runs full-page
   graphs at batch 2.
 - A source corpus of `.mxl` files.
@@ -28,75 +31,48 @@ directory" always means the parallel triplet `imgs/` (PNG), `annotations/`
 ## Stage 0 — Curate the corpus
 
 ```
-uv run filter-mxl        # keep only scores whose render contains target classes
-uv run inject-mids       # stamp stable id= attributes into every MXL element
+uv run musicset select ../music_data/mxl data/train-lite/filter --lite --limit 9500 \
+    --exclude-from data/validation-lite/filter --copy
 ```
 
-`inject-mids` is what makes ground-truth graphs possible: the ids survive
-Verovio's MXL→MEI/SVG conversion, so a bounding box in the SVG can be traced
-back to the MEI element it draws. Skipping it breaks `generate-graphs`.
-
-Optional augmentation (choose per experiment):
+`--lite` keeps one part, at most two staves, one voice per staff, no
+tablature or percussion, no gestural-only accidentals; `--max-voices` /
+`--per-voice` shape a full-track selection; `--exclude-from` keeps holdouts
+out. Synthetic scores (choose per experiment) are MusicXML too:
 
 | Command | What it does |
 | --- | --- |
-| `synthetic-arranger` | One random per-measure mutation per real score |
-| `synthetic-generator` | Aggressive whole-score probabilistic mutations |
-| `synthetic-writer` | Brand-new scale/chord exercises from scratch |
+| `musicset synth exercise` | Scales and chord progressions, curriculum switches, `--profile detector` weights weak classes |
+| `musicset synth piano` | Melody/chords over accompaniment patterns on functional harmony |
+| `musicset synth counterpoint` | Species counterpoint from a pool (`musicset counterpoint-pool`): piano, duet with C clefs, one staff, choir |
+| `musicset synth mutate` / `arrange` | Real scores with rare notation injected / one mutation per measure |
 
-## Stage 1 — Render and export groundtruth
-
-```
-uv run render-dataset    # MXL → per-page SVG + PNG
-uv run export-dataset    # MXL → MEI (+ Verovio's own .krn attempt)
-```
-
-The MEI is the real groundtruth used everywhere downstream. The exported
-`.krn` from Verovio is unreliable (see `data/validation-test/krn/` for what
-failure looks like) — use `compare-kern` against the MEI instead of diffing
-kern text.
-
-## Stage 2 — Annotations and graphs
-
-For a dataset directory that keeps its curated sources in `filter/`, the
-whole render → extract cycle (Stages 1–2) is wrapped in one script that
-first wipes all derived data:
+## Stages 1-2 — Engrave, annotate, graphs
 
 ```
-./regenerate-dataset.sh data/train-small                 # svgs + imgs + annotations
-WITH_GRAPHS=1 ./regenerate-dataset.sh data/validation-x  # + mei + krn + graphs
+./regenerate-dataset.sh data/train-lite                    # varied engraving, seed 0
+SEED=1 ./regenerate-dataset.sh data/validation-lite
+PROFILE=fixed CONF=conf ./regenerate-dataset.sh data/train-small
 ```
 
-Use it whenever the symbol/annotation configuration changes — it also
-verifies the annotation count against the page count and retries the
-extraction (transient mass failures right after the render stage have been
-observed; failures are logged as warnings per file).
+One `musicset build` per set: stable ids, Verovio engraving (`varied`: a font,
+staff size, line weights, spacing and page per score; `fixed`: Verovio's
+default look), PNG pages, bbox JSONs under the conf's label set, MEI, graphs
+(`edge_index`, `y` with 6 edge classes: 0 none / 1 structural / 2 modifier /
+3 temporal / 4 sync-text / 5 simultaneity, `node_ids`, `json_files`) and
+`**kern`. The MEI is the real groundtruth used downstream; score kern with
+`compare-kern` against it.
 
-The underlying commands, for custom layouts:
+Builds are resumable and never stale: each score's manifest records its
+settings, so a changed conf re-projects annotations and graphs from the stored
+canonical pages without re-rendering (and graphs always match the JSONs they
+were built from). Rejections (a staff off the page, or the optional density
+gates) are listed in `failures.jsonl`. Adding a glyph class touches four
+config files and must append to the end of `target_classes` — see "Adding a
+new glyph class" in the README.
 
-```
-uv run extract-annotations --svg_dir <d>/svgs --img_dir <d>/imgs --out_dir <d>/annotations
-uv run generate-graphs <d>/mei <d>/annotations --out_dir <d>/graphs --roles_file conf/structure.json
-```
-
-Produces per-page bbox JSONs (vision targets) and per-score `.pt` graphs with
-`edge_index`, `y` (6 edge classes: 0 none / 1 structural / 2 modifier /
-3 temporal / 4 sync-text / 5 simultaneity), `node_ids`, `json_files`
-(GNN targets).
-
-**Gotchas (will silently bite):**
-
-- Both commands **skip existing output files** and still count them as
-  successes. Re-running after a config change requires deleting the old
-  outputs first.
-- Annotations and graphs must be regenerated **together**: node-ID collisions
-  are resolved positionally at load time, so `.pt` files built against older
-  JSONs stop matching.
-- Adding a glyph class touches four config files and must append to the end
-  of `target_classes` — see "Adding a new glyph class" in the README.
-
-Sanity check: open a few pages in `visualize-dataset` (boxes) and
-`visualize-graphs` (edges overlaid on the score).
+Sanity check: `uv run musicset view data/<set> --labels conf-lite` (boxes,
+graph edges, the score graph).
 
 ## Stage 3 — Train the vision detector
 
@@ -131,7 +107,7 @@ distinct causes of a weak class, with different remedies:
 - **Rare in the corpus** (few training examples) → generate synthetic data
   targeting it (3c).
 - **Badly annotated** (extraction bug, wrong bbox) → inspect Stage-2 output
-  with `visualize-dataset` for that class first; more data won't fix wrong
+  with `musicset view` for that class first; more data won't fix wrong
   boxes.
 - **Below the input's resolving power** → if the class differs from a common
   one only by a few pixels at `input_size` 640, data stops helping once
@@ -145,11 +121,11 @@ distinct causes of a weak class, with different remedies:
 
 ### 3c. Generate targeted synthetic data
 
-Use the synthetic generators to oversample the weak classes —
-`synthetic-writer` (from-scratch exercises), `synthetic-generator`
-(aggressive mutations), `synthetic-arranger` (mild per-measure mutations) —
-into a separate dataset directory, then run
-`./regenerate-dataset.sh data/synthetic-<name>` to render and annotate it.
+Use `musicset synth` to oversample the weak classes — `exercise --profile
+detector` (weighted toward weak classes), `piano`, `counterpoint`, `mutate`
+(aggressive mutations of real scores), `arrange` (mild per-measure mutations)
+— into `data/synthetic-<name>/filter`, then run
+`./regenerate-dataset.sh data/synthetic-<name>` to engrave and annotate it.
 
 ### 3d. Synthetic fine-tune and consolidation
 
@@ -187,8 +163,8 @@ both stages crash-resume independently). Before launching, make sure **every
 annotation source actually contains the new labels** — real *and* synthetic:
 a synthetic set extracted before the new SMuFL mapping contributes zero
 signal even if its SVGs contain the glyph, and re-extracting is cheap
-(`rm -rf <set>/annotations`, then `extract-annotations` — no re-render
-needed). Then re-enter the 3b–3d loop for the new classes. Reference run:
+(rebuild the set with the new conf: musicset re-projects from the stored
+pages, no re-render). Then re-enter the 3b–3d loop for the new classes. Reference run:
 107 → 109 (`clefG8vb`/`clefG8va`, 2026-07-17): expansion `run_004` valsmall
 mAP@.50 0.704 (vs 0.687 before — no regression), octave-boost consolidations
 `run_005`/`run_006` → 0.724, `clefG8vb` 0.986, `clefG8va` capped at 0.317 by
@@ -331,7 +307,7 @@ giving a ~±0.5 per-file noise floor end-to-end — validate heuristics on
 the deterministic ceiling path or on aggregate deltas well above noise.
 
 **Held-out generalization** (`data/test-small`, 224 unseen scores / 484
-pages / 82.6k notes, curated from `raw/` with `filter-mxl`, 2026-07-17):
+pages / 82.6k notes, curated from `raw/` with the old `filter-mxl`, 2026-07-17):
 detector mAP@.50 0.722 / .50:.95 0.637 (validation-small: 0.724/0.644) —
 no overfitting. Ceiling 90.0% / 89.0% with **median file 100% / 100%**
 (200 of 223 files ≥99% pitch); end-to-end 82.3% / 75.0%. The model-path
@@ -375,10 +351,10 @@ sequence-level comparison.
 
 | Artifact | Produced by | Consumed by |
 | --- | --- | --- |
-| `imgs/*.png` | `render-dataset` | vision + GNN training, inference |
-| `annotations/*.json` | `extract-annotations` | vision targets, GNN nodes, serializer bboxes |
-| `mei/*.mei` | `export-dataset` | `generate-graphs`, `compare-kern` |
-| `graphs/*.pt` | `generate-graphs` | GNN targets, `validate-groundtruth` |
+| `imgs/*.png` | `musicset build` | vision + GNN training, inference |
+| `annotations/*.json` | `musicset build` | vision targets, GNN nodes, serializer bboxes |
+| `mei/*.mei` | `musicset build` | graphs, `compare-kern` |
+| `graphs/*.json` | `musicset build --graph` | GNN targets, `validate-groundtruth` |
 | `checkpoints/run_NNN` | `train-model` | `train-gnn` (frozen), `infer-model` |
 | `checkpoints_gnn/run_NNN` | `train-gnn` | Stage-6 inference |
 | `krn-me/*.krn` | `validate-groundtruth` | `compare-kern`, `eval.py` |
