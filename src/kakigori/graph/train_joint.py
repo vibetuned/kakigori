@@ -43,7 +43,7 @@ from .heuristics import generate_axis_aware_edges, map_gt_to_candidates
 from .model import GraphVisualExtractor, ScoreGraphReconstructor, GNNPhase2Model
 from kakigori.vision.trainer import OMRTrainer
 from kakigori.vision.losses import DynamicFocalLoss, CIoULoss
-from kakigori.vision.utils import detector_for_checkpoint, load_checkpoint
+from kakigori.vision.utils import detector_for_checkpoint, load_checkpoint, checkpoint_input_size
 from kakigori.vision.model import MusicDetector
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -71,10 +71,10 @@ class JointTrainer(GNNTrainer):
         self.edge_weight = edge_weight
         self.cls_weight = cls_weight
         self.reg_weight = reg_weight
-        self.scale_ranges = (
-            scale_ranges if scale_ranges is not None
-            else OMRTrainer.DEFAULT_SCALE_RANGES
-        )
+        # the detector's own ranges: the levels it was trained to split boxes on
+        if scale_ranges is not None:
+            self.model.detector.set_scale_ranges(scale_ranges)
+        self.scale_ranges = self.model.detector.scale_ranges
         self.det_focal = DynamicFocalLoss(base_gamma=base_gamma, max_gamma=max_gamma)
         self.det_ciou = CIoULoss()
 
@@ -97,14 +97,15 @@ class JointTrainer(GNNTrainer):
 
         # GNN dataset boxes are absolute xyxy on the letterboxed canvas;
         # build_targets wants normalized cxcywh
+        canvas_w, canvas_h = input_size
         targets_list = []
         for boxes, labels in zip(boxes_list, labels_list):
             if boxes.numel():
                 cxcywh = torch.stack([
-                    (boxes[:, 0] + boxes[:, 2]) / 2.0 / input_size,
-                    (boxes[:, 1] + boxes[:, 3]) / 2.0 / input_size,
-                    (boxes[:, 2] - boxes[:, 0]) / input_size,
-                    (boxes[:, 3] - boxes[:, 1]) / input_size,
+                    (boxes[:, 0] + boxes[:, 2]) / 2.0 / canvas_w,
+                    (boxes[:, 1] + boxes[:, 3]) / 2.0 / canvas_h,
+                    (boxes[:, 2] - boxes[:, 0]) / canvas_w,
+                    (boxes[:, 3] - boxes[:, 1]) / canvas_h,
                 ], dim=1)
             else:
                 cxcywh = boxes.new_zeros((0, 4))
@@ -113,7 +114,7 @@ class JointTrainer(GNNTrainer):
         num_classes = model.detector.heads[0].cls_branch[-1].out_channels
         feature_sizes = [(o["cls"].shape[2], o["cls"].shape[3]) for o in outputs]
         cls_targets, reg_targets, obj_masks = OMRTrainer.build_targets(
-            self, targets_list, feature_sizes, num_classes, device
+            self, targets_list, feature_sizes, num_classes, device, canvas=input_size
         )
 
         max_steps = self.state.max_steps
@@ -191,7 +192,7 @@ class JointTrainer(GNNTrainer):
             feat_dict = {str(idx): feat for idx, feat in enumerate(fused_features)}
 
             # --- Detection loss (page-level, anchors the shared features)
-            input_size = img.shape[-1]
+            input_size = (img.shape[-1], img.shape[-2])  # canvas (width, height)
             det_loss, det_cls, det_reg = self._detection_loss(
                 model, fused_features,
                 [det_boxes_list[i].to(device)], [det_labels_list[i].to(device)],
@@ -339,6 +340,8 @@ def main():
         img_dir=args.img_dir, json_dir=args.ann_dir,
         graph_dir=args.graph_dir, class_list=class_list,
         class_remap=class_remap,
+        # pages letterboxed into the detector's canvas
+        input_size=checkpoint_input_size(args.detector_checkpoint) if args.detector_checkpoint else 640,
     )
     train_size = int(0.95 * len(full_ds))
     train_dataset, val_dataset = torch.utils.data.random_split(

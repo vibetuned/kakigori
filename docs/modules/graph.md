@@ -28,7 +28,7 @@ The flow is roughly:
 **Produces / used by:** Driven by `dataset/generate_graphs.py` to build the per-score `.pt` graphs (which then feed `dataset.OMRFullPageDataset`).
 
 ### `dataset.py`
-**Role:** PyTorch `Dataset` that aligns a page image, its JSON detections, and the pre-built ground-truth graph (`.pt`). Letterboxes every page to the detector's training resolution (`input_size`, default 640 — aspect-preserving, grey padding, same convention as `vision/dataset._letterbox`) and remaps boxes into canvas coordinates; feeding full-resolution pages would put the frozen detector's features out of distribution.
+**Role:** PyTorch `Dataset` that aligns a page image, its JSON detections, and the pre-built ground-truth graph (`.pt`). Letterboxes every page into the detector's canvas (`input_size`: the trainers pass `checkpoint_input_size(detector_checkpoint)`, square 640 for older detectors; the shared `vision/dataset.letterbox_image`) and remaps boxes into canvas coordinates (`page_to_canvas`); feeding full-resolution pages would put the frozen detector's features out of distribution.
 **Key classes/functions:** `OMRFullPageDataset.__init__` matches `(img, json, graph)` triplets by stem (tolerates `_pageN` suffix); `__getitem__` returns `{image, boxes, labels, edges (E,3), file_name}` with boxes/labels strictly ordered to match `node_ids` from the graph, and **edge indices remapped onto the filtered box ordering** — graph nodes without an annotation bbox are dropped, so raw graph indices would silently pair edges with the wrong boxes.
 **Preconditions:** Three parallel directories: `img_dir/*.png`, `json_dir/*.json`, `graph_dir/*.pt`. `.pt` must contain `edge_index`, `y`, `node_ids`. `class_list` (from `conf/config.json["target_classes"]`) drives label encoding.
 **Produces / used by:** Used by `train.py` together with `utils.omr_collate_fn`.
@@ -52,7 +52,7 @@ The flow is roughly:
 ### `infer.py`
 **Role:** End-to-end inference CLI (`infer-omr`): PDF or page images → detector → GNN edges → graph repair → `**kern`. Rewritten for v0.1.0 on the `validate_predictions` mechanics — the earlier prototype inferencer classes it contained were dead code.
 **Key classes/functions:**
-- `detect_page_nodes(detector, page_image, ...)` — runs the detector on a letterboxed page and returns serializer-format nodes (`id`/`class`/`bbox`/`cx`/`cy`) in original page coordinates.
+- `detect_page_nodes(detector, page_image, ...)` — runs the detector on the page letterboxed into its own canvas (`input_size=None`), decodes multi-label, and returns serializer-format nodes (`id`/`class`/`bbox`/`cx`/`cy`) in original page coordinates.
 - `main()` — loads the detection checkpoint and the GNN wrapper separately (two-model deployment: the wrapper's adapted neck only feeds RoI features), then per page: detect → `predict_page_edges` → `_inject_system_measure_edges` → `repair_page_edges`, and finally one `MinimalHumdrumSerializer` pass over all pages.
 **Preconditions:** detector checkpoint dir, GNN wrapper run dir, `conf/config.json`, `conf/structure.json`; `pypdfium2` for `--pdf` input.
 **Produces / used by:** Writes `page_NNNN.png`/`page_NNNN.json` (dataset annotation format, same as `infer-model`) and `<stem>.krn` into `--output-dir` — or one `page_NNNN.krn` per page with `--split`. Applies `bbox_repair` by default (`--no-bbox-repair` to disable).

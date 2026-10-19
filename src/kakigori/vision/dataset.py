@@ -21,12 +21,12 @@ class OMRDataset(Dataset):
         img_dir: str,
         ann_dir: str,
         class_list: list[str],
-        input_size: int = 640,
+        input_size: int | tuple[int, int] = 640,
         augment: bool = False,
     ):
         self.img_dir = Path(img_dir)
         self.ann_dir = Path(ann_dir)
-        self.input_size = input_size
+        self.input_size = canvas_size(input_size)
         self.augment = augment
 
         self.class_to_idx = {c: i for i, c in enumerate(class_list)}
@@ -43,8 +43,8 @@ class OMRDataset(Dataset):
             # Third party imports
             import albumentations as A
 
-            # Dynamically calculate hole sizes based on the padded input_size
-            max_hole = max(10, self.input_size // 20)
+            # Dynamically calculate hole sizes based on the canvas
+            max_hole = max(10, min(self.input_size) // 20)
             min_hole = 5
 
             self.scanner_pipeline = A.Compose(
@@ -161,50 +161,90 @@ class OMRDataset(Dataset):
 
 
 # ---------------------------------------------------------------------------
-# Letterbox helper
+# Letterbox helpers: the page is fitted, undistorted, into a (width, height)
+# canvas and the remainder padded grey. A square canvas wastes ~30% of the
+# input on padding for portrait pages; a page-shaped one (512x736 for A4)
+# spends it on resolution instead.
 # ---------------------------------------------------------------------------
+
+
+def canvas_size(input_size) -> tuple[int, int]:
+    """(width, height) of the network input; an int is a square canvas."""
+    if isinstance(input_size, int):
+        return (input_size, input_size)
+    width, height = input_size
+    return (int(width), int(height))
+
+
+def letterbox_geometry(orig_w: int, orig_h: int, input_size) -> dict:
+    """Where a page lands on the canvas. Boxes map with the per-axis factors
+    of the rounded resize (``scale_x``/``scale_y``), not the unrounded
+    ``scale``, which drifts up to half a canvas pixel at the far edge."""
+    canvas_w, canvas_h = canvas_size(input_size)
+    scale = min(canvas_w / orig_w, canvas_h / orig_h)
+    new_w = int(round(orig_w * scale))
+    new_h = int(round(orig_h * scale))
+    return {
+        "orig_w": orig_w,
+        "orig_h": orig_h,
+        "canvas_w": canvas_w,
+        "canvas_h": canvas_h,
+        "new_w": new_w,
+        "new_h": new_h,
+        "pad_x": (canvas_w - new_w) // 2,
+        "pad_y": (canvas_h - new_h) // 2,
+        "scale": scale,
+        "scale_x": new_w / orig_w,
+        "scale_y": new_h / orig_h,
+    }
+
+
+def letterbox_image(image: Image.Image, input_size) -> tuple[Image.Image, dict]:
+    """The page fitted into the canvas, and its ``letterbox_geometry``."""
+    geo = letterbox_geometry(*image.size, input_size)
+    image = image.resize((geo["new_w"], geo["new_h"]), Image.BILINEAR)
+    fill = 114 if image.mode == "L" else (114, 114, 114)
+    canvas = Image.new(image.mode, (geo["canvas_w"], geo["canvas_h"]), fill)
+    canvas.paste(image, (geo["pad_x"], geo["pad_y"]))
+    return canvas, geo
+
+
+def page_to_canvas(boxes: torch.Tensor, geo: dict) -> torch.Tensor:
+    """(x1, y1, x2, y2) page pixels -> canvas pixels."""
+    boxes = boxes.clone()
+    boxes[:, [0, 2]] = boxes[:, [0, 2]] * geo["scale_x"] + geo["pad_x"]
+    boxes[:, [1, 3]] = boxes[:, [1, 3]] * geo["scale_y"] + geo["pad_y"]
+    return boxes
+
+
+def canvas_to_page(boxes: torch.Tensor, geo: dict) -> torch.Tensor:
+    """(x1, y1, x2, y2) canvas pixels -> page pixels, clamped to the page."""
+    boxes = boxes.clone()
+    boxes[:, [0, 2]] = ((boxes[:, [0, 2]] - geo["pad_x"]) / geo["scale_x"]).clamp(0.0, float(geo["orig_w"]))
+    boxes[:, [1, 3]] = ((boxes[:, [1, 3]] - geo["pad_y"]) / geo["scale_y"]).clamp(0.0, float(geo["orig_h"]))
+    return boxes
 
 
 def _letterbox(
     image: Image.Image,
-    size: int,
+    size,
     boxes: torch.Tensor,
 ) -> tuple[Image.Image, torch.Tensor]:
-    """Resize image to (size x size) with grey padding, preserving aspect ratio.
+    """Fit the page into the canvas (``size``: int or (width, height)).
 
-    Boxes are assumed to be in normalised (cx, cy, w, h) format relative to the
-    original image. They are remapped to stay valid relative to the padded canvas.
+    Boxes are normalised (cx, cy, w, h) relative to the page, and come back
+    normalised relative to the canvas (x by its width, y by its height).
     """
-    orig_w, orig_h = image.size
-    scale = min(size / orig_w, size / orig_h)
-    new_w = int(round(orig_w * scale))
-    new_h = int(round(orig_h * scale))
-
-    # Resize without distortion
-    image = image.resize((new_w, new_h), Image.BILINEAR)
-
-    # Paste onto a grey canvas of the target size (same mode as the page)
-    canvas = Image.new(image.mode, (size, size), 114 if image.mode == "L" else (114, 114, 114))
-    pad_x = (size - new_w) // 2
-    pad_y = (size - new_h) // 2
-    canvas.paste(image, (pad_x, pad_y))
-
-    # Remap box coordinates to the padded canvas
+    canvas, geo = letterbox_image(image, size)
     if boxes.numel() > 0:
-        # Convert cx/cy from original-normalised to pixel coords on canvas
-        cx = boxes[:, 0] * new_w + pad_x
-        cy = boxes[:, 1] * new_h + pad_y
-        bw = boxes[:, 2] * new_w
-        bh = boxes[:, 3] * new_h
-        # Renormalise to canvas size
+        canvas_w, canvas_h = geo["canvas_w"], geo["canvas_h"]
         boxes = torch.stack(
             [
-                cx / size,
-                cy / size,
-                bw / size,
-                bh / size,
+                (boxes[:, 0] * geo["new_w"] + geo["pad_x"]) / canvas_w,
+                (boxes[:, 1] * geo["new_h"] + geo["pad_y"]) / canvas_h,
+                boxes[:, 2] * geo["new_w"] / canvas_w,
+                boxes[:, 3] * geo["new_h"] / canvas_h,
             ],
             dim=1,
         )
-
     return canvas, boxes

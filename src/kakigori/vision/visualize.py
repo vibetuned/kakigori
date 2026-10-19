@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 # Local folder imports
 from .infer import preprocess
 from .utils import detector_for_checkpoint, load_checkpoint, decode_model_outputs
+from .dataset import canvas_size, canvas_to_page
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -184,12 +185,12 @@ class ModelVisualizer(QMainWindow):
         img_dir,
         hierarchy_path,
         config_path,
-        input_size=640,
+        input_size=None,
         conf_thresh=0.3,
         iou_thresh=0.5,
         ann_dir=None,
         image_paths=None,
-        multi_label=False,
+        multi_label=True,
     ):
         super().__init__()
         backbone = getattr(model, "backbone_name", "detector")
@@ -198,7 +199,8 @@ class ModelVisualizer(QMainWindow):
 
         self.model = model
         self.device = device
-        self.input_size = input_size
+        # the detector's own canvas unless overridden
+        self.input_size = canvas_size(input_size) if input_size else model.input_size
         self.iou_thresh = iou_thresh
         self.current_conf_thresh = conf_thresh
         self.multi_label = multi_label
@@ -227,7 +229,8 @@ class ModelVisualizer(QMainWindow):
         self._inference_lock = threading.Lock()
         self._captured_neck = []
         self._captured_backbone = []
-        self._scale_labels = ["Fine", "Mid", "Coarse"]
+        # one button per detection level, named by its stride
+        self._scale_labels = [f"1/{4 * 2 ** i}" for i in model.out_indices]
 
         # Threading signals
         self.worker_signals = InferenceSignals()
@@ -512,9 +515,7 @@ class ModelVisualizer(QMainWindow):
         preds = decode_model_outputs(
             raw_outputs, conf_thresh, self.iou_thresh, self.input_size, multi_label=self.multi_label
         )[0]
-        boxes = preds["boxes"].float().clone()
-        boxes[:, [0, 2]] = ((boxes[:, [0, 2]] - meta["pad_x"]) / meta["scale_x"]).clamp(0.0, float(meta["orig_w"]))
-        boxes[:, [1, 3]] = ((boxes[:, [1, 3]] - meta["pad_y"]) / meta["scale_y"]).clamp(0.0, float(meta["orig_h"]))
+        boxes = canvas_to_page(preds["boxes"].float(), meta)
         return [
             {
                 "class": self.class_list[int(c)],
@@ -750,11 +751,10 @@ class ModelVisualizer(QMainWindow):
 
     # --- Rendering Updates ---
     def _crop_letterbox(self, hm_pil, meta):
-        s, pad_x, pad_y = meta["input_size"], meta["pad_x"], meta["pad_y"]
-        content_w = int(round(meta["orig_w"] * meta["scale"]))
-        content_h = int(round(meta["orig_h"] * meta["scale"]))
-        hm_full = hm_pil.resize((s, s), Image.Resampling.BILINEAR)
-        return hm_full.crop((pad_x, pad_y, pad_x + content_w, pad_y + content_h))
+        """A map over the whole canvas, cropped to the page area."""
+        pad_x, pad_y = meta["pad_x"], meta["pad_y"]
+        hm_full = hm_pil.resize((meta["canvas_w"], meta["canvas_h"]), Image.Resampling.BILINEAR)
+        return hm_full.crop((pad_x, pad_y, pad_x + meta["new_w"], pad_y + meta["new_h"]))
 
     def _update_scores_label(self, cached, visible):
         match = cached.get("match")
@@ -780,11 +780,6 @@ class ModelVisualizer(QMainWindow):
         mode = MODES[max(0, self.mode_group.checkedId())]
         visible_classes = self._visible_classes()
         self._update_scores_label(cached, visible_classes)
-
-        # Scale buttons name the strides once they are known
-        maps = cached.get("neck_maps") or []
-        for rb, fm in zip(self.scale_buttons, maps):
-            rb.setText(f"1/{round(self.input_size / fm.shape[-1])}")
 
         # 1. Box visibility: plain detections, or the ground-truth comparison
         for ann in self.drawn_bboxes:
@@ -921,15 +916,15 @@ def main():
         default="conf/hierarchy.json",
         help="Path to conf/hierarchy.json",
     )
-    parser.add_argument("--input-size", type=int, default=640)
     parser.add_argument("--conf-thresh", type=float, default=0.3)
     parser.add_argument("--iou-thresh", type=float, default=0.5)
     parser.add_argument(
-        "--multi-label", action="store_true", help="Start with multi-label decoding (toggle in the sidebar)"
+        "--multi-label",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Start with every class per cell (default) or only the argmax; toggle in the sidebar",
     )
-    parser.add_argument(
-        "--use-bottom-up", action="store_true", help="Enable PANet bottom-up path"
-    )
+    # The input canvas, detection levels and neck come from the checkpoint
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -943,7 +938,7 @@ def main():
 
     # --- Load model (the backbone is read from the checkpoint) ---
     logger.info(f"Loading model from {args.checkpoint}")
-    model = detector_for_checkpoint(args.checkpoint, num_classes, use_bottom_up=args.use_bottom_up)
+    model = detector_for_checkpoint(args.checkpoint, num_classes)
     load_checkpoint(model, args.checkpoint, device)
 
     image_paths = [args.image] if args.image else None
@@ -954,7 +949,7 @@ def main():
         img_dir,
         args.hierarchy,
         args.config,
-        args.input_size,
+        None,
         args.conf_thresh,
         args.iou_thresh,
         ann_dir=args.ann_dir,

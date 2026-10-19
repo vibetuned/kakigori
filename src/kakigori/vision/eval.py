@@ -16,9 +16,8 @@ from torch.utils.tensorboard import SummaryWriter
 from torchmetrics.detection.mean_ap import MeanAveragePrecision
 
 # Local folder imports
-from .model import MusicDetector
 from .utils import omr_collate_fn, load_checkpoint, decode_model_outputs, detector_for_checkpoint
-from .dataset import OMRDataset
+from .dataset import OMRDataset, canvas_size
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -46,23 +45,26 @@ def get_checkpoint_step(checkpoint_dir):
         int(c.name.split("-")[-1])
         for c in checkpoint_path.iterdir()
         if c.name.startswith("checkpoint-")
-    ]
+    ] if checkpoint_path.is_dir() else []
     checkpoints.sort()
-    return checkpoint_path.name, checkpoints[-1]
+    # a bare weights dir or file (no HF checkpoint-N): step 0
+    return checkpoint_path.name, checkpoints[-1] if checkpoints else 0
 
 
 def format_ground_truth(targets_list, input_size, device):
-    """Converts normalized (cx, cy, w, h) to absolute (x1, y1, x2, y2)."""
+    """Converts normalized (cx, cy, w, h) to absolute canvas (x1, y1, x2, y2)
+    (``input_size``: int or (width, height))."""
+    canvas_w, canvas_h = canvas_size(input_size)
     batch_targets = []
     for tgt in targets_list:
         gt_boxes = tgt["boxes"].to(device)
         gt_labels = tgt["labels"].to(device)
 
         if gt_boxes.numel() > 0:
-            cx = gt_boxes[:, 0] * input_size
-            cy = gt_boxes[:, 1] * input_size
-            w = gt_boxes[:, 2] * input_size
-            h = gt_boxes[:, 3] * input_size
+            cx = gt_boxes[:, 0] * canvas_w
+            cy = gt_boxes[:, 1] * canvas_h
+            w = gt_boxes[:, 2] * canvas_w
+            h = gt_boxes[:, 3] * canvas_h
 
             x1 = cx - w / 2
             y1 = cy - h / 2
@@ -161,24 +163,17 @@ def main():
     )
     parser.add_argument("--config", type=str, default="conf/config.json")
     parser.add_argument("--hierarchy", type=str, default="conf/hierarchy.json")
-    parser.add_argument("--input-size", type=int, default=640)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--conf-thresh", type=float, default=0.05)
     parser.add_argument("--iou-thresh", type=float, default=0.5)
-    parser.add_argument("--use-bottom-up", action="store_true")
     parser.add_argument(
         "--multi-label",
-        action="store_true",
-        help="Decode every class over the threshold per cell, not just the argmax.",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Decode every class over the threshold per cell (default), or only "
+        "the argmax (--no-multi-label, the decoding of evaluations before 2026-10-19).",
     )
-    # Trainer args
-    parser.add_argument(
-        "--out-indices",
-        type=int,
-        nargs=3,
-        default=[0, 1, 2],
-        help="Three backbone feature map indices to extract (default: 0 1 2).",
-    )
+    # The input canvas, detection levels and neck come from the checkpoint
     # Tensorboard logging
     parser.add_argument(
         "--tb-dir", type=str, default="runs", help="TensorBoard log directory"
@@ -195,11 +190,15 @@ def main():
     with open(args.hierarchy) as f:
         hierarchy = json.load(f)
 
+    model = detector_for_checkpoint(args.checkpoint, len(class_list))
+    load_checkpoint(model, args.checkpoint, device)
+    input_size = model.input_size
+
     val_dataset = OMRDataset(
         img_dir=args.img_dir,
         ann_dir=args.ann_dir,
         class_list=class_list,
-        input_size=args.input_size,
+        input_size=input_size,
         augment=False,
     )
 
@@ -211,14 +210,6 @@ def main():
         collate_fn=omr_collate_fn,
     )
 
-    model = detector_for_checkpoint(
-        args.checkpoint,
-        len(class_list),
-        use_bottom_up=args.use_bottom_up,
-        out_indices=args.out_indices,
-    )
-
-    load_checkpoint(model, args.checkpoint, device)
     checkpoint_name, step = get_checkpoint_step(args.checkpoint)
 
     logger.info(f"Evaluating on {len(val_dataset)} images...")
@@ -234,10 +225,10 @@ def main():
 
             outputs = model(images)
             preds = decode_model_outputs(
-                outputs, args.conf_thresh, args.iou_thresh, args.input_size,
+                outputs, args.conf_thresh, args.iou_thresh, input_size,
                 multi_label=args.multi_label,
             )
-            targets = format_ground_truth(targets_list, args.input_size, device)
+            targets = format_ground_truth(targets_list, input_size, device)
 
             # Move tensors to CPU immediately so we don't cause a CUDA multiprocessing crash later
             for p in preds:

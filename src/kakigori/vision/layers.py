@@ -2,7 +2,6 @@
 import math
 
 # Third party imports
-import timm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -34,50 +33,46 @@ class DepthwiseSeparableConv(nn.Module):
 
 
 class PANetNeck(nn.Module):
+    """Top-down (and optionally bottom-up) fusion over N backbone levels,
+    finest first. Layer names follow the levels (``reduce_layer1``,
+    ``fuse_td_p3_p2``...), so 3-level checkpoints load unchanged."""
+
     def __init__(self, in_channels_list, hidden_dim=128, use_bottom_up=False):
         super().__init__()
         self.use_bottom_up = use_bottom_up
+        self.levels = len(in_channels_list)
 
         # 1x1 Convs to standardize the channel dimensions from the backbone
-        self.reduce_layer1 = nn.Conv2d(in_channels_list[0], hidden_dim, 1)
-        self.reduce_layer2 = nn.Conv2d(in_channels_list[1], hidden_dim, 1)
-        self.reduce_layer3 = nn.Conv2d(in_channels_list[2], hidden_dim, 1)
+        for i, channels in enumerate(in_channels_list, 1):
+            setattr(self, f"reduce_layer{i}", nn.Conv2d(channels, hidden_dim, 1))
 
         # Top-down fusion blocks (upsampling deep features to match shallow ones)
-        self.fuse_td_p3_p2 = DepthwiseSeparableConv(hidden_dim, hidden_dim)
-        self.fuse_td_p2_p1 = DepthwiseSeparableConv(hidden_dim, hidden_dim)
+        for i in range(self.levels, 1, -1):
+            setattr(self, f"fuse_td_p{i}_p{i - 1}", DepthwiseSeparableConv(hidden_dim, hidden_dim))
 
         # Bottom-up fusion blocks (downsampling shallow features back to deep ones)
         if use_bottom_up:
-            self.fuse_bu_p1_p2 = DepthwiseSeparableConv(hidden_dim, hidden_dim)
-            self.fuse_bu_p2_p3 = DepthwiseSeparableConv(hidden_dim, hidden_dim)
+            for i in range(1, self.levels):
+                setattr(self, f"fuse_bu_p{i}_p{i + 1}", DepthwiseSeparableConv(hidden_dim, hidden_dim))
 
     def forward(self, features):
-        c1, c2, c3 = features  # e.g., sizes: 64x64, 32x32, 16x16
-
-        # Standardize channels
-        p1 = self.reduce_layer1(c1)
-        p2 = self.reduce_layer2(c2)
-        p3 = self.reduce_layer3(c3)
+        # Standardize channels; p[0] is the finest map (stride 4)
+        p = [getattr(self, f"reduce_layer{i}")(c) for i, c in enumerate(features, 1)]
 
         # Top-down pathway
-        p3_upsampled = F.interpolate(p3, size=p2.shape[-2:], mode="nearest")
-        p2 = self.fuse_td_p3_p2(p2 + p3_upsampled)
-
-        p2_upsampled = F.interpolate(p2, size=p1.shape[-2:], mode="nearest")
-        p1 = self.fuse_td_p2_p1(p1 + p2_upsampled)
+        for i in range(self.levels - 1, 0, -1):
+            upsampled = F.interpolate(p[i], size=p[i - 1].shape[-2:], mode="nearest")
+            p[i - 1] = getattr(self, f"fuse_td_p{i + 1}_p{i}")(p[i - 1] + upsampled)
 
         # Bottom-up pathway (optional, for full PANet)
         if self.use_bottom_up:
             # Safely downsample by taking the max features, preserving tiny objects
-            p1_downsampled = F.adaptive_max_pool2d(p1, output_size=p2.shape[-2:])
-            p2 = self.fuse_bu_p1_p2(p2 + p1_downsampled)
-
-            p2_downsampled = F.adaptive_max_pool2d(p2, output_size=p3.shape[-2:])
-            p3 = self.fuse_bu_p2_p3(p3 + p2_downsampled)
+            for i in range(self.levels - 1):
+                downsampled = F.adaptive_max_pool2d(p[i], output_size=p[i + 1].shape[-2:])
+                p[i + 1] = getattr(self, f"fuse_bu_p{i + 1}_p{i + 2}")(p[i + 1] + downsampled)
 
         # Return the fused multi-scale features
-        return [p1, p2, p3]
+        return p
 
 
 class DecoupledHead(nn.Module):

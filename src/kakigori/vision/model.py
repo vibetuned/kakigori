@@ -5,8 +5,19 @@ import torch.nn as nn
 # Local folder imports
 from .layers import PANetNeck, DecoupledHead
 from .regla import VARIANTS, ReGLA
+from .dataset import canvas_size
 
 DEFAULT_BACKBONE = "regla_m"
+
+# The box areas each detection level is trained on, finest level first, as
+# fractions of a 640x640 canvas (pixel area / 640**2): plain normalized areas
+# on the square 640 canvas, the same sizes in pixels on any other. Four
+# levels add stride 32 for the page-scale boxes (system-staff, system and
+# page-margin start at ~1e-2, where measure/staff/layer end)
+DEFAULT_SCALE_RANGES = {
+    3: ((0.0, 0.0001), (0.0001, 0.001), (0.001, 2.0)),
+    4: ((0.0, 0.0001), (0.0001, 0.001), (0.001, 0.01), (0.01, 2.0)),
+}
 # The 0.1.x detectors (released weights included): ImageNet-pretrained, RGB
 LEGACY_BACKBONE = "convnext_base.dinov3_lvd1689m"
 
@@ -61,13 +72,42 @@ def detect_backbone(state_dict: dict, prefix: str = "") -> str:
     raise ValueError(f"checkpoint backbone not recognised (stage depths {depths}, widths {widths})")
 
 
+def detector_layout(state_dict: dict, prefix: str = "") -> dict:
+    """What a detector checkpoint was built with, beyond its backbone: the
+    detection levels (ReGLA stages used), the PANet bottom-up path, and the
+    input canvas (legacy checkpoints have no ``input_wh``: square 640)."""
+    keys = [k[len(prefix):] for k in state_dict if k.startswith(prefix)]
+    levels = len({k.split(".")[1] for k in keys if k.startswith("heads.")})
+    layout = {
+        "use_bottom_up": any(k.startswith("neck.fuse_bu_") for k in keys),
+        "input_size": (640, 640),
+    }
+    if not any(k.startswith(("backbone.stages_", "backbone.stem_")) for k in keys):
+        # ReGLA builds stages up to the last one it returns, all of them used
+        layout["out_indices"] = tuple(range(levels))
+    if f"{prefix}input_wh" in state_dict:
+        width, height = (int(v) for v in state_dict[f"{prefix}input_wh"].tolist())
+        layout["input_size"] = (width, height)
+    return layout
+
+
 class MusicDetector(nn.Module):
     def __init__(self, num_classes=91, use_bottom_up=False, out_indices=(0, 1, 2),
-                 backbone=DEFAULT_BACKBONE, pretrained=True):
+                 backbone=DEFAULT_BACKBONE, pretrained=True, input_size=640, scale_ranges=None):
         super().__init__()
         self.backbone_name = backbone
+        self.out_indices = tuple(out_indices)
 
-        # 1. The Encoder: grey pages in, features at strides 4/8/16 out
+        # The canvas the detector is trained and run at, (width, height): it
+        # travels with the weights so every tool letterboxes pages the same way
+        self.register_buffer("input_wh", torch.zeros(2, dtype=torch.long))
+        self.set_input_size(input_size)
+        # ...and so do the box areas each level is trained on, which every
+        # later training stage (fine-tune, consolidation, joint) must reuse
+        self.register_buffer("level_areas", torch.zeros(len(out_indices), 2))
+        self.set_scale_ranges(scale_ranges or DEFAULT_SCALE_RANGES[len(out_indices)])
+
+        # 1. The Encoder: grey pages in, features at strides 4/8/16(/32) out
         self.backbone = make_backbone(backbone, tuple(out_indices), pretrained=pretrained)
         backbone_channels = self.backbone.channels
 
@@ -80,8 +120,35 @@ class MusicDetector(nn.Module):
         # 3. The Heads (One for each feature scale)
         # We use a ModuleList because we need a head for the micro, mid, and macro features
         self.heads = nn.ModuleList(
-            [DecoupledHead(hidden_dim, num_classes) for _ in range(3)]
+            [DecoupledHead(hidden_dim, num_classes) for _ in range(len(out_indices))]
         )
+
+    @property
+    def input_size(self) -> tuple[int, int]:
+        """(width, height) of the input canvas."""
+        width, height = self.input_wh.tolist()
+        return (int(width), int(height))
+
+    def set_input_size(self, input_size) -> None:
+        """Set the canvas; also retargets a trained detector (fine-tuning at
+        another resolution). Both sides must divide by the coarsest stride."""
+        width, height = canvas_size(input_size)
+        stride = 2 ** (max(self.out_indices) + 2)  # stage i has stride 4 * 2**i
+        if width % stride or height % stride:
+            raise ValueError(f"input size {width}x{height} must be a multiple of the coarsest stride {stride}")
+        self.input_wh.copy_(torch.tensor([width, height]))
+
+    @property
+    def scale_ranges(self) -> list[tuple[float, float]]:
+        """(min, max) box area per level, see DEFAULT_SCALE_RANGES."""
+        return [(float(lo), float(hi)) for lo, hi in self.level_areas.tolist()]
+
+    def set_scale_ranges(self, scale_ranges) -> None:
+        if len(scale_ranges) != self.level_areas.shape[0]:
+            raise ValueError(
+                f"{len(scale_ranges)} scale ranges for {self.level_areas.shape[0]} detection levels"
+            )
+        self.level_areas.copy_(torch.tensor(scale_ranges, dtype=torch.float32))
 
     def forward(self, x):
         features = self.backbone(x)

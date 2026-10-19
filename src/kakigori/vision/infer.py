@@ -21,9 +21,8 @@ from PIL import Image
 from tqdm import tqdm
 
 # Local folder imports
-from .model import MusicDetector
 from .utils import detector_for_checkpoint, load_checkpoint, decode_model_outputs
-from .dataset import _letterbox
+from .dataset import canvas_to_page, letterbox_image
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -62,33 +61,14 @@ def pdf_to_pages(pdf_path: Path, dpi: int = 300) -> list[Image.Image]:
 
 
 def preprocess(
-    image: Image.Image, input_size: int, device: torch.device
+    image: Image.Image, input_size, device: torch.device
 ) -> tuple[torch.Tensor, dict]:
-    """Letterbox a PIL image as one grey channel. Returns (tensor, padding metadata)."""
-    image = image.convert("L")
-    orig_w, orig_h = image.size
-    scale = min(input_size / orig_w, input_size / orig_h)
-    new_w = int(round(orig_w * scale))
-    new_h = int(round(orig_h * scale))
-    pad_x = (input_size - new_w) // 2
-    pad_y = (input_size - new_h) // 2
-
-    img_lb, _ = _letterbox(image, input_size, torch.zeros(0, 4))
-    tensor = TF.to_tensor(img_lb).unsqueeze(0).to(device)  # (1, 1, H, W)
-
-    # Boxes map back with the per-axis factors of the rounded resize: the
-    # unrounded scale drifts up to half a canvas pixel (~2 page px) at the
-    # far edge, enough to break IoU on stems and barlines
-    meta = {
-        "orig_w": orig_w,
-        "orig_h": orig_h,
-        "scale": scale,
-        "scale_x": new_w / orig_w,
-        "scale_y": new_h / orig_h,
-        "pad_x": pad_x,
-        "pad_y": pad_y,
-        "input_size": input_size,
-    }
+    """Fit a page into the detector's canvas (``input_size``: int or
+    (width, height), e.g. ``model.input_size``) as one grey channel. Returns
+    (tensor, ``letterbox_geometry``); map boxes back with ``canvas_to_page``."""
+    canvas, meta = letterbox_image(image.convert("L"), input_size)
+    tensor = TF.to_tensor(canvas).unsqueeze(0).to(device)  # (1, 1, H, W)
+    meta["input_size"] = (meta["canvas_w"], meta["canvas_h"])
     return tensor, meta
 
 
@@ -108,20 +88,18 @@ def main():
     )
     parser.add_argument("--config", type=str, default="conf/config.json")
     parser.add_argument("--output-dir", type=str, default="inference_out")
-    parser.add_argument("--input-size", type=int, default=640)
     parser.add_argument("--conf-thresh", type=float, default=0.3)
     parser.add_argument("--iou-thresh", type=float, default=0.5)
     parser.add_argument(
+        "--multi-label",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Every class over the threshold per cell (default), or only the argmax.",
+    )
+    parser.add_argument(
         "--dpi", type=int, default=300, help="DPI for PDF page rendering."
     )
-    parser.add_argument("--use-bottom-up", action="store_true")
-    parser.add_argument(
-        "--out-indices",
-        type=int,
-        nargs=3,
-        default=[0, 1, 2],
-        help="Three backbone feature map indices to extract (default: 1 2 3).",
-    )
+    # The input canvas, detection levels and neck come from the checkpoint
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -135,13 +113,9 @@ def main():
 
     # --- Load model ---
     logger.info(f"Loading model from {args.checkpoint}")
-    model = detector_for_checkpoint(
-        args.checkpoint,
-        num_classes,
-        use_bottom_up=args.use_bottom_up,
-        out_indices=args.out_indices,
-    )
+    model = detector_for_checkpoint(args.checkpoint, num_classes)
     load_checkpoint(model, args.checkpoint, device)
+    input_size = model.input_size
 
     # --- Render PDF ---
     output_dir = Path(args.output_dir)
@@ -157,57 +131,20 @@ def main():
             img_path = output_dir / f"{stem}.png"
             page_image.save(img_path)
 
-            tensor, meta = preprocess(page_image, args.input_size, device)
+            tensor, meta = preprocess(page_image, input_size, device)
             outputs = model(tensor)
-            batch_preds = decode_model_outputs(
-                outputs, args.conf_thresh, args.iou_thresh, args.input_size
-            )
-
-            detections_dict = batch_preds[0]
+            preds = decode_model_outputs(
+                outputs, args.conf_thresh, args.iou_thresh, input_size, multi_label=args.multi_label
+            )[0]
+            boxes = canvas_to_page(preds["boxes"].float().cpu(), meta)
 
             detections = [
                 {
                     "class": class_list[int(c)],
                     "score": round(float(s), 4),
-                    "bbox": [
-                        round(
-                            float(
-                                ((bx1 - meta["pad_x"]) / meta["scale_x"]).clamp(min=0.0)
-                            ),
-                            1,
-                        ),
-                        round(
-                            float(
-                                ((by1 - meta["pad_y"]) / meta["scale_y"]).clamp(min=0.0)
-                            ),
-                            1,
-                        ),
-                        round(
-                            float(
-                                ((bx2 - meta["pad_x"]) / meta["scale_x"]).clamp(
-                                    max=float(meta["orig_w"])
-                                )
-                            ),
-                            1,
-                        ),
-                        round(
-                            float(
-                                ((by2 - meta["pad_y"]) / meta["scale_y"]).clamp(
-                                    max=float(meta["orig_h"])
-                                )
-                            ),
-                            1,
-                        ),
-                    ],
+                    "bbox": [round(float(v), 1) for v in box],
                 }
-                for bx1, by1, bx2, by2, s, c in zip(
-                    detections_dict["boxes"][:, 0],
-                    detections_dict["boxes"][:, 1],
-                    detections_dict["boxes"][:, 2],
-                    detections_dict["boxes"][:, 3],
-                    detections_dict["scores"],
-                    detections_dict["labels"],
-                )
+                for box, s, c in zip(boxes, preds["scores"], preds["labels"])
             ]
             pbar.set_postfix(dets=len(detections))
 

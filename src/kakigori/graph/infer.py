@@ -38,9 +38,9 @@ from .bbox_repair import repair_page_boxes
 from .validate_predictions import (
     _load_gnn, predict_page_edges, _inject_system_measure_edges,
 )
-from kakigori.vision.model import MusicDetector
 from kakigori.vision.utils import detector_for_checkpoint, load_checkpoint, decode_model_outputs
 from kakigori.vision.infer import pdf_to_pages, preprocess
+from kakigori.vision.dataset import canvas_to_page
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -50,23 +50,23 @@ logger = logging.getLogger(__name__)
 
 @torch.inference_mode()
 def detect_page_nodes(detector, page_image: Image.Image, page_idx: int,
-                      class_list: list, device, input_size: int,
-                      conf_thresh: float, iou_thresh: float) -> list:
+                      class_list: list, device, input_size,
+                      conf_thresh: float, iou_thresh: float,
+                      multi_label: bool = True) -> list:
     """Detect glyphs on one page; return serializer-format nodes in
-    ORIGINAL page coordinates (the serializer's geometry space)."""
+    ORIGINAL page coordinates (the serializer's geometry space).
+    ``input_size``: the detector's own canvas when None."""
+    input_size = input_size or detector.input_size
     tensor, meta = preprocess(page_image, input_size, device)
     outputs = detector(tensor)
-    preds = decode_model_outputs(outputs, conf_thresh, iou_thresh, input_size)[0]
+    preds = decode_model_outputs(outputs, conf_thresh, iou_thresh, input_size, multi_label=multi_label)[0]
 
     nodes = []
-    boxes = preds["boxes"].cpu()
+    boxes = canvas_to_page(preds["boxes"].float().cpu(), meta)
     labels = preds["labels"].cpu()
     scores = preds["scores"].cpu()
     for i in range(boxes.shape[0]):
-        x1 = float(((boxes[i, 0] - meta["pad_x"]) / meta["scale_x"]).clamp(min=0.0))
-        y1 = float(((boxes[i, 1] - meta["pad_y"]) / meta["scale_y"]).clamp(min=0.0))
-        x2 = float(((boxes[i, 2] - meta["pad_x"]) / meta["scale_x"]).clamp(max=float(meta["orig_w"])))
-        y2 = float(((boxes[i, 3] - meta["pad_y"]) / meta["scale_y"]).clamp(max=float(meta["orig_h"])))
+        x1, y1, x2, y2 = (float(v) for v in boxes[i])
         nodes.append({
             "id": f"p{page_idx}n{i}",
             "class": class_list[int(labels[i])],
@@ -93,7 +93,6 @@ def main():
     parser.add_argument("--config", type=str, default="conf/config.json")
     parser.add_argument("--roles_file", type=str, default="conf/structure.json")
     parser.add_argument("--output-dir", type=str, default="inference_out")
-    parser.add_argument("--input-size", type=int, default=640)
     parser.add_argument("--conf-thresh", type=float, default=0.3)
     parser.add_argument("--iou-thresh", type=float, default=0.5)
     parser.add_argument("--dpi", type=int, default=300, help="DPI for PDF rendering.")
@@ -141,7 +140,7 @@ def main():
 
         page_nodes = detect_page_nodes(
             detector, page_image, page_idx, class_list, device,
-            args.input_size, args.conf_thresh, args.iou_thresh,
+            None, args.conf_thresh, args.iou_thresh,
         )
         with open(output_dir / f"page_{page_idx + 1:04d}.json", "w") as f:
             json.dump({
@@ -160,7 +159,6 @@ def main():
             repair_page_boxes(page_nodes, page_prefix=f"p{page_idx}")
         page_edges = predict_page_edges(
             gnn_wrapper, page_nodes, img_path, class_to_idx, device,
-            input_size=args.input_size,
         )
         _inject_system_measure_edges(page_nodes, page_edges)
         if not args.no_repair:

@@ -9,6 +9,7 @@ from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 
 from kakigori.graph.graph_io import find_graph, load_graph
+from kakigori.vision.dataset import canvas_size, page_to_canvas, letterbox_image
 
 
 class OMRFullPageDataset(Dataset):
@@ -23,10 +24,10 @@ class OMRFullPageDataset(Dataset):
         # never graph nodes: they lose their edges and re-enter only as
         # isolated detection-supervised nodes.
         self.class_remap = class_remap or {}
-        # The detector was trained on letterboxed input_size images; feeding
-        # full-resolution pages would put its features out of distribution
-        # (and cost ~15x the compute)
-        self.input_size = input_size
+        # The detector was trained on pages letterboxed into its canvas
+        # (detector.input_size); feeding full-resolution pages would put its
+        # features out of distribution (and cost ~15x the compute)
+        self.input_size = canvas_size(input_size)
 
         # 1. Match the file triplets (Image, JSON, Graph)
         self.samples = []
@@ -49,20 +50,9 @@ class OMRFullPageDataset(Dataset):
         sample = self.samples[idx]
 
         # --- A. Load Vision Data ---
-        # Letterbox to the detector's training resolution: aspect-preserving
-        # resize on a grey canvas, same convention as vision/dataset._letterbox
-        image = Image.open(sample["img"]).convert("L")
-        orig_w, orig_h = image.size
-        scale = min(self.input_size / orig_w, self.input_size / orig_h)
-        new_w, new_h = int(round(orig_w * scale)), int(round(orig_h * scale))
-        image = image.resize((new_w, new_h), Image.BILINEAR)
-        canvas = Image.new("L", (self.input_size, self.input_size), 114)
-        pad_x = (self.input_size - new_w) // 2
-        pad_y = (self.input_size - new_h) // 2
-        canvas.paste(image, (pad_x, pad_y))
-        img_tensor = TF.to_tensor(canvas)  # Shape: (1, input_size, input_size)
-        # boxes follow the rounded resize, not the unrounded scale
-        scale_x, scale_y = new_w / orig_w, new_h / orig_h
+        # Letterbox into the detector's canvas, as the detector was trained
+        canvas, geo = letterbox_image(Image.open(sample["img"]).convert("L"), self.input_size)
+        img_tensor = TF.to_tensor(canvas)  # Shape: (1, height, width)
 
         # --- B. Load Relational Data ---
         graph_data = load_graph(sample["graph"])
@@ -125,9 +115,7 @@ class OMRFullPageDataset(Dataset):
 
         # Remap boxes into letterboxed canvas coordinates
         if boxes:
-            boxes_tensor = torch.tensor(boxes, dtype=torch.float32)
-            boxes_tensor[:, [0, 2]] = boxes_tensor[:, [0, 2]] * scale_x + pad_x
-            boxes_tensor[:, [1, 3]] = boxes_tensor[:, [1, 3]] * scale_y + pad_y
+            boxes_tensor = page_to_canvas(torch.tensor(boxes, dtype=torch.float32), geo)
         else:
             boxes_tensor = torch.empty((0, 4), dtype=torch.float32)
         labels_tensor = torch.tensor(labels, dtype=torch.long)
@@ -162,9 +150,7 @@ class OMRFullPageDataset(Dataset):
                 det_boxes.append(ann["bbox"])
                 det_labels.append(self.class_to_idx[cls])
         if det_boxes:
-            det_boxes_tensor = torch.tensor(det_boxes, dtype=torch.float32)
-            det_boxes_tensor[:, [0, 2]] = det_boxes_tensor[:, [0, 2]] * scale_x + pad_x
-            det_boxes_tensor[:, [1, 3]] = det_boxes_tensor[:, [1, 3]] * scale_y + pad_y
+            det_boxes_tensor = page_to_canvas(torch.tensor(det_boxes, dtype=torch.float32), geo)
         else:
             det_boxes_tensor = torch.empty((0, 4), dtype=torch.float32)
 

@@ -13,13 +13,26 @@ from transformers import Trainer
 from .losses import CIoULoss, DynamicFocalLoss
 
 
-class OMRTrainer(Trainer):
-    DEFAULT_SCALE_RANGES = [
-        (0.0, 0.0001),
-        (0.0001, 0.001),
-        (0.001, 2.0),
-    ]  # [(0.0, 0.0002), (0.0002, 0.002), (0.002, 2.0)]
+# Scale ranges are box areas in fractions of a 640x640 canvas (pixel area /
+# 640**2): on the square 640 canvas they are the normalized areas they always
+# were, and on any other canvas they keep meaning the same size in pixels,
+# which is what decides the stride a box needs. The detector carries its
+# ranges (model.DEFAULT_SCALE_RANGES unless set at its first training)
+REFERENCE_AREA = 640 * 640
 
+
+def parse_scale_ranges(value) -> list[tuple[float, float]] | None:
+    """Scale ranges from a config: pairs, or a flat list of (min, max) floats."""
+    if value is None:
+        return None
+    if all(isinstance(v, (int, float)) for v in value):
+        if len(value) % 2:
+            raise ValueError(f"scale ranges need (min, max) pairs, got {len(value)} numbers")
+        value = [value[i:i + 2] for i in range(0, len(value), 2)]
+    return [(float(lo), float(hi)) for lo, hi in value]
+
+
+class OMRTrainer(Trainer):
     def __init__(
         self,
         cls_weight=1.0,
@@ -34,9 +47,11 @@ class OMRTrainer(Trainer):
         super().__init__(*args, **kwargs)
         self.cls_weight = cls_weight
         self.reg_weight = reg_weight
-        self.scale_ranges = (
-            scale_ranges if scale_ranges is not None else self.DEFAULT_SCALE_RANGES
-        )
+        # Ranges given here (a first training) are stored in the detector;
+        # otherwise the ones it was trained with are reused
+        if scale_ranges is not None:
+            self.model.set_scale_ranges(scale_ranges)
+        self.scale_ranges = self.model.scale_ranges
         self.focal_loss_fn = DynamicFocalLoss(
             alpha=0.25, base_gamma=base_gamma, max_gamma=max_gamma
         )
@@ -48,8 +63,18 @@ class OMRTrainer(Trainer):
             return self.custom_sampler
         return super()._get_train_sampler(*args, **kwargs)
 
-    def build_targets(self, targets_list, feature_sizes, num_classes, device):
-        """Assign ground-truth boxes to grid cells based on object scale."""
+    def build_targets(self, targets_list, feature_sizes, num_classes, device, canvas=(640, 640)):
+        """Assign ground-truth boxes to grid cells based on object scale.
+
+        ``canvas``: (width, height) of the input, for the pixel areas the
+        scale ranges are expressed in (see REFERENCE_AREA).
+        """
+        if len(self.scale_ranges) != len(feature_sizes):
+            raise ValueError(
+                f"{len(self.scale_ranges)} scale ranges for {len(feature_sizes)} detection levels: "
+                "set scale_ranges with one (min, max) pair per level"
+            )
+        area_factor = canvas[0] * canvas[1] / REFERENCE_AREA
         batch_size = len(targets_list)
         cls_targets = []
         reg_targets = []
@@ -83,7 +108,7 @@ class OMRTrainer(Trainer):
                     continue
 
                 # Calculate the area of every ground truth box
-                box_areas = boxes[:, 2] * boxes[:, 3]
+                box_areas = boxes[:, 2] * boxes[:, 3] * area_factor
 
                 # Filter boxes: Keep only the ones that belong to this feature scale
                 valid_mask = (box_areas >= min_area) & (box_areas < max_area)
@@ -152,7 +177,8 @@ class OMRTrainer(Trainer):
 
         feature_sizes = [(o["cls"].shape[2], o["cls"].shape[3]) for o in outputs]
         cls_targets, reg_targets, obj_masks = self.build_targets(
-            targets_list, feature_sizes, num_classes, device
+            targets_list, feature_sizes, num_classes, device,
+            canvas=(images.shape[-1], images.shape[-2]),
         )
 
         total_cls = torch.tensor(0.0, device=device)

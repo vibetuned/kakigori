@@ -20,7 +20,7 @@ from transformers.trainer_utils import get_last_checkpoint
 from .model import MusicDetector
 from .utils import RatioSampler, omr_collate_fn, load_checkpoint, detector_for_checkpoint
 from .dataset import OMRDataset
-from .trainer import OMRTrainer
+from .trainer import OMRTrainer, parse_scale_ranges
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -72,7 +72,15 @@ def parse_args():
         help="use synthetic data merged with real data",
     )
     parser.add_argument("--config", type=str, default="conf/config.json")
-    parser.add_argument("--input-size", type=int, default=640)
+    parser.add_argument(
+        "--input-size",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Input canvas: SIZE (square) or WIDTH HEIGHT, multiples of the coarsest "
+        "stride (16, or 32 with 4 levels). Default 640 from scratch; a fine-tune "
+        "keeps its checkpoint's canvas unless set.",
+    )
     parser.add_argument("--num-workers", type=int, default=4)
 
     # Model args
@@ -86,9 +94,10 @@ def parse_args():
     parser.add_argument(
         "--out-indices",
         type=int,
-        nargs=3,
-        default=[1, 2, 3],
-        help="Three backbone feature map indices to extract (default: 1 2 3).",
+        nargs="+",
+        default=[0, 1, 2],
+        help="Backbone stages to detect on, one head each: 0 1 2 (strides 4/8/16) "
+        "or 0 1 2 3 (adds stride 32). Ignored with --fine-tune (from the checkpoint).",
     )
 
     # Trainer args
@@ -99,10 +108,11 @@ def parse_args():
     parser.add_argument(
         "--scale-ranges",
         type=float,
-        nargs=6,
+        nargs="+",
         default=None,
-        help="Six floats defining 3 (min, max) area ranges for scale assignment, "
-        "e.g. 0.0 0.0002 0.0002 0.002 0.002 2.0 (default).",
+        help="One (min, max) box-area pair per level, as fractions of a 640x640 canvas, "
+        "e.g. 0 0.0001 0.0001 0.001 0.001 2.0. Default: model.DEFAULT_SCALE_RANGES "
+        "from scratch, the checkpoint's own with --fine-tune.",
     )
 
     # Training args (subset of common ones, others can be passed via unknown args if needed)
@@ -141,6 +151,13 @@ def parse_args():
     parser.set_defaults(**yaml_defaults)
     args, unknown = parser.parse_known_args(remaining_argv)
     return args
+
+
+def _input_size(value):
+    """--input-size / YAML input_size: None, SIZE, or (WIDTH, HEIGHT)."""
+    if value is None or isinstance(value, int):
+        return value
+    return value[0] if len(value) == 1 else (value[0], value[1])
 
 
 def main():
@@ -200,12 +217,38 @@ def main():
     num_classes = len(class_list)
     logger.info(f"Training with {num_classes} classes from {args.config}")
 
+    # --- Initialize Model ---
+    if args.fine_tune:
+        model = detector_for_checkpoint(args.fine_tune, num_classes)
+    else:
+        model = MusicDetector(
+            num_classes=num_classes,
+            use_bottom_up=args.use_bottom_up,
+            out_indices=tuple(args.out_indices),
+            backbone=args.backbone,
+            input_size=_input_size(args.input_size) or 640,
+        )
+    n_params = sum(p.numel() for p in model.parameters())
+    logger.info(f"Detector: {model.backbone_name} backbone, {n_params / 1e6:.2f}M parameters")
+
+    if args.fine_tune:
+        logger.info(
+            f"Loading weights from {args.fine_tune} for fine-tuning (forcing CPU to save VRAM)..."
+        )
+        device = torch.device("cpu")
+        load_checkpoint(model, args.fine_tune, device=device, eval=False)
+        if args.input_size is not None:
+            # a fully convolutional detector can move to another canvas
+            model.set_input_size(_input_size(args.input_size))
+    input_size = model.input_size
+    logger.info(f"Input canvas {input_size[0]}x{input_size[1]}, {len(model.heads)} detection levels")
+
     # --- Prepare Datasets ---
     full_ds = OMRDataset(
         img_dir=args.img_dir,
         ann_dir=args.ann_dir,
         class_list=class_list,
-        input_size=args.input_size,
+        input_size=input_size,
         augment=True,
     )
 
@@ -218,7 +261,7 @@ def main():
             img_dir=args.synthetic_img_dir,
             ann_dir=args.synthetic_ann_dir,
             class_list=class_list,
-            input_size=args.input_size,
+            input_size=input_size,
             augment=True,
         )
         synth_subset = torch.utils.data.Subset(synthetic_ds, range(len(synthetic_ds)))
@@ -245,31 +288,6 @@ def main():
         else:
             logger.warning("Invalid synthetic ratio. Using real data only.")
 
-    # --- Initialize Model ---
-    if args.fine_tune:
-        model = detector_for_checkpoint(
-            args.fine_tune,
-            num_classes,
-            use_bottom_up=args.use_bottom_up,
-            out_indices=tuple(args.out_indices),
-        )
-    else:
-        model = MusicDetector(
-            num_classes=num_classes,
-            use_bottom_up=args.use_bottom_up,
-            out_indices=tuple(args.out_indices),
-            backbone=args.backbone,
-        )
-    n_params = sum(p.numel() for p in model.parameters())
-    logger.info(f"Detector: {model.backbone_name} backbone, {n_params / 1e6:.2f}M parameters")
-
-    if args.fine_tune:
-        logger.info(
-            f"Loading weights from {args.fine_tune} for fine-tuning (forcing CPU to save VRAM)..."
-        )
-        device = torch.device("cpu")
-        load_checkpoint(model, args.fine_tune, device=device, eval=False)
-
     # --- Initialize Training Arguments ---
     training_args = TrainingArguments(
         output_dir=str(run_dir),
@@ -294,11 +312,8 @@ def main():
         dataloader_pin_memory=True,  # Speeds up CPU-to-GPU data transfer
     )
 
-    # --- Parse scale ranges from flat list into list of tuples ---
-    scale_ranges = None
-    if args.scale_ranges is not None:
-        sr = args.scale_ranges
-        scale_ranges = [(sr[0], sr[1]), (sr[2], sr[3]), (sr[4], sr[5])]
+    # --- Scale ranges: flat list or pairs; None keeps the detector's ---
+    scale_ranges = parse_scale_ranges(args.scale_ranges)
 
     # --- Initialize Trainer ---
     trainer = OMRTrainer(

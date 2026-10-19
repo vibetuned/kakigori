@@ -1,0 +1,62 @@
+# LITE base run with ReGLA stage 4 (6 global-attention blocks, stride 32)
+# feeding the neck and a fourth head for page-scale boxes: system-staff,
+# system and page-margin (p10 area ~1e-2, where measure/staff/layer end at
+# p90 ~1e-2) move off the stride-16 head, where they shared regression cells
+# with measures. 10.3M params (vs 5.0M). Multi-label decoding already fixed
+# most of the structure-class gap (system .55 -> .73, staff/measure ~.93), so
+# this tests what is left: system-staff .22, system, page-margin, meterSig.
+# Compare with checkpoints_lite/run_004.
+
+# Data args
+img_dir: "data/train-lite/imgs"
+ann_dir: "data/train-lite/annotations"
+synthetic_img_dir: "data/synthetic-boost/imgs"
+synthetic_ann_dir: "data/synthetic-boost/annotations"
+use_synthetic: false
+synthetic_ratio: 4
+config: "conf-lite/config.json"
+# Input canvas: SIZE (square) or [WIDTH, HEIGHT]; pages are fitted undistorted
+# and the rest padded. Stored in the checkpoint: eval/infer/visualize and later
+# training stages read it from there. Sides divide by the coarsest stride.
+input_size: 640
+num_workers: 4
+
+# Model args
+# ReGLA (arXiv 2602.05262) from scratch on one grey channel: regla_t/s/m/l/x
+# (stages 1-3 of regla_m: 4.6M params, vs 60.1M for the ConvNeXt-B DINOv3
+# stages of the 0.1.x detectors)
+backbone: regla_m
+use_bottom_up: false
+# ReGLA stages to detect on, one head each: [0, 1, 2] = strides 4/8/16,
+# [0, 1, 2, 3] adds stage 4 and a stride-32 head (train_stage4.yaml)
+out_indices: [0, 1, 2, 3]
+
+# Trainer args
+reg_weight: 5.0
+cls_weight: 1.0
+max_gamma: 4.0    # Final gamma for focal loss
+base_gamma: 2.0   # Initial gamma for focal loss
+# One (min, max) box area per level, in fractions of a 640x640 canvas (pixel
+# area / 640**2, so the same pixel sizes on any canvas); null = the defaults
+# for the level count (vision/model.DEFAULT_SCALE_RANGES). Stored in the
+# checkpoint. (960px / scale changes measured worse with ConvNeXt DINOv3 in
+# docs/experiments/vision; re-tested on ReGLA with train_448x640/640x896/stage4)
+scale_ranges: [[0.0, 0.0001], [0.0001, 0.001], [0.001, 0.01], [0.01, 2.0]]
+
+# Training args
+output_dir: "checkpoints_lite"
+logging_dir: "runs_lite"
+epochs: 40
+batch_size: 4
+# From scratch (ReGLA) wants more than the 1e-4 used to fine-tune ConvNeXt:
+# 2k-step sweep on train-lite, validation-lite mAP@.50 = 0.215 (1e-4),
+# 0.258 (3e-4), 0.329 (1e-3), 0.376 (2e-3), 0.384 (4e-3). Gradients are
+# clipped at norm 1.0 (HF default) and run 10-30, so every step is clipped.
+lr: 0.002
+logging_steps: 50
+save_steps: 500
+max_steps: -1
+seed: 42
+resume: false
+resume_from_checkpoint: null
+fine_tune: null

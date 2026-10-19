@@ -19,7 +19,7 @@ from .trainer import GNNTrainer, compute_gnn_metrics
 from .dataset import OMRFullPageDataset
 from .utils import omr_collate_fn
 from .model import GraphVisualExtractor, ScoreGraphReconstructor, GNNPhase2Model
-from kakigori.vision.utils import detector_for_checkpoint, load_checkpoint
+from kakigori.vision.utils import detector_for_checkpoint, load_checkpoint, checkpoint_input_size
 from kakigori.vision.model import MusicDetector
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -144,12 +144,15 @@ def main():
         config = json.load(f)
     class_list = config["target_classes"]
     num_classes = len(class_list)
-    # Prepare Datasets
+    if not args.detector_checkpoint:
+        raise ValueError("Please provide a path to the pre-trained Detector weights.")
+    # Prepare Datasets: pages letterboxed into the detector's canvas
     full_ds = OMRFullPageDataset(
         img_dir=args.img_dir,
         json_dir=args.ann_dir,
         graph_dir=args.graph_dir,
-        class_list=class_list
+        class_list=class_list,
+        input_size=checkpoint_input_size(args.detector_checkpoint),
     )
     
     # Split 90/10 for Train/Val

@@ -10,12 +10,21 @@ from torchvision.ops import box_convert, complete_box_iou_loss
 
 
 class CIoULoss(nn.Module):
-    def __init__(self, reduction="mean"):
+    def __init__(self, reduction="mean", eps=1e-6):
         super().__init__()
         self.reduction = reduction
+        self.eps = eps
 
     def forward(self, preds, targets):
         # preds, targets shapes: (N, 4) where 4 is (cx, cy, w, h)
+
+        # A floor on the predicted size (1e-6 of the canvas, far below any
+        # glyph): a box of exp(-40) rounds to zero width AND height in xyxy,
+        # and the CIoU aspect term atan(w / h) is then 0/0 = NaN, which bf16
+        # training (no grad scaler) applies to every weight. Seen on pages
+        # touching the canvas edge, where a square-letterbox model never saw
+        # content (warm start at 640x896)
+        preds = torch.cat([preds[:, :2], preds[:, 2:] + self.eps], dim=1)
 
         # 1. Convert from (cx, cy, w, h) to (x1, y1, x2, y2)
         # We use the built-in PyTorch operator for safety and speed

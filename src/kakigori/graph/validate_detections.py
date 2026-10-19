@@ -123,7 +123,6 @@ def main():
     parser.add_argument("--gnn-checkpoint", type=str, required=True)
     parser.add_argument("--config", type=str, default="conf/config.json")
     parser.add_argument("--roles_file", type=str, default="conf/structure.json")
-    parser.add_argument("--input-size", type=int, default=640)
     parser.add_argument("--conf-thresh", type=float, default=0.3)
     parser.add_argument("--iou-thresh", type=float, default=0.5)
     parser.add_argument("--no-bbox-repair", action="store_true",
@@ -162,7 +161,7 @@ def main():
             continue
         if process_score(stem, page_paths, out_dir, node_roles, detector,
                          gnn_wrapper, class_list, class_to_idx, device,
-                         args.conf_thresh, args.iou_thresh, args.input_size,
+                         args.conf_thresh, args.iou_thresh, None,
                          bbox_repair=not args.no_bbox_repair,
                          graph_repair=not args.no_repair):
             success += 1

@@ -13,6 +13,9 @@ synthetic_ann_dir: "data/synthetic-boost/annotations"
 use_synthetic: false
 synthetic_ratio: 4
 config: "conf-lite/config.json"
+# Input canvas: SIZE (square) or [WIDTH, HEIGHT]; pages are fitted undistorted
+# and the rest padded. Stored in the checkpoint: eval/infer/visualize and later
+# training stages read it from there. Sides divide by the coarsest stride.
 input_size: 640
 num_workers: 4
 
@@ -22,6 +25,8 @@ num_workers: 4
 # stages of the 0.1.x detectors)
 backbone: regla_m
 use_bottom_up: false
+# ReGLA stages to detect on, one head each: [0, 1, 2] = strides 4/8/16,
+# [0, 1, 2, 3] adds stage 4 and a stride-32 head (train_stage4.yaml)
 out_indices: [0, 1, 2]
 
 # Trainer args
@@ -29,7 +34,12 @@ reg_weight: 5.0
 cls_weight: 1.0
 max_gamma: 4.0    # Final gamma for focal loss
 base_gamma: 2.0   # Initial gamma for focal loss
-scale_ranges: null  # scale/resolution changes ruled out by docs/experiments/vision
+# One (min, max) box area per level, in fractions of a 640x640 canvas (pixel
+# area / 640**2, so the same pixel sizes on any canvas); null = the defaults
+# for the level count (vision/model.DEFAULT_SCALE_RANGES). Stored in the
+# checkpoint. (960px / scale changes measured worse with ConvNeXt DINOv3 in
+# docs/experiments/vision; re-tested on ReGLA with train_448x640/640x896/stage4)
+scale_ranges: null
 
 # Training args
 output_dir: "checkpoints_lite"

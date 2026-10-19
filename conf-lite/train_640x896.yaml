@@ -1,0 +1,66 @@
+# LITE base run at 1.4x linear resolution: an A4 page fills 634x896 (vs
+# 453x640 in the square letterbox), 1.4x the input pixels of 640x640. For
+# the resolution-capped classes: timeSig digits (~7px at 640), flag16th vs
+# flag8th (4px stroke), the clef "8", fermata vs mordent/turn. Fewer box
+# centres collide in one cell too (461 vs ~416 positives on a 505-box page).
+# Scale ranges are scaled by the A4 area factor (896/640)^2 = 1.96 so every
+# class stays on the level the 640 ranges put it on: with the plain pixel
+# ranges, glyphs that grow past a boundary (accidentalFlat, keyAccidNatural,
+# timeSig1 past 1e-4; clefG8vb, grpSym past 1e-3) moved head and collapsed in
+# a 5-epoch warm start from run_006 (fixed-80 mAP@.50 0.693); keeping the
+# levels gave 0.767 vs 0.726 for the same consolidation at 640 (weak-20
+# 0.470 vs 0.376). Compare with checkpoints_lite/run_004.
+
+# Data args
+img_dir: "data/train-lite/imgs"
+ann_dir: "data/train-lite/annotations"
+synthetic_img_dir: "data/synthetic-boost/imgs"
+synthetic_ann_dir: "data/synthetic-boost/annotations"
+use_synthetic: false
+synthetic_ratio: 4
+config: "conf-lite/config.json"
+# Input canvas: SIZE (square) or [WIDTH, HEIGHT]; pages are fitted undistorted
+# and the rest padded. Stored in the checkpoint: eval/infer/visualize and later
+# training stages read it from there. Sides divide by the coarsest stride.
+input_size: [640, 896]
+num_workers: 4
+
+# Model args
+# ReGLA (arXiv 2602.05262) from scratch on one grey channel: regla_t/s/m/l/x
+# (stages 1-3 of regla_m: 4.6M params, vs 60.1M for the ConvNeXt-B DINOv3
+# stages of the 0.1.x detectors)
+backbone: regla_m
+use_bottom_up: false
+# ReGLA stages to detect on, one head each: [0, 1, 2] = strides 4/8/16,
+# [0, 1, 2, 3] adds stage 4 and a stride-32 head (train_stage4.yaml)
+out_indices: [0, 1, 2]
+
+# Trainer args
+reg_weight: 5.0
+cls_weight: 1.0
+max_gamma: 4.0    # Final gamma for focal loss
+base_gamma: 2.0   # Initial gamma for focal loss
+# One (min, max) box area per level, in fractions of a 640x640 canvas (pixel
+# area / 640**2, so the same pixel sizes on any canvas); null = the defaults
+# for the level count (vision/model.DEFAULT_SCALE_RANGES). Stored in the
+# checkpoint. (960px / scale changes measured worse with ConvNeXt DINOv3 in
+# docs/experiments/vision; re-tested on ReGLA with train_448x640/640x896/stage4)
+scale_ranges: [[0.0, 0.000196], [0.000196, 0.00196], [0.00196, 2.0]]
+
+# Training args
+output_dir: "checkpoints_lite"
+logging_dir: "runs_lite"
+epochs: 40
+batch_size: 4
+# From scratch (ReGLA) wants more than the 1e-4 used to fine-tune ConvNeXt:
+# 2k-step sweep on train-lite, validation-lite mAP@.50 = 0.215 (1e-4),
+# 0.258 (3e-4), 0.329 (1e-3), 0.376 (2e-3), 0.384 (4e-3). Gradients are
+# clipped at norm 1.0 (HF default) and run 10-30, so every step is clipped.
+lr: 0.002
+logging_steps: 50
+save_steps: 500
+max_steps: -1
+seed: 42
+resume: false
+resume_from_checkpoint: null
+fine_tune: null

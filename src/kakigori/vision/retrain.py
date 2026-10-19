@@ -18,10 +18,15 @@ from transformers import TrainingArguments, set_seed
 from transformers.trainer_utils import get_last_checkpoint
 
 # Local folder imports
-from .model import MusicDetector
-from .utils import RatioSampler, omr_collate_fn, load_checkpoint, detector_for_checkpoint
+from .utils import (
+    RatioSampler,
+    omr_collate_fn,
+    load_checkpoint,
+    checkpoint_input_size,
+    detector_for_checkpoint,
+)
 from .dataset import OMRDataset
-from .trainer import OMRTrainer
+from .trainer import OMRTrainer, parse_scale_ranges
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -73,18 +78,9 @@ def parse_args():
         help="use synthetic data merged with real data",
     )
     parser.add_argument("--config", type=str, default="conf/config.json")
-    parser.add_argument("--input-size", type=int, default=640)
     parser.add_argument("--num-workers", type=int, default=4)
-
-    # Model args
-    parser.add_argument("--use-bottom-up", action="store_true")
-    parser.add_argument(
-        "--out-indices",
-        type=int,
-        nargs=3,
-        default=[1, 2, 3],
-        help="Three backbone feature map indices to extract (default: 1 2 3).",
-    )
+    # The input canvas, detection levels and neck come from the --fine-tune
+    # checkpoint
 
     # --- Class expansion args ---
     parser.add_argument("--old-num-classes", type=int, default=None, help="Number of classes in the pre-trained weights.")
@@ -99,10 +95,10 @@ def parse_args():
     parser.add_argument(
         "--scale-ranges",
         type=float,
-        nargs=6,
+        nargs="+",
         default=None,
-        help="Six floats defining 3 (min, max) area ranges for scale assignment, "
-        "e.g. 0.0 0.0002 0.0002 0.002 0.002 2.0 (default).",
+        help="One (min, max) box-area pair per level (fractions of a 640x640 canvas); "
+        "default: the checkpoint's own.",
     )
 
     # Training args (subset of common ones, others can be passed via unknown args if needed)
@@ -200,12 +196,13 @@ def main():
     num_classes = len(class_list)
     logger.info(f"Training with {num_classes} classes from {args.config}")
 
-    # --- Prepare Datasets ---
+    # --- Prepare Datasets (on the checkpoint's canvas) ---
+    input_size = checkpoint_input_size(args.fine_tune)
     full_ds = OMRDataset(
         img_dir=args.img_dir,
         ann_dir=args.ann_dir,
         class_list=class_list,
-        input_size=args.input_size,
+        input_size=input_size,
         augment=True,
     )
 
@@ -218,7 +215,7 @@ def main():
             img_dir=args.synthetic_img_dir,
             ann_dir=args.synthetic_ann_dir,
             class_list=class_list,
-            input_size=args.input_size,
+            input_size=input_size,
             augment=True,
         )
         synth_subset = torch.utils.data.Subset(synthetic_ds, range(len(synthetic_ds)))
@@ -247,12 +244,7 @@ def main():
 
     # --- Initialize Model ---
     # 1. Initialize with old architecture size
-    model = detector_for_checkpoint(
-        args.fine_tune,
-        args.old_num_classes,
-        use_bottom_up=args.use_bottom_up,
-        out_indices=tuple(args.out_indices),
-    )
+    model = detector_for_checkpoint(args.fine_tune, args.old_num_classes)
     device = torch.device("cpu")
     load_checkpoint(model, args.fine_tune, device=device, eval=False)
 
@@ -301,11 +293,8 @@ def main():
         dataloader_pin_memory=True,  # Speeds up CPU-to-GPU data transfer
     )
 
-    # --- Parse scale ranges from flat list into list of tuples ---
-    scale_ranges = None
-    if args.scale_ranges is not None:
-        sr = args.scale_ranges
-        scale_ranges = [(sr[0], sr[1]), (sr[2], sr[3]), (sr[4], sr[5])]
+    # --- Scale ranges: flat list or pairs; None keeps the detector's ---
+    scale_ranges = parse_scale_ranges(args.scale_ranges)
 
     # --- Stage-aware crash resume ---
     # The supervisor (train.sh) relaunches after segfaults; without resume a

@@ -7,6 +7,9 @@ import torch
 from torchvision.ops import batched_nms
 from transformers.trainer_utils import get_last_checkpoint
 
+# Local folder imports
+from .dataset import canvas_size
+
 logger = logging.getLogger(__name__)
 
 
@@ -91,39 +94,78 @@ def resolve_weights(checkpoint_path: str) -> Path | None:
     return None
 
 
+def _checkpoint_tensors(checkpoint_path: str, prefix: str = "") -> dict:
+    """A detector checkpoint's weights as shapes only (meta tensors), except
+    the small ``input_wh`` buffer, which is read for its value."""
+    weights = resolve_weights(checkpoint_path)
+    if weights is None:
+        raise FileNotFoundError(f"no weights under {checkpoint_path}")
+    if weights.suffix != ".safetensors":
+        return torch.load(weights, map_location="cpu", weights_only=False)
+    # Third party imports
+    from safetensors import safe_open
+
+    tensors = {}
+    with safe_open(str(weights), "pt") as f:
+        for k in f.keys():
+            if not k.startswith(prefix):
+                continue
+            if k == f"{prefix}input_wh":
+                tensors[k] = f.get_tensor(k)
+            else:
+                tensors[k] = torch.empty(f.get_slice(k).get_shape(), device="meta")
+    return tensors
+
+
 def checkpoint_backbone(checkpoint_path: str, prefix: str = "") -> str:
     """The backbone a detector checkpoint holds (``prefix``: 'detector.' for
     GNN wrapper checkpoints), read from the weight names and shapes only."""
     # Local folder imports
     from .model import detect_backbone
 
-    weights = resolve_weights(checkpoint_path)
-    if weights is None:
-        raise FileNotFoundError(f"no weights under {checkpoint_path}")
-    if weights.suffix == ".safetensors":
-        # Third party imports
-        from safetensors import safe_open
+    return detect_backbone(_checkpoint_tensors(checkpoint_path, prefix), prefix=prefix)
 
-        with safe_open(str(weights), "pt") as f:
-            shapes = {
-                k: torch.empty(f.get_slice(k).get_shape(), device="meta")
-                for k in f.keys()
-                if k.startswith(f"{prefix}backbone.")
-            }
-    else:
-        shapes = torch.load(weights, map_location="meta", weights_only=False)
-    return detect_backbone(shapes, prefix=prefix)
+
+def checkpoint_input_size(checkpoint_path: str, prefix: str = "") -> tuple[int, int]:
+    """The (width, height) canvas a detector checkpoint was trained at."""
+    # Local folder imports
+    from .model import detector_layout
+
+    return detector_layout(_checkpoint_tensors(checkpoint_path, prefix), prefix=prefix)["input_size"]
 
 
 def detector_for_checkpoint(checkpoint_path: str, num_classes: int, prefix: str = "", **kwargs):
     """An (unloaded) MusicDetector shaped like the checkpoint's detector:
-    the same backbone, no pretrained download. Load it with load_checkpoint."""
+    the same backbone, detection levels, neck and input canvas, no pretrained
+    download. Load it with load_checkpoint. The layout read from the weights
+    wins over ``kwargs`` (a mismatch would only fail at load time)."""
     # Local folder imports
-    from .model import MusicDetector
+    from .model import MusicDetector, detect_backbone, detector_layout
 
-    backbone = checkpoint_backbone(checkpoint_path, prefix=prefix)
-    logger.info(f"  Detector backbone: {backbone}")
+    tensors = _checkpoint_tensors(checkpoint_path, prefix)
+    backbone = detect_backbone(tensors, prefix=prefix)
+    layout = detector_layout(tensors, prefix=prefix)
+    for key, value in layout.items():
+        given = kwargs.get(key)
+        if given is None:
+            continue
+        given = canvas_size(given) if key == "input_size" else given
+        if (tuple(given) if isinstance(value, tuple) else given) != value:
+            logger.warning(f"  {key}={kwargs[key]} ignored: the checkpoint has {value}")
+    kwargs.update(layout)
+    width, height = layout["input_size"]
+    logger.info(f"  Detector: {backbone}, {len(kwargs.get('out_indices', (0, 1, 2)))} levels, {width}x{height} input")
     return MusicDetector(num_classes=num_classes, backbone=backbone, pretrained=False, **kwargs)
+
+
+def complete_legacy_state(model, state: dict) -> dict:
+    """Detectors from before the canvas and scale ranges were stored keep the
+    model's: square 640 (what detector_for_checkpoint gives them) and the
+    default 3-level ranges they were trained with."""
+    for key, value in model.state_dict().items():
+        if key.endswith(("input_wh", "level_areas")) and key not in state:
+            state[key] = value
+    return state
 
 
 def load_checkpoint(
@@ -156,6 +198,7 @@ def load_checkpoint(
                 state = load_file(weights, device=str(device))
             else:
                 state = torch.load(weights, map_location=device, weights_only=False)
+            complete_legacy_state(model, state)
             model.load_state_dict(state)
             logger.info(f"  Loaded weights: {weights}")
             break
@@ -167,21 +210,24 @@ def load_checkpoint(
         model.eval()
 
 
-def decode_model_outputs(outputs, conf_thresh, iou_thresh, input_size, multi_label=False):
+def decode_model_outputs(outputs, conf_thresh, iou_thresh, input_size, multi_label=True):
     """
-    Decodes multi-scale raw model outputs into absolute pixel bounding boxes.
+    Decodes multi-scale raw model outputs into absolute pixel bounding boxes
+    on the canvas (``input_size``: int or (width, height)).
     Handles dynamic batch sizes and dynamic feature map resolutions.
 
     ``multi_label`` emits every class over the threshold at a cell (sharing
-    the cell's box) instead of its argmax: training marks all the classes
-    centred on a cell positive, and coincident boxes (measure/staff/layer of
-    a single staff, a one-accidental keySig) otherwise suppress each other.
+    the cell's box); False keeps only its argmax. Training marks all the
+    classes centred on a cell positive, and with the argmax coincident boxes
+    (measure/staff/layer of a single staff, mRest over its whole-rest glyph,
+    a one-accidental keySig) suppress each other.
 
     Returns:
         list[dict]: A list of length BatchSize, containing dicts with "boxes", "scores", and "labels".
     """
     batch_size = outputs[0]["cls"].shape[0]
     device = outputs[0]["cls"].device
+    canvas_w, canvas_h = canvas_size(input_size)
 
     all_boxes = [[] for _ in range(batch_size)]
     all_scores = [[] for _ in range(batch_size)]
@@ -220,10 +266,10 @@ def decode_model_outputs(outputs, conf_thresh, iou_thresh, input_size, multi_lab
         cx_n = (tx + x_idx) / W
         cy_n = (ty + y_idx) / H
 
-        cx = cx_n * input_size
-        cy = cy_n * input_size
-        bw = tw * input_size
-        bh = th * input_size
+        cx = cx_n * canvas_w
+        cy = cy_n * canvas_h
+        bw = tw * canvas_w
+        bh = th * canvas_h
 
         x1 = cx - bw / 2
         y1 = cy - bh / 2

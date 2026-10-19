@@ -20,7 +20,10 @@ from .validate_groundtruth import _load_and_resolve_nodes, _build_page_nodes
 from .utils import split_into_systems
 from .heuristics import generate_axis_aware_edges
 from .model import GraphVisualExtractor, ScoreGraphReconstructor, GNNPhase2Model
-from kakigori.vision.model import MusicDetector, detect_backbone
+import torchvision.transforms.functional as TF
+from kakigori.vision.model import MusicDetector, detect_backbone, detector_layout
+from kakigori.vision.utils import complete_legacy_state
+from kakigori.vision.dataset import letterbox_image, page_to_canvas
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -55,42 +58,27 @@ def _load_gnn(checkpoint_dir: str, device):
             num_classes=num_classes,
             backbone=detect_backbone(weights, prefix="detector."),
             pretrained=False,
+            **detector_layout(weights, prefix="detector."),
         ),
         GraphVisualExtractor(),
         ScoreGraphReconstructor(
             node_in_dim=256 + 4 + 32, num_classes=num_classes, class_embed_dim=32
         ),
     )
-    model.load_state_dict(weights, strict=True)
+    model.load_state_dict(complete_legacy_state(model, weights), strict=True)
     logger.info(f"Loaded GNN wrapper weights ({num_classes} classes): {weights_path}")
     model = model.to(device)
     model.eval()
     return model
 
 
-def _letterbox_page(img_path: Path, input_size: int):
-    """Same convention as OMRFullPageDataset / vision letterboxing."""
-    image = Image.open(img_path).convert("L")
-    orig_w, orig_h = image.size
-    scale = min(input_size / orig_w, input_size / orig_h)
-    new_w, new_h = int(round(orig_w * scale)), int(round(orig_h * scale))
-    image = image.resize((new_w, new_h), Image.BILINEAR)
-    canvas = Image.new("L", (input_size, input_size), 114)
-    pad_x = (input_size - new_w) // 2
-    pad_y = (input_size - new_h) // 2
-    canvas.paste(image, (pad_x, pad_y))
-    import torchvision.transforms.functional as TF
-
-    # boxes follow the rounded resize, not the unrounded scale
-    return TF.to_tensor(canvas), (new_w / orig_w, new_h / orig_h), pad_x, pad_y
-
-
 @torch.no_grad()
 def predict_page_edges(model, page_nodes: list, img_path: Path,
-                       class_to_idx: dict, device, input_size: int = 640) -> list:
-    """Run detector features + GNN over one page; return (u_id, v_id, cls)."""
-    img, (scale_x, scale_y), pad_x, pad_y = _letterbox_page(img_path, input_size)
-    img = img.to(device)
+                       class_to_idx: dict, device, input_size=None) -> list:
+    """Run detector features + GNN over one page; return (u_id, v_id, cls).
+    ``input_size``: the detector's own canvas unless given."""
+    canvas, geo = letterbox_image(Image.open(img_path).convert("L"), input_size or model.detector.input_size)
+    img = TF.to_tensor(canvas).to(device)
 
     # Classes appended to target_classes after a GNN was trained are unknown
     # to its embedding table — exclude those nodes from the GNN pass (the
@@ -101,9 +89,7 @@ def predict_page_edges(model, page_nodes: list, img_path: Path,
         return []
 
     node_ids = [n["id"] for n in page_nodes]
-    boxes = torch.tensor([n["bbox"] for n in page_nodes], dtype=torch.float32)
-    boxes[:, [0, 2]] = boxes[:, [0, 2]] * scale_x + pad_x
-    boxes[:, [1, 3]] = boxes[:, [1, 3]] * scale_y + pad_y
+    boxes = page_to_canvas(torch.tensor([n["bbox"] for n in page_nodes], dtype=torch.float32), geo)
     boxes = boxes.to(device)
     labels = torch.tensor(
         [class_to_idx[n["class"]] for n in page_nodes], dtype=torch.long, device=device
@@ -123,7 +109,8 @@ def predict_page_edges(model, page_nodes: list, img_path: Path,
         rel[:, [0, 2]] -= sx1
         rel[:, [1, 3]] -= sy1
         x = torch.cat(
-            [roi, rel / input_size, model.gnn.class_embedding(group["labels"])], dim=1
+            # normalised by the canvas width, as in GNN training (img.shape[-1])
+            [roi, rel / geo["canvas_w"], model.gnn.class_embedding(group["labels"])], dim=1
         )
         candidates = generate_axis_aware_edges(rel, group["labels"], class_to_idx)
         if candidates.shape[1] == 0:
