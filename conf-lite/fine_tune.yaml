@@ -1,14 +1,14 @@
-# LITE synthetic fine-tune — stage 3c/3d of the loop on the lite track.
-# Targets the measured rare-class gaps of checkpoints_lite/run_001
-# (validation-lite, base run mAP@.50 0.560): dynamics p/f/mp/mf (233-452
-# train instances, AP 0.01-0.19), rest16th/restHalf/mRest (AP 0.00-0.05),
-# mordent/fermata, timeSig digits, accidentalFlat/Natural.
-# data/synthetic-lite = 1.5k writer exercises (weighted rare meters/
-# dynamics/ornaments, piano grand staff) + 1.5k generator mutations of the
-# lite corpus itself (structure stays single-staff/piano, one voice).
-# NOT expected to move: beam16/beamBroken/meterSig/stem32 (thin-shape
-# group) and system-staff (coincident-box confusion on single-staff
-# scores — separate investigation).
+# LITE synthetic fine-tune on the ReGLA base run (checkpoints_lite/run_004,
+# varied validation-lite mAP@.50 0.656 / .50:.95 0.497). Targets its weak,
+# under-represented classes (AP@.50:.95 < 0.3): timeSig9 / timeSigCommon /
+# rare meter digits, keyAccidNatural (key changes), mRest, mordent, fermata,
+# staccatissimo, dynamics mp/pp/ff/mf, flags and 32nd/16th rests, tuplets.
+# data/synthetic-lite (musicset synth, varied engraving, seed 2): 1.5k
+# exercises + 1.5k short rare-meter exercises + 1.5k piano pieces (profile
+# 'rare': detector weighting with normal fingering rates; key changes and
+# whole-measure rests), 750 mutations + 750 arrangements of train-lite.
+# NOT expected to move: staff / system-staff (coincident-box confusion on
+# single-staff pages).
 
 # Data args
 img_dir: "data/train-lite/imgs"
@@ -35,13 +35,18 @@ scale_ranges: null
 # Training args
 output_dir: "checkpoints_lite"
 logging_dir: "runs_lite"
-epochs: 20
+# 1 real : 3 synthetic, so an epoch is 10.4k steps: 10 epochs ~ the base run
+epochs: 10
 batch_size: 4
-lr: 0.00025
+# 3k-step sweep from run_004 (mAP@.50 / weak-class mean AP@.50:.95, base
+# 0.656 / 0.106): 2e-4 0.653 / 0.140, 5e-4 0.639 / 0.143, 1e-3 0.635 / 0.136,
+# 2e-3 0.633 / 0.158; the other classes lose -0.017 / -0.029 / -0.037 (2e-4,
+# 1e-3, 2e-3): weak gains flat, cost growing with lr
+lr: 0.0002
 logging_steps: 50
 save_steps: 500
 max_steps: -1
 seed: 42
 resume: false
 resume_from_checkpoint: null
-fine_tune: "checkpoints_lite/run_001/"
+fine_tune: "checkpoints_lite/run_004/"

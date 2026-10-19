@@ -1,8 +1,8 @@
-# LITE consolidation — stage 3d: mostly real data (9:1) at low lr to lock
-# in the fine-tune gains (run_002: dynamics 0.05->0.9+, accidentals ->0.96+,
-# timeSig1 ->0.80) while recovering the synthetic-heavy see-saw regressions
-# (system 0.78->0.56, measure 0.59->0.56, chord 0.42->0.38 — the same
-# pattern the full model showed between its run_002 and run_003).
+# LITE consolidation on the ReGLA fine-tune (checkpoints_lite/run_005:
+# mAP@.50 0.656 / .50:.95 0.506, weak-class mean 0.106 -> 0.246): mostly real
+# data (9:1) to keep those gains while recovering the synthetic-heavy
+# regressions (fermata 0.51 -> 0.10, read as mordent/turn/trill: synthetic
+# pages carry far more ornaments than real ones; clefC, dynamicMF, rest16th).
 
 # Data args
 img_dir: "data/train-lite/imgs"
@@ -31,11 +31,14 @@ output_dir: "checkpoints_lite"
 logging_dir: "runs_lite"
 epochs: 30
 batch_size: 4
-lr: 0.00005
+# 3k-step sweep from run_005 (mAP@.50 / .50:.95 / weak-class mean, fine-tune
+# 0.656 / 0.506 / 0.246): 5e-5 0.650 / 0.500 / 0.231, 1e-4 0.658 / 0.509 /
+# 0.255, 2e-4 0.671 / 0.521 / 0.287, 4e-4 0.667 / 0.518 / 0.304
+lr: 0.0002
 logging_steps: 50
 save_steps: 500
 max_steps: -1
 seed: 42
 resume: false
 resume_from_checkpoint: null
-fine_tune: "checkpoints_lite/run_002/"
+fine_tune: "checkpoints_lite/run_005/"

@@ -61,6 +61,8 @@ class OMRFullPageDataset(Dataset):
         pad_y = (self.input_size - new_h) // 2
         canvas.paste(image, (pad_x, pad_y))
         img_tensor = TF.to_tensor(canvas)  # Shape: (1, input_size, input_size)
+        # boxes follow the rounded resize, not the unrounded scale
+        scale_x, scale_y = new_w / orig_w, new_h / orig_h
 
         # --- B. Load Relational Data ---
         graph_data = load_graph(sample["graph"])
@@ -124,8 +126,8 @@ class OMRFullPageDataset(Dataset):
         # Remap boxes into letterboxed canvas coordinates
         if boxes:
             boxes_tensor = torch.tensor(boxes, dtype=torch.float32)
-            boxes_tensor[:, [0, 2]] = boxes_tensor[:, [0, 2]] * scale + pad_x
-            boxes_tensor[:, [1, 3]] = boxes_tensor[:, [1, 3]] * scale + pad_y
+            boxes_tensor[:, [0, 2]] = boxes_tensor[:, [0, 2]] * scale_x + pad_x
+            boxes_tensor[:, [1, 3]] = boxes_tensor[:, [1, 3]] * scale_y + pad_y
         else:
             boxes_tensor = torch.empty((0, 4), dtype=torch.float32)
         labels_tensor = torch.tensor(labels, dtype=torch.long)
@@ -161,8 +163,8 @@ class OMRFullPageDataset(Dataset):
                 det_labels.append(self.class_to_idx[cls])
         if det_boxes:
             det_boxes_tensor = torch.tensor(det_boxes, dtype=torch.float32)
-            det_boxes_tensor[:, [0, 2]] = det_boxes_tensor[:, [0, 2]] * scale + pad_x
-            det_boxes_tensor[:, [1, 3]] = det_boxes_tensor[:, [1, 3]] * scale + pad_y
+            det_boxes_tensor[:, [0, 2]] = det_boxes_tensor[:, [0, 2]] * scale_x + pad_x
+            det_boxes_tensor[:, [1, 3]] = det_boxes_tensor[:, [1, 3]] * scale_y + pad_y
         else:
             det_boxes_tensor = torch.empty((0, 4), dtype=torch.float32)
 

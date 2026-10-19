@@ -18,7 +18,7 @@ num_workers: 4
 
 # Model args
 # ReGLA (arXiv 2602.05262) from scratch on one grey channel: regla_t/s/m/l/x
-# (stages 1-3 of regla_m: 3.0M params, vs 60.1M for the ConvNeXt-B DINOv3
+# (stages 1-3 of regla_m: 4.6M params, vs 60.1M for the ConvNeXt-B DINOv3
 # stages of the 0.1.x detectors)
 backbone: regla_m
 use_bottom_up: false
@@ -36,7 +36,11 @@ output_dir: "checkpoints_lite"
 logging_dir: "runs_lite"
 epochs: 40
 batch_size: 4
-lr: 0.0001
+# From scratch (ReGLA) wants more than the 1e-4 used to fine-tune ConvNeXt:
+# 2k-step sweep on train-lite, validation-lite mAP@.50 = 0.215 (1e-4),
+# 0.258 (3e-4), 0.329 (1e-3), 0.376 (2e-3), 0.384 (4e-3). Gradients are
+# clipped at norm 1.0 (HF default) and run 10-30, so every step is clipped.
+lr: 0.002
 logging_steps: 50
 save_steps: 500
 max_steps: -1

@@ -9,10 +9,10 @@ from pathlib import Path
 # Third party imports
 import numpy as np
 import torch
-from PIL import Image, ImageDraw
+from PIL import Image
 from PySide6.QtGui import QPen, QFont, QColor, QImage, QPixmap, QShortcut, QKeySequence
 from PySide6.QtCore import Qt, QRectF, Signal, QObject
-from torchvision.ops import nms
+from torchvision.ops import box_iou
 from PySide6.QtWidgets import (
     QLabel,
     QSlider,
@@ -29,12 +29,10 @@ from PySide6.QtWidgets import (
     QRadioButton,
     QGraphicsView,
     QGraphicsScene,
-    QGraphicsPixmapItem,
 )
 
 # Local folder imports
 from .infer import preprocess
-from .model import MusicDetector
 from .utils import detector_for_checkpoint, load_checkpoint, decode_model_outputs
 
 logging.basicConfig(
@@ -63,6 +61,13 @@ _COLORS = [
     "#ffe119",
 ]
 
+# Ground-truth comparison colours
+_FP_COLOR = QColor("#ff1744")  # detection matching nothing
+_CONFUSED_COLOR = QColor("#d500f9")  # detection over a box of another class
+_FN_COLOR = QColor("#ff9100")  # ground-truth box nobody found
+
+MODES = ("bbox", "heatmap", "features", "compare")
+
 
 def _class_color(cls_name: str) -> QColor:
     return QColor(_COLORS[sum(ord(c) for c in cls_name) % len(_COLORS)])
@@ -85,11 +90,65 @@ def pil2qpixmap(pil_img: Image.Image) -> QPixmap:
     return QPixmap.fromImage(qim)
 
 
+def match_page(preds: list, gts: list, iou_thresh: float = 0.5) -> dict:
+    """Match detections to ground truth, class by class, highest score first.
+
+    Returns ``tp`` (pred, gt) pairs, ``fp`` (pred, confused gt or None): a
+    detection over a ground-truth box of ANOTHER class is a confusion, which
+    says more than a plain false positive, and ``fn`` (missed gt boxes).
+    """
+    tp, fp = [], []
+    matched = set()
+    iou = None
+    if preds and gts:
+        iou = box_iou(
+            torch.tensor([p["bbox"] for p in preds], dtype=torch.float32),
+            torch.tensor([g["bbox"] for g in gts], dtype=torch.float32),
+        )
+    for i in sorted(range(len(preds)), key=lambda i: -preds[i]["score"]):
+        pred = preds[i]
+        best, best_iou = None, iou_thresh
+        if iou is not None:
+            for j, gt in enumerate(gts):
+                if j not in matched and gt["class"] == pred["class"] and iou[i, j] >= best_iou:
+                    best, best_iou = j, float(iou[i, j])
+        if best is not None:
+            matched.add(best)
+            tp.append((pred, gts[best]))
+            continue
+        confused = None
+        if iou is not None:
+            j = int(iou[i].argmax())
+            if iou[i, j] >= iou_thresh and gts[j]["class"] != pred["class"]:
+                confused = gts[j]
+        fp.append((pred, confused))
+    fn = [gt for j, gt in enumerate(gts) if j not in matched]
+    return {"tp": tp, "fp": fp, "fn": fn}
+
+
+def page_scores(match: dict, visible: set | None = None) -> dict:
+    """Counts, precision, recall and F1 of a matched page (optionally only
+    the visible classes: a TP/FP counts by its detected class, a FN by its
+    ground-truth class)."""
+    keep = (lambda c: True) if visible is None else (lambda c: c in visible)
+    tp = sum(1 for p, _ in match["tp"] if keep(p["class"]))
+    fp = sum(1 for p, _ in match["fp"] if keep(p["class"]))
+    confused = sum(1 for p, g in match["fp"] if g is not None and keep(p["class"]))
+    fn = sum(1 for g in match["fn"] if keep(g["class"]))
+    precision = tp / (tp + fp) if tp + fp else 1.0
+    recall = tp / (tp + fn) if tp + fn else 1.0
+    f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+    return {"tp": tp, "fp": fp, "confused": confused, "fn": fn,
+            "precision": precision, "recall": recall, "f1": f1}
+
+
 class InferenceSignals(QObject):
     """Custom signals to communicate securely from the background thread to the UI."""
 
     finished = Signal(Path)
     error = Signal(Path, str)
+    progress = Signal(int, int)
+    ranked = Signal(list)
 
 
 class ResizableGraphicsView(QGraphicsView):
@@ -128,9 +187,13 @@ class ModelVisualizer(QMainWindow):
         input_size=640,
         conf_thresh=0.3,
         iou_thresh=0.5,
+        ann_dir=None,
+        image_paths=None,
+        multi_label=False,
     ):
         super().__init__()
-        self.setWindowTitle("Kakigori — Model Output Visualizer (PySide6)")
+        backbone = getattr(model, "backbone_name", "detector")
+        self.setWindowTitle(f"Kakigori — Model Output Visualizer ({backbone})")
         self.resize(1400, 900)
 
         self.model = model
@@ -138,16 +201,21 @@ class ModelVisualizer(QMainWindow):
         self.input_size = input_size
         self.iou_thresh = iou_thresh
         self.current_conf_thresh = conf_thresh
+        self.multi_label = multi_label
 
         self.img_dir = Path(img_dir)
+        self.ann_dir = Path(ann_dir) if ann_dir else None
         self.hierarchy_path = Path(hierarchy_path)
         self.config_path = Path(config_path)
 
-        self.image_paths = sorted(
-            list(self.img_dir.rglob("*.png"))
-            + list(self.img_dir.rglob("*.jpg"))
-            + list(self.img_dir.rglob("*.jpeg"))
-        )
+        if image_paths is not None:
+            self.image_paths = [Path(p) for p in image_paths]
+        else:
+            self.image_paths = sorted(
+                list(self.img_dir.rglob("*.png"))
+                + list(self.img_dir.rglob("*.jpg"))
+                + list(self.img_dir.rglob("*.jpeg"))
+            )
         self.current_index = 0
 
         self.class_list = self._load_class_list()
@@ -155,22 +223,27 @@ class ModelVisualizer(QMainWindow):
         self.hierarchy = self._load_hierarchy()
 
         self._cache = {}
+        self._gt_cache = {}
         self._inference_lock = threading.Lock()
-        self._captured_features = []
-        self._scale_labels = ["P3 (Micro)", "P4 (Mid)", "P5 (Macro)"]
+        self._captured_neck = []
+        self._captured_backbone = []
+        self._scale_labels = ["Fine", "Mid", "Coarse"]
 
         # Threading signals
         self.worker_signals = InferenceSignals()
         self.worker_signals.finished.connect(self._on_inference_done)
         self.worker_signals.error.connect(self._on_inference_error)
+        self.worker_signals.progress.connect(self._on_rank_progress)
+        self.worker_signals.ranked.connect(self._on_ranked)
 
         # UI State tracking
         self.class_checkboxes = {}
-        self.drawn_bboxes = []  # Stores [{class: 'name', items: [rect, text]}]
+        self.drawn_bboxes = []  # [{class: 'name', items: [rect, text]}]
+        self.drawn_compare = []  # [{class, kind: tp/fp/confused/fn, items}]
         self.base_pixmap_item = None  # The original image
         self.overlay_pixmap_item = None  # The heatmap/feature overlay
 
-        self._register_hook()
+        self._register_hooks()
         self._setup_ui()
 
         if self.image_paths:
@@ -178,7 +251,7 @@ class ModelVisualizer(QMainWindow):
         else:
             logger.warning(f"No images found in {self.img_dir}")
 
-    # --- Config Loaders & Hooks (Identical logic to original) ---
+    # --- Config Loaders & Hooks ---
     def _load_class_list(self):
         if self.config_path.exists():
             try:
@@ -213,11 +286,35 @@ class ModelVisualizer(QMainWindow):
             or not self.target_classes
         }
 
-    def _register_hook(self):
-        def _hook(module, inp, out):
-            self._captured_features = [fm.detach().cpu() for fm in out]
+    def _register_hooks(self):
+        """Capture the fused neck maps and the raw backbone stages (ReGLA's
+        stage outputs, or the timm features of a legacy checkpoint)."""
 
-        self._hook_handle = self.model.neck.register_forward_hook(_hook)
+        def _neck_hook(module, inp, out):
+            self._captured_neck = [fm.detach().cpu() for fm in out]
+
+        def _backbone_hook(module, inp, out):
+            self._captured_backbone = [fm.detach().float().cpu() for fm in out]
+
+        self._hook_handles = [
+            self.model.neck.register_forward_hook(_neck_hook),
+            self.model.backbone.register_forward_hook(_backbone_hook),
+        ]
+
+    def _load_gt(self, path):
+        """Ground-truth boxes of a page (target classes only), or None."""
+        if self.ann_dir is None:
+            return None
+        if path not in self._gt_cache:
+            ann_path = self.ann_dir / f"{path.stem}.json"
+            gts = []
+            if ann_path.exists():
+                with open(ann_path) as f:
+                    for ann in json.load(f).get("annotations", []):
+                        if ann.get("class") in self.target_classes:
+                            gts.append({"class": ann["class"], "bbox": [float(v) for v in ann["bbox"]]})
+            self._gt_cache[path] = gts
+        return self._gt_cache[path]
 
     # --- UI Setup ---
     def _setup_ui(self):
@@ -240,12 +337,50 @@ class ModelVisualizer(QMainWindow):
             "bbox": QRadioButton("Bounding Boxes"),
             "heatmap": QRadioButton("Heatmaps"),
             "features": QRadioButton("Feature Maps"),
+            "compare": QRadioButton("Compare with Ground Truth"),
         }
         self.mode_vars["bbox"].setChecked(True)
+        self.mode_vars["compare"].setEnabled(self.ann_dir is not None)
+        if self.ann_dir is None:
+            self.mode_vars["compare"].setToolTip("Start with --ann-dir to compare against annotations")
         for i, (val, rb) in enumerate(self.mode_vars.items()):
             self.mode_group.addButton(rb, i)
             sidebar_layout.addWidget(rb)
             rb.toggled.connect(self._redraw)
+
+        # Feature source (feature-map mode)
+        feat_layout = QHBoxLayout()
+        feat_layout.addWidget(QLabel("Features from:"))
+        self.feature_group = QButtonGroup(self)
+        for i, label in enumerate(("Neck", "Backbone")):
+            rb = QRadioButton(label)
+            rb.setChecked(i == 0)
+            self.feature_group.addButton(rb, i)
+            feat_layout.addWidget(rb)
+            rb.toggled.connect(self._redraw)
+        sidebar_layout.addLayout(feat_layout)
+
+        # Ground-truth comparison options
+        self.errors_only = QCheckBox("Errors only (hide matched boxes)")
+        self.errors_only.setEnabled(self.ann_dir is not None)
+        self.errors_only.toggled.connect(self._redraw)
+        sidebar_layout.addWidget(self.errors_only)
+        self.lbl_scores = QLabel("")
+        self.lbl_scores.setWordWrap(True)
+        self.lbl_scores.setStyleSheet("color: #444444;")
+        sidebar_layout.addWidget(self.lbl_scores)
+        legend = QLabel(
+            "<span style='color:#ff1744'>■</span> false positive &nbsp; "
+            "<span style='color:#d500f9'>■</span> wrong class &nbsp; "
+            "<span style='color:#ff9100'>■</span> missed"
+        )
+        legend.setVisible(self.ann_dir is not None)
+        sidebar_layout.addWidget(legend)
+        self.btn_rank = QPushButton("Rank pages, worst F1 first")
+        self.btn_rank.setEnabled(self.ann_dir is not None)
+        self.btn_rank.setToolTip("Runs the detector on every page, then orders them by F1 at the current threshold")
+        self.btn_rank.clicked.connect(self._rank_pages)
+        sidebar_layout.addWidget(self.btn_rank)
 
         # Scale Level
         sidebar_layout.addWidget(self._create_header("Scale Level", top_margin=15))
@@ -257,11 +392,13 @@ class ModelVisualizer(QMainWindow):
         scale_layout.addWidget(rb_all)
         rb_all.toggled.connect(self._redraw)
 
+        self.scale_buttons = []
         for i, label in enumerate(self._scale_labels):
             rb = QRadioButton(label)
             self.scale_group.addButton(rb, i)
             scale_layout.addWidget(rb)
             rb.toggled.connect(self._redraw)
+            self.scale_buttons.append(rb)
         sidebar_layout.addLayout(scale_layout)
 
         # Confidence Slider
@@ -279,6 +416,13 @@ class ModelVisualizer(QMainWindow):
         conf_layout.addWidget(self.conf_slider)
         conf_layout.addWidget(self.lbl_conf)
         sidebar_layout.addLayout(conf_layout)
+
+        # Argmax keeps one class per cell; coincident boxes (measure/staff/layer
+        # of one staff, mRest over its whole-rest glyph) need every class
+        self.multi_label_cb = QCheckBox("Multi-label decode (every class per cell)")
+        self.multi_label_cb.setChecked(self.multi_label)
+        self.multi_label_cb.toggled.connect(self._on_multi_label_change)
+        sidebar_layout.addWidget(self.multi_label_cb)
 
         # Class Toggles
         sidebar_layout.addWidget(self._create_header("Class Visibility", top_margin=15))
@@ -359,26 +503,71 @@ class ModelVisualizer(QMainWindow):
                 cb.blockSignals(False)
         self._redraw()
 
+    def _visible_classes(self):
+        return {cls for cls, cb in self.class_checkboxes.items() if cb.isChecked()}
+
+    # --- Detections ---
+    def _decode(self, raw_outputs, meta, conf_thresh):
+        """Detections in page pixels from raw head outputs (letterbox undone)."""
+        preds = decode_model_outputs(
+            raw_outputs, conf_thresh, self.iou_thresh, self.input_size, multi_label=self.multi_label
+        )[0]
+        boxes = preds["boxes"].float().clone()
+        boxes[:, [0, 2]] = ((boxes[:, [0, 2]] - meta["pad_x"]) / meta["scale_x"]).clamp(0.0, float(meta["orig_w"]))
+        boxes[:, [1, 3]] = ((boxes[:, [1, 3]] - meta["pad_y"]) / meta["scale_y"]).clamp(0.0, float(meta["orig_h"]))
+        return [
+            {
+                "class": self.class_list[int(c)],
+                "score": round(float(s), 4),
+                "bbox": [round(float(v), 1) for v in box],
+            }
+            for box, s, c in zip(boxes, preds["scores"], preds["labels"])
+        ]
+
+    def _infer(self, path):
+        """Run the detector on one page and cache everything the views need."""
+        image = Image.open(path).convert("RGB")
+        tensor, meta = preprocess(image, self.input_size, self.device)
+        self._captured_neck, self._captured_backbone = [], []
+        with torch.inference_mode():
+            raw_outputs = self.model(tensor)
+        raw_cpu = [
+            {"cls": out["cls"].detach().float().cpu(), "reg": out["reg"].detach().float().cpu()}
+            for out in raw_outputs
+        ]
+        entry = {
+            "raw_outputs": raw_cpu,
+            "meta": meta,
+            "neck_maps": list(self._captured_neck),
+            "backbone_maps": list(self._captured_backbone),
+            "detections": self._decode(raw_cpu, meta, self.current_conf_thresh),
+        }
+        gts = self._load_gt(path)
+        if gts is not None:
+            entry["match"] = match_page(entry["detections"], gts, self.iou_thresh)
+        return entry
+
     def _update_bbox_items(self):
         """Safely destroys old QGraphicsItems and draws new ones based on current cache."""
-        # 1. Remove old Qt items from the scene to prevent memory leaks
-        for ann in self.drawn_bboxes:
+        for ann in self.drawn_bboxes + self.drawn_compare:
             for item in ann["items"]:
                 self.scene.removeItem(item)
         self.drawn_bboxes.clear()
+        self.drawn_compare.clear()
 
         path = self.image_paths[self.current_index]
         cached = self._cache.get(path)
         if not cached:
             return
+        width = max(1, int(self.original_w * 0.002))
 
-        # 2. Draw the new boxes based on the current confidence threshold
+        # Plain detections (bbox mode)
         for det in cached.get("detections", []):
             cls = det["class"]
             x1, y1, x2, y2 = det["bbox"]
             color = _class_color(cls)
             pen = QPen(color)
-            pen.setWidth(max(1, int(self.original_w * 0.002)))
+            pen.setWidth(width)
 
             rect_item = self.scene.addRect(QRectF(x1, y1, x2 - x1, y2 - y1), pen)
             rect_item.setZValue(2)
@@ -390,77 +579,59 @@ class ModelVisualizer(QMainWindow):
 
             self.drawn_bboxes.append({"class": cls, "items": [rect_item, text_item]})
 
+        # Ground-truth comparison (compare mode)
+        match = cached.get("match")
+        if match is None:
+            return
+
+        def add(cls, kind, bbox, color, label, pen_width, style=Qt.SolidLine):
+            x1, y1, x2, y2 = bbox
+            pen = QPen(color)
+            pen.setWidth(pen_width)
+            pen.setStyle(style)
+            items = [self.scene.addRect(QRectF(x1, y1, x2 - x1, y2 - y1), pen)]
+            if label:
+                text = self.scene.addText(label)
+                text.setDefaultTextColor(color)
+                text.setPos(x1, max(0, y1 - 25))
+                items.append(text)
+            for item in items:
+                item.setZValue(3 if kind != "tp" else 2)
+            self.drawn_compare.append({"class": cls, "kind": kind, "items": items})
+
+        for pred, _gt in match["tp"]:
+            color = QColor(_class_color(pred["class"]))
+            color.setAlpha(110)
+            add(pred["class"], "tp", pred["bbox"], color, None, width)
+        for pred, confused in match["fp"]:
+            if confused is None:
+                add(pred["class"], "fp", pred["bbox"], _FP_COLOR,
+                    f"FP {pred['class']} {pred['score']:.2f}", width * 2, Qt.DashLine)
+            else:
+                add(pred["class"], "confused", pred["bbox"], _CONFUSED_COLOR,
+                    f"{pred['class']} {pred['score']:.2f} ← gt {confused['class']}", width * 2)
+        for gt in match["fn"]:
+            add(gt["class"], "fn", gt["bbox"], _FN_COLOR, f"missed {gt['class']}", width * 3)
+
     def _on_conf_change(self, value):
         self.current_conf_thresh = value / 100.0
         self.lbl_conf.setText(f"{self.current_conf_thresh:.2f}")
+        self._redecode_current()
 
+    def _on_multi_label_change(self, checked):
+        self.multi_label = checked
+        self._redecode_current()
+
+    def _redecode_current(self):
+        """Decode the cached raw outputs of the shown page again (threshold or
+        decode mode changed) and redraw."""
         path = self.image_paths[self.current_index] if self.image_paths else None
-        if path and path in self._cache and "raw_outputs" in self._cache[path]:
+        if path and path in self._cache:
             cached = self._cache[path]
-            # Recalculate the NMS and detections
-            batch_preds = decode_model_outputs(
-                cached["raw_outputs"],
-                self.current_conf_thresh,
-                self.iou_thresh,
-                self.input_size,
-            )
-
-            detections_dict = batch_preds[0]
-
-            detections = [
-                {
-                    "class": self.class_list[int(c)],
-                    "score": round(float(s), 4),
-                    "bbox": [
-                        round(
-                            float(
-                                (
-                                    (bx1 - cached["meta"]["pad_x"])
-                                    / cached["meta"]["scale"]
-                                ).clamp(min=0.0)
-                            ),
-                            1,
-                        ),
-                        round(
-                            float(
-                                (
-                                    (by1 - cached["meta"]["pad_y"])
-                                    / cached["meta"]["scale"]
-                                ).clamp(min=0.0)
-                            ),
-                            1,
-                        ),
-                        round(
-                            float(
-                                (
-                                    (bx2 - cached["meta"]["pad_x"])
-                                    / cached["meta"]["scale"]
-                                ).clamp(max=float(cached["meta"]["orig_w"]))
-                            ),
-                            1,
-                        ),
-                        round(
-                            float(
-                                (
-                                    (by2 - cached["meta"]["pad_y"])
-                                    / cached["meta"]["scale"]
-                                ).clamp(max=float(cached["meta"]["orig_h"]))
-                            ),
-                            1,
-                        ),
-                    ],
-                }
-                for bx1, by1, bx2, by2, s, c in zip(
-                    detections_dict["boxes"][:, 0],
-                    detections_dict["boxes"][:, 1],
-                    detections_dict["boxes"][:, 2],
-                    detections_dict["boxes"][:, 3],
-                    detections_dict["scores"],
-                    detections_dict["labels"],
-                )
-            ]
-            cached["detections"] = detections
-            # Rebuild the Qt graphics items based on the new detections
+            cached["detections"] = self._decode(cached["raw_outputs"], cached["meta"], self.current_conf_thresh)
+            gts = self._load_gt(path)
+            if gts is not None:
+                cached["match"] = match_page(cached["detections"], gts, self.iou_thresh)
             self._update_bbox_items()
 
         self._redraw()
@@ -488,6 +659,7 @@ class ModelVisualizer(QMainWindow):
         # Reset Scene
         self.scene.clear()
         self.drawn_bboxes.clear()
+        self.drawn_compare.clear()
 
         pixmap = QPixmap(str(path))
         self.scene.setSceneRect(0, 0, pixmap.width(), pixmap.height())
@@ -502,7 +674,8 @@ class ModelVisualizer(QMainWindow):
 
         if path in self._cache:
             self.lbl_status.setText("✓ Cached")
-            self._redraw()
+            # threshold or decode mode may have changed since it was decoded
+            self._redecode_current()
         else:
             self.lbl_status.setText("⏳ Running inference…")
             threading.Thread(
@@ -515,81 +688,7 @@ class ModelVisualizer(QMainWindow):
                 self.worker_signals.finished.emit(path)
                 return
             try:
-                image = Image.open(path).convert("RGB")
-                tensor, meta = preprocess(image, self.input_size, self.device)
-
-                self._captured_features = []
-                with torch.inference_mode():
-                    raw_outputs = self.model(tensor)
-
-                raw_cpu = [
-                    {"cls": out["cls"].detach().cpu(), "reg": out["reg"].detach().cpu()}
-                    for out in raw_outputs
-                ]
-                batch_preds = decode_model_outputs(
-                    raw_outputs,
-                    self.current_conf_thresh,
-                    self.iou_thresh,
-                    self.input_size,
-                )
-
-                detections_dict = batch_preds[0]
-
-                detections = [
-                    {
-                        "class": self.class_list[int(c)],
-                        "score": round(float(s), 4),
-                        "bbox": [
-                            round(
-                                float(
-                                    ((bx1 - meta["pad_x"]) / meta["scale"]).clamp(
-                                        min=0.0
-                                    )
-                                ),
-                                1,
-                            ),
-                            round(
-                                float(
-                                    ((by1 - meta["pad_y"]) / meta["scale"]).clamp(
-                                        min=0.0
-                                    )
-                                ),
-                                1,
-                            ),
-                            round(
-                                float(
-                                    ((bx2 - meta["pad_x"]) / meta["scale"]).clamp(
-                                        max=float(meta["orig_w"])
-                                    )
-                                ),
-                                1,
-                            ),
-                            round(
-                                float(
-                                    ((by2 - meta["pad_y"]) / meta["scale"]).clamp(
-                                        max=float(meta["orig_h"])
-                                    )
-                                ),
-                                1,
-                            ),
-                        ],
-                    }
-                    for bx1, by1, bx2, by2, s, c in zip(
-                        detections_dict["boxes"][:, 0],
-                        detections_dict["boxes"][:, 1],
-                        detections_dict["boxes"][:, 2],
-                        detections_dict["boxes"][:, 3],
-                        detections_dict["scores"],
-                        detections_dict["labels"],
-                    )
-                ]
-
-                self._cache[path] = {
-                    "raw_outputs": raw_cpu,
-                    "meta": meta,
-                    "feature_maps": list(self._captured_features),
-                    "detections": detections,
-                }
+                self._cache[path] = self._infer(path)
                 self.worker_signals.finished.emit(path)
             except Exception as e:
                 logger.error(f"Inference failed: {e}")
@@ -602,9 +701,52 @@ class ModelVisualizer(QMainWindow):
     def _on_inference_done(self, path):
         if self.image_paths and self.image_paths[self.current_index] == path:
             self.lbl_status.setText("✓ Cached")
-            # Build the initial boxes natively in Qt
             self._update_bbox_items()
             self._redraw()
+
+    # --- Ranking pages against the ground truth ---
+    def _rank_pages(self):
+        self.btn_rank.setEnabled(False)
+        threading.Thread(target=self._rank_worker, daemon=True).start()
+
+    def _rank_worker(self):
+        paths = list(self.image_paths)
+        scored = []
+        for i, path in enumerate(paths):
+            with self._inference_lock:
+                if path not in self._cache:
+                    try:
+                        self._cache[path] = self._infer(path)
+                    except Exception as e:
+                        logger.error(f"Inference failed on {path.name}: {e}")
+                        continue
+                cached = self._cache[path]
+                if cached["detections"] is None or "match" not in cached:
+                    continue
+                # Rank at the current threshold
+                cached["detections"] = self._decode(cached["raw_outputs"], cached["meta"], self.current_conf_thresh)
+                cached["match"] = match_page(cached["detections"], self._load_gt(path), self.iou_thresh)
+                scored.append((page_scores(cached["match"])["f1"], str(path)))
+            if i % 10 == 0 or i == len(paths) - 1:
+                self.worker_signals.progress.emit(i + 1, len(paths))
+        scored.sort()
+        self.worker_signals.ranked.emit(scored)
+
+    def _on_rank_progress(self, done, total):
+        self.lbl_status.setText(f"⏳ Ranking pages… {done} / {total}")
+
+    def _on_ranked(self, scored):
+        self.btn_rank.setEnabled(True)
+        if not scored:
+            self.lbl_status.setText("Nothing to rank")
+            return
+        self.image_paths = [Path(p) for _, p in scored]
+        mean_f1 = sum(f for f, _ in scored) / len(scored)
+        self.current_index = 0
+        self._load_image()
+        self.lbl_status.setText(
+            f"Ranked {len(scored)} pages, worst first (mean F1 {mean_f1:.3f}, worst {scored[0][0]:.3f})"
+        )
 
     # --- Rendering Updates ---
     def _crop_letterbox(self, hm_pil, meta):
@@ -613,6 +755,18 @@ class ModelVisualizer(QMainWindow):
         content_h = int(round(meta["orig_h"] * meta["scale"]))
         hm_full = hm_pil.resize((s, s), Image.Resampling.BILINEAR)
         return hm_full.crop((pad_x, pad_y, pad_x + content_w, pad_y + content_h))
+
+    def _update_scores_label(self, cached, visible):
+        match = cached.get("match")
+        if match is None:
+            self.lbl_scores.setText("")
+            return
+        s = page_scores(match, visible)
+        self.lbl_scores.setText(
+            f"<b>This page</b> (IoU ≥ {self.iou_thresh:.2f}, conf ≥ {self.current_conf_thresh:.2f}, visible classes): "
+            f"{s['tp']} found, {s['fp']} false positives ({s['confused']} wrong class), "
+            f"{s['fn']} missed — precision {s['precision']:.3f}, recall {s['recall']:.3f}, F1 {s['f1']:.3f}"
+        )
 
     def _redraw(self):
         if not self.base_pixmap_item:
@@ -623,20 +777,32 @@ class ModelVisualizer(QMainWindow):
         if not cached:
             return
 
-        mode_id = self.mode_group.checkedId()
-        mode = "bbox" if mode_id == 0 else "heatmap" if mode_id == 1 else "features"
-        visible_classes = {
-            cls for cls, cb in self.class_checkboxes.items() if cb.isChecked()
-        }
+        mode = MODES[max(0, self.mode_group.checkedId())]
+        visible_classes = self._visible_classes()
+        self._update_scores_label(cached, visible_classes)
 
-        # 1. Update BBox Visibility based on the class sidebar toggles
+        # Scale buttons name the strides once they are known
+        maps = cached.get("neck_maps") or []
+        for rb, fm in zip(self.scale_buttons, maps):
+            rb.setText(f"1/{round(self.input_size / fm.shape[-1])}")
+
+        # 1. Box visibility: plain detections, or the ground-truth comparison
         for ann in self.drawn_bboxes:
             is_visible = (mode == "bbox") and (ann["class"] in visible_classes)
             for item in ann["items"]:
                 item.setVisible(is_visible)
+        hide_tp = self.errors_only.isChecked()
+        for ann in self.drawn_compare:
+            is_visible = (
+                mode == "compare"
+                and ann["class"] in visible_classes
+                and not (hide_tp and ann["kind"] == "tp")
+            )
+            for item in ann["items"]:
+                item.setVisible(is_visible)
 
         # 2. Update Overlay Visibility and Content
-        if mode == "bbox":
+        if mode in ("bbox", "compare"):
             self.overlay_pixmap_item.setVisible(False)
             return
 
@@ -673,10 +839,12 @@ class ModelVisualizer(QMainWindow):
                 combined = np.where(combined >= self.current_conf_thresh, combined, 0.0)
 
         elif mode == "features":
+            source = "backbone_maps" if self.feature_group.checkedId() == 1 else "neck_maps"
+            feature_maps = cached.get(source) or []
             for si in indices:
-                if si >= len(cached["feature_maps"]):
+                if si >= len(feature_maps):
                     continue
-                hm = torch.max(cached["feature_maps"][si].squeeze(0), dim=0)[0].numpy()
+                hm = torch.max(feature_maps[si].squeeze(0), dim=0)[0].numpy()
                 hm = (hm - hm.min()) / (hm.max() - hm.min() + 1e-8)
                 if combined is None:
                     combined = hm
@@ -690,7 +858,7 @@ class ModelVisualizer(QMainWindow):
                     combined = np.maximum(combined, hm_resized)
 
         if combined is not None:
-            hm_pil = Image.fromarray(combined)
+            hm_pil = Image.fromarray(combined.astype(np.float32))
             hm_cropped = self._crop_letterbox(hm_pil, cached["meta"])
 
             hm_display = hm_cropped.resize(
@@ -710,13 +878,14 @@ class ModelVisualizer(QMainWindow):
 
 
 def main():
-    # Setup args, device, and load PyTorch model exactly as you had in your script...
-    # For testing the UI layout immediately, you can replace the model load with `model = None`
-
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     parser = argparse.ArgumentParser(
-        description="Interactive model output visualizer for MusicDetector."
+        description="Interactive model output visualizer for MusicDetector "
+        "(any backbone: read from the checkpoint).",
+        epilog="Validation check: --checkpoint checkpoints_lite/run_006 "
+        "--img_dir data/validation-lite/imgs --ann-dir data/validation-lite/annotations "
+        "--config conf-lite/config.json --hierarchy conf-lite/hierarchy.json",
     )
     parser.add_argument(
         "--image",
@@ -727,8 +896,15 @@ def main():
     parser.add_argument(
         "--img_dir",
         type=str,
-        default="data/output_imgs",
+        default="data/validation-lite/imgs",
         help="Directory containing images",
+    )
+    parser.add_argument(
+        "--ann-dir",
+        type=str,
+        default=None,
+        help="Ground-truth annotation JSONs (e.g. data/validation-lite/annotations): "
+        "enables the comparison mode, per-page scores and page ranking",
     )
     parser.add_argument(
         "--checkpoint", type=str, required=True, help="Model checkpoint path"
@@ -749,6 +925,9 @@ def main():
     parser.add_argument("--conf-thresh", type=float, default=0.3)
     parser.add_argument("--iou-thresh", type=float, default=0.5)
     parser.add_argument(
+        "--multi-label", action="store_true", help="Start with multi-label decoding (toggle in the sidebar)"
+    )
+    parser.add_argument(
         "--use-bottom-up", action="store_true", help="Enable PANet bottom-up path"
     )
     args = parser.parse_args()
@@ -762,20 +941,25 @@ def main():
     class_list = config["target_classes"]
     num_classes = len(class_list)
 
-    # --- Load model ---
+    # --- Load model (the backbone is read from the checkpoint) ---
     logger.info(f"Loading model from {args.checkpoint}")
     model = detector_for_checkpoint(args.checkpoint, num_classes, use_bottom_up=args.use_bottom_up)
     load_checkpoint(model, args.checkpoint, device)
 
+    image_paths = [args.image] if args.image else None
+    img_dir = Path(args.image).parent if args.image else args.img_dir
     window = ModelVisualizer(
         model,
         device,
-        args.img_dir,
+        img_dir,
         args.hierarchy,
         args.config,
         args.input_size,
         args.conf_thresh,
         args.iou_thresh,
+        ann_dir=args.ann_dir,
+        image_paths=image_paths,
+        multi_label=args.multi_label,
     )
     window.show()
     sys.exit(app.exec())

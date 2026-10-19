@@ -81,14 +81,15 @@ def _letterbox_page(img_path: Path, input_size: int):
     canvas.paste(image, (pad_x, pad_y))
     import torchvision.transforms.functional as TF
 
-    return TF.to_tensor(canvas), scale, pad_x, pad_y
+    # boxes follow the rounded resize, not the unrounded scale
+    return TF.to_tensor(canvas), (new_w / orig_w, new_h / orig_h), pad_x, pad_y
 
 
 @torch.no_grad()
 def predict_page_edges(model, page_nodes: list, img_path: Path,
                        class_to_idx: dict, device, input_size: int = 640) -> list:
     """Run detector features + GNN over one page; return (u_id, v_id, cls)."""
-    img, scale, pad_x, pad_y = _letterbox_page(img_path, input_size)
+    img, (scale_x, scale_y), pad_x, pad_y = _letterbox_page(img_path, input_size)
     img = img.to(device)
 
     # Classes appended to target_classes after a GNN was trained are unknown
@@ -101,8 +102,8 @@ def predict_page_edges(model, page_nodes: list, img_path: Path,
 
     node_ids = [n["id"] for n in page_nodes]
     boxes = torch.tensor([n["bbox"] for n in page_nodes], dtype=torch.float32)
-    boxes[:, [0, 2]] = boxes[:, [0, 2]] * scale + pad_x
-    boxes[:, [1, 3]] = boxes[:, [1, 3]] * scale + pad_y
+    boxes[:, [0, 2]] = boxes[:, [0, 2]] * scale_x + pad_x
+    boxes[:, [1, 3]] = boxes[:, [1, 3]] * scale_y + pad_y
     boxes = boxes.to(device)
     labels = torch.tensor(
         [class_to_idx[n["class"]] for n in page_nodes], dtype=torch.long, device=device

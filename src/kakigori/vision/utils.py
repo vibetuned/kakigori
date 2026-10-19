@@ -167,10 +167,15 @@ def load_checkpoint(
         model.eval()
 
 
-def decode_model_outputs(outputs, conf_thresh, iou_thresh, input_size):
+def decode_model_outputs(outputs, conf_thresh, iou_thresh, input_size, multi_label=False):
     """
     Decodes multi-scale raw model outputs into absolute pixel bounding boxes.
     Handles dynamic batch sizes and dynamic feature map resolutions.
+
+    ``multi_label`` emits every class over the threshold at a cell (sharing
+    the cell's box) instead of its argmax: training marks all the classes
+    centred on a cell positive, and coincident boxes (measure/staff/layer of
+    a single staff, a one-accidental keySig) otherwise suppress each other.
 
     Returns:
         list[dict]: A list of length BatchSize, containing dicts with "boxes", "scores", and "labels".
@@ -188,17 +193,24 @@ def decode_model_outputs(outputs, conf_thresh, iou_thresh, input_size):
 
         B, _, H, W = reg_map.shape
 
-        max_scores, max_classes = cls_map.max(dim=1)
-        mask = max_scores >= conf_thresh
-        pos = mask.nonzero(as_tuple=False)
+        if multi_label:
+            pos = (cls_map >= conf_thresh).nonzero(as_tuple=False)
+            if pos.numel() == 0:
+                continue
+            b_idx, cls_idx, y_idx, x_idx = pos[:, 0], pos[:, 1], pos[:, 2], pos[:, 3]
+            scores = cls_map[b_idx, cls_idx, y_idx, x_idx]
+        else:
+            max_scores, max_classes = cls_map.max(dim=1)
+            mask = max_scores >= conf_thresh
+            pos = mask.nonzero(as_tuple=False)
 
-        if pos.numel() == 0:
-            continue
+            if pos.numel() == 0:
+                continue
 
-        b_idx, y_idx, x_idx = pos[:, 0], pos[:, 1], pos[:, 2]
+            b_idx, y_idx, x_idx = pos[:, 0], pos[:, 1], pos[:, 2]
 
-        scores = max_scores[b_idx, y_idx, x_idx]
-        cls_idx = max_classes[b_idx, y_idx, x_idx]
+            scores = max_scores[b_idx, y_idx, x_idx]
+            cls_idx = max_classes[b_idx, y_idx, x_idx]
 
         tx = reg_map[b_idx, 0, y_idx, x_idx].sigmoid()
         ty = reg_map[b_idx, 1, y_idx, x_idx].sigmoid()
@@ -220,11 +232,11 @@ def decode_model_outputs(outputs, conf_thresh, iou_thresh, input_size):
 
         boxes = torch.stack([x1, y1, x2, y2], dim=1)
 
-        for i in range(len(b_idx)):
-            batch_item = b_idx[i].item()
-            all_boxes[batch_item].append(boxes[i : i + 1])
-            all_scores[batch_item].append(scores[i : i + 1])
-            all_labels[batch_item].append(cls_idx[i : i + 1])
+        for b in b_idx.unique().tolist():
+            sel = b_idx == b
+            all_boxes[b].append(boxes[sel])
+            all_scores[b].append(scores[sel])
+            all_labels[b].append(cls_idx[sel])
 
     batch_preds = []
     for b in range(batch_size):

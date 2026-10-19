@@ -166,6 +166,11 @@ def main():
     parser.add_argument("--conf-thresh", type=float, default=0.05)
     parser.add_argument("--iou-thresh", type=float, default=0.5)
     parser.add_argument("--use-bottom-up", action="store_true")
+    parser.add_argument(
+        "--multi-label",
+        action="store_true",
+        help="Decode every class over the threshold per cell, not just the argmax.",
+    )
     # Trainer args
     parser.add_argument(
         "--out-indices",
@@ -229,7 +234,8 @@ def main():
 
             outputs = model(images)
             preds = decode_model_outputs(
-                outputs, args.conf_thresh, args.iou_thresh, args.input_size
+                outputs, args.conf_thresh, args.iou_thresh, args.input_size,
+                multi_label=args.multi_label,
             )
             targets = format_ground_truth(targets_list, args.input_size, device)
 

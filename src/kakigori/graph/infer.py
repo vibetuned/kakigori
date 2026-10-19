@@ -63,10 +63,10 @@ def detect_page_nodes(detector, page_image: Image.Image, page_idx: int,
     labels = preds["labels"].cpu()
     scores = preds["scores"].cpu()
     for i in range(boxes.shape[0]):
-        x1 = float(((boxes[i, 0] - meta["pad_x"]) / meta["scale"]).clamp(min=0.0))
-        y1 = float(((boxes[i, 1] - meta["pad_y"]) / meta["scale"]).clamp(min=0.0))
-        x2 = float(((boxes[i, 2] - meta["pad_x"]) / meta["scale"]).clamp(max=float(meta["orig_w"])))
-        y2 = float(((boxes[i, 3] - meta["pad_y"]) / meta["scale"]).clamp(max=float(meta["orig_h"])))
+        x1 = float(((boxes[i, 0] - meta["pad_x"]) / meta["scale_x"]).clamp(min=0.0))
+        y1 = float(((boxes[i, 1] - meta["pad_y"]) / meta["scale_y"]).clamp(min=0.0))
+        x2 = float(((boxes[i, 2] - meta["pad_x"]) / meta["scale_x"]).clamp(max=float(meta["orig_w"])))
+        y2 = float(((boxes[i, 3] - meta["pad_y"]) / meta["scale_y"]).clamp(max=float(meta["orig_h"])))
         nodes.append({
             "id": f"p{page_idx}n{i}",
             "class": class_list[int(labels[i])],

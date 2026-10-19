@@ -76,10 +76,15 @@ def preprocess(
     img_lb, _ = _letterbox(image, input_size, torch.zeros(0, 4))
     tensor = TF.to_tensor(img_lb).unsqueeze(0).to(device)  # (1, 1, H, W)
 
+    # Boxes map back with the per-axis factors of the rounded resize: the
+    # unrounded scale drifts up to half a canvas pixel (~2 page px) at the
+    # far edge, enough to break IoU on stems and barlines
     meta = {
         "orig_w": orig_w,
         "orig_h": orig_h,
         "scale": scale,
+        "scale_x": new_w / orig_w,
+        "scale_y": new_h / orig_h,
         "pad_x": pad_x,
         "pad_y": pad_y,
         "input_size": input_size,
@@ -167,19 +172,19 @@ def main():
                     "bbox": [
                         round(
                             float(
-                                ((bx1 - meta["pad_x"]) / meta["scale"]).clamp(min=0.0)
+                                ((bx1 - meta["pad_x"]) / meta["scale_x"]).clamp(min=0.0)
                             ),
                             1,
                         ),
                         round(
                             float(
-                                ((by1 - meta["pad_y"]) / meta["scale"]).clamp(min=0.0)
+                                ((by1 - meta["pad_y"]) / meta["scale_y"]).clamp(min=0.0)
                             ),
                             1,
                         ),
                         round(
                             float(
-                                ((bx2 - meta["pad_x"]) / meta["scale"]).clamp(
+                                ((bx2 - meta["pad_x"]) / meta["scale_x"]).clamp(
                                     max=float(meta["orig_w"])
                                 )
                             ),
@@ -187,7 +192,7 @@ def main():
                         ),
                         round(
                             float(
-                                ((by2 - meta["pad_y"]) / meta["scale"]).clamp(
+                                ((by2 - meta["pad_y"]) / meta["scale_y"]).clamp(
                                     max=float(meta["orig_h"])
                                 )
                             ),
