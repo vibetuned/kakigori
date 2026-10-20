@@ -16,7 +16,7 @@ from torch.utils.tensorboard import SummaryWriter
 from torchmetrics.detection.mean_ap import MeanAveragePrecision
 
 # Local folder imports
-from .utils import omr_collate_fn, load_checkpoint, decode_model_outputs, detector_for_checkpoint
+from .utils import omr_collate_fn, load_detector, decode_model_outputs
 from .dataset import OMRDataset, canvas_size
 
 logging.basicConfig(
@@ -190,8 +190,7 @@ def main():
     with open(args.hierarchy) as f:
         hierarchy = json.load(f)
 
-    model = detector_for_checkpoint(args.checkpoint, len(class_list))
-    load_checkpoint(model, args.checkpoint, device)
+    model = load_detector(args.checkpoint, len(class_list), device)
     input_size = model.input_size
 
     val_dataset = OMRDataset(

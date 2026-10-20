@@ -2,6 +2,7 @@
 import re
 import logging
 import argparse
+import statistics
 from pathlib import Path
 from collections import Counter
 import xml.etree.ElementTree as ET
@@ -215,10 +216,12 @@ def main():
 
     print(f"{'file':<55} {'notes':>6} {'pitch':>7} {'rhythm':>7}")
     gp_total = gp_matched = gr_total = gr_matched = 0
+    per_file, missing = [], 0
     for mei_path in sorted(mei_dir.glob("*.mei")):
         krn_path = krn_dir / f"{mei_path.stem}.krn"
         if not krn_path.exists():
             logger.warning(f"No kern output for {mei_path.stem}")
+            missing += 1
             continue
         try:
             p_total, p_matched, r_total, r_matched = compare_file(mei_path, krn_path)
@@ -230,10 +233,19 @@ def main():
         p_pct = 100.0 * p_matched / p_total if p_total else float("nan")
         r_pct = 100.0 * r_matched / r_total if r_total else float("nan")
         print(f"{mei_path.stem:<55} {p_total:>6} {p_pct:>6.1f}% {r_pct:>6.1f}%")
+        if p_total:
+            per_file.append((p_pct, r_pct))
 
     if gp_total:
         print(f"{'TOTAL':<55} {gp_total:>6} {100.0 * gp_matched / gp_total:>6.1f}% "
               f"{100.0 * gr_matched / gr_total if gr_total else float('nan'):>6.1f}%")
+        label = f"MEDIAN FILE ({len(per_file)} files)"
+        print(f"{label:<55} {'':>6} {statistics.median(p for p, _ in per_file):>6.1f}% "
+              f"{statistics.median(r for _, r in per_file):>6.1f}%")
+    if missing:
+        # not counted in TOTAL / MEDIAN: a score that fails to serialize is
+        # excluded, not scored 0
+        print(f"{missing} groundtruth files have no kern output (not counted above)")
 
 
 if __name__ == "__main__":

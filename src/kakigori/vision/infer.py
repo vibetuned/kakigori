@@ -21,7 +21,7 @@ from PIL import Image
 from tqdm import tqdm
 
 # Local folder imports
-from .utils import detector_for_checkpoint, load_checkpoint, decode_model_outputs
+from .utils import load_detector, decode_model_outputs
 from .dataset import canvas_to_page, letterbox_image
 
 logging.basicConfig(
@@ -113,8 +113,7 @@ def main():
 
     # --- Load model ---
     logger.info(f"Loading model from {args.checkpoint}")
-    model = detector_for_checkpoint(args.checkpoint, num_classes)
-    load_checkpoint(model, args.checkpoint, device)
+    model = load_detector(args.checkpoint, num_classes, device)
     input_size = model.input_size
 
     # --- Render PDF ---

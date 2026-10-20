@@ -36,7 +36,7 @@ from .validate_predictions import (
     _load_gnn, predict_page_edges, _inject_system_measure_edges,
 )
 from kakigori.vision.model import MusicDetector
-from kakigori.vision.utils import detector_for_checkpoint, load_checkpoint
+from kakigori.vision.utils import load_detector
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -140,8 +140,7 @@ def main():
         node_roles = json.load(f)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    detector = detector_for_checkpoint(args.detector_checkpoint, len(class_list))
-    load_checkpoint(detector, args.detector_checkpoint, device)
+    detector = load_detector(args.detector_checkpoint, len(class_list), device)
     gnn_wrapper = _load_gnn(args.gnn_checkpoint, device)
 
     img_dir, out_dir = Path(args.img_dir), Path(args.out_dir)

@@ -117,6 +117,37 @@ def _checkpoint_tensors(checkpoint_path: str, prefix: str = "") -> dict:
     return tensors
 
 
+def detector_prefix(checkpoint_path: str) -> str:
+    """Where a checkpoint keeps its detector: '' for a detector checkpoint,
+    'detector.' for a GNN / joint wrapper (whose jointly trained detector is
+    then used as is: one checkpoint for detection and edges)."""
+    weights = resolve_weights(checkpoint_path)
+    if weights is None:
+        raise FileNotFoundError(f"no weights under {checkpoint_path}")
+    if weights.suffix == ".safetensors":
+        # Third party imports
+        from safetensors import safe_open
+
+        with safe_open(str(weights), "pt") as f:
+            keys = list(f.keys())
+    else:
+        keys = list(torch.load(weights, map_location="meta", weights_only=False))
+    if any(k.startswith("backbone.") for k in keys):
+        return ""
+    if any(k.startswith("detector.backbone.") for k in keys):
+        return "detector."
+    raise ValueError(f"no detector weights in {checkpoint_path}")
+
+
+def load_detector(checkpoint_path: str, num_classes: int, device: torch.device, **kwargs):
+    """A detector checkpoint, or the detector inside a GNN / joint wrapper
+    checkpoint, built to its layout, loaded and in eval mode."""
+    prefix = detector_prefix(checkpoint_path)
+    model = detector_for_checkpoint(checkpoint_path, num_classes, prefix=prefix, **kwargs)
+    load_checkpoint(model, checkpoint_path, device, prefix=prefix)
+    return model
+
+
 def checkpoint_backbone(checkpoint_path: str, prefix: str = "") -> str:
     """The backbone a detector checkpoint holds (``prefix``: 'detector.' for
     GNN wrapper checkpoints), read from the weight names and shapes only."""
@@ -169,7 +200,7 @@ def complete_legacy_state(model, state: dict) -> dict:
 
 
 def load_checkpoint(
-    model, checkpoint_path: str, device: torch.device, eval: bool = True
+    model, checkpoint_path: str, device: torch.device, eval: bool = True, prefix: str = ""
 ):
     """Resolve a checkpoint path and load weights into the model.
 
@@ -180,6 +211,8 @@ def load_checkpoint(
 
     Args:
         eval: If True (default), sets the model to eval mode. Set to False for training.
+        prefix: load only the weights under this prefix, stripped (e.g.
+            'detector.' for the detector of a GNN / joint wrapper).
     """
     ckpt = Path(checkpoint_path)
     if ckpt.is_dir():
@@ -198,6 +231,8 @@ def load_checkpoint(
                 state = load_file(weights, device=str(device))
             else:
                 state = torch.load(weights, map_location=device, weights_only=False)
+            if prefix:
+                state = {k[len(prefix):]: v for k, v in state.items() if k.startswith(prefix)}
             complete_legacy_state(model, state)
             model.load_state_dict(state)
             logger.info(f"  Loaded weights: {weights}")

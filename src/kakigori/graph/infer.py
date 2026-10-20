@@ -38,7 +38,7 @@ from .bbox_repair import repair_page_boxes
 from .validate_predictions import (
     _load_gnn, predict_page_edges, _inject_system_measure_edges,
 )
-from kakigori.vision.utils import detector_for_checkpoint, load_checkpoint, decode_model_outputs
+from kakigori.vision.utils import load_detector, decode_model_outputs
 from kakigori.vision.infer import pdf_to_pages, preprocess
 from kakigori.vision.dataset import canvas_to_page
 
@@ -114,8 +114,7 @@ def main():
     with open(args.roles_file) as f:
         node_roles = json.load(f)
 
-    detector = detector_for_checkpoint(args.detector_checkpoint, len(class_list))
-    load_checkpoint(detector, args.detector_checkpoint, device)
+    detector = load_detector(args.detector_checkpoint, len(class_list), device)
     gnn_wrapper = _load_gnn(args.gnn_checkpoint, device)
 
     output_dir = Path(args.output_dir)

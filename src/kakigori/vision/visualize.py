@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
 
 # Local folder imports
 from .infer import preprocess
-from .utils import detector_for_checkpoint, load_checkpoint, decode_model_outputs
+from .utils import load_detector, decode_model_outputs
 from .dataset import canvas_size, canvas_to_page
 
 logging.basicConfig(
@@ -938,8 +938,7 @@ def main():
 
     # --- Load model (the backbone is read from the checkpoint) ---
     logger.info(f"Loading model from {args.checkpoint}")
-    model = detector_for_checkpoint(args.checkpoint, num_classes)
-    load_checkpoint(model, args.checkpoint, device)
+    model = load_detector(args.checkpoint, num_classes, device)
 
     image_paths = [args.image] if args.image else None
     img_dir = Path(args.image).parent if args.image else args.img_dir

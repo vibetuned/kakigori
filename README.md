@@ -164,7 +164,7 @@ Built with musicset (installed with this package; `uv run musicset --help`):
 | Command | What it shows |
 | --- | --- |
 | `musicset view` | Pages + boxes, graph edges, score graph, augmentation vs real scans |
-| `visualize-model` | Detector inspector: boxes, heatmaps, feature maps |
+| `visualize-model` | Detector inspector: boxes, heatmaps, feature maps, comparison with ground truth (`--ann-dir`) |
 
 ### Training
 
@@ -177,9 +177,18 @@ Built with musicset (installed with this package; `uv run musicset --help`):
 | `infer-model` | Run the detector across a PDF, emit PNG + JSON per page |
 | `infer-omr` | Full pipeline on a PDF or page images: detect → predict edges → repair → `**kern` |
 | `train-gnn` | Train the Phase-2 GNN on top of a frozen detector |
+| `train-joint` | Joint GNN + detection training: one checkpoint for detection and edges |
 | `validate-groundtruth` | Run the serializer directly on GT graphs to debug it independently of the GNN |
 | `validate-predictions` | End-to-end validation on GT boxes with predicted edges + repairs |
-| `compare-kern` | Score generated `**kern` against groundtruth MEI: per-measure pitch and rhythm match rates |
+| `validate-detections` | End-to-end validation on detected boxes (the honest `infer-omr` path) |
+| `compare-kern` | Score generated `**kern` against groundtruth MEI: per-measure pitch and rhythm match rates, total and median file |
+| `./pipeline-lite.sh` | Lite detector, unattended: base → synthetic fine-tune → consolidation, eval after each stage; resumable (run it in tmux, `tail -f OUT/pipeline.log`) |
+| `./pipeline-gnn.sh` | Lite GNN on a trained detector, unattended: phase 1 → phase 2 → joint, kern evaluations (GT boxes and detections) after each stage; resumable |
+
+Detector and GNN-wrapper checkpoints carry their layout (backbone, detection
+levels, input canvas, scale ranges): `eval-model`, `infer-*`, `visualize-model`
+and `validate-*` take either a detector checkpoint or a GNN / joint run (whose
+own detector is then used).
 
 ## Serializer status & TODO
 
