@@ -18,7 +18,7 @@ from transformers.trainer_utils import get_last_checkpoint
 from .trainer import GNNTrainer, compute_gnn_metrics
 from .dataset import OMRFullPageDataset
 from .utils import omr_collate_fn
-from .model import GraphVisualExtractor, ScoreGraphReconstructor, GNNPhase2Model
+from .model import GraphVisualExtractor, ScoreGraphReconstructor, GNNPhase2Model, NODE_IN_DIM
 from kakigori.vision.utils import detector_for_checkpoint, load_checkpoint, checkpoint_input_size
 from kakigori.vision.model import MusicDetector
 
@@ -177,12 +177,13 @@ def main():
     
     # In train.py, update the GNN initialization:
     class_embed_dim = 32
-    node_in_dim = 256 + 4 + class_embed_dim # RoI (256) + Coords (4) + ClassEmbed (32)
-    
+    # RoI (256) + coords (4) + class embedding (32) + detection features (2),
+    # with the keep head (trained from stage D on)
     gnn_model = ScoreGraphReconstructor(
-        node_in_dim=node_in_dim, 
+        node_in_dim=NODE_IN_DIM,
         num_classes=num_classes,
-        class_embed_dim=class_embed_dim
+        class_embed_dim=class_embed_dim,
+        node_head=True,
     )
     
     # Wrap them for the Trainer

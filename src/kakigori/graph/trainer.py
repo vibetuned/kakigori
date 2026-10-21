@@ -8,6 +8,7 @@ from .losses import MultiClassEdgeFocalLoss
 from .heuristics import generate_axis_aware_edges, map_gt_to_candidates
 from .metrics import GraphTopologyEvaluator
 from .utils import split_into_systems
+from .model import node_features
 
 
 
@@ -98,8 +99,8 @@ class GNNTrainer(Trainer):
                 # GATv2 projections. Heuristics keep the pixel-space copy.
                 norm_boxes = sys_rel_boxes / img.shape[-1]
 
-                class_embeds = model.gnn.class_embedding(sys_labels)
-                x = torch.cat([roi_feats, norm_boxes, class_embeds], dim=1)
+                # ground-truth boxes: score 1, not synthesized
+                x = node_features(model.gnn, roi_feats, norm_boxes, sys_labels)
 
                 # FIX 3: Passed class_to_idx to heuristics
                 candidate_edge_index = generate_axis_aware_edges(sys_rel_boxes, sys_labels, class_to_idx)

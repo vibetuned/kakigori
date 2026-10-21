@@ -36,7 +36,8 @@ run_stage() {
     fi
     say "===== stage $name: $* ====="
     touch "$OUT/.started_$name"
-    if ! ./train.sh "$@" "${resume[@]}"; then
+    # progress = a new checkpoint under $OUT (train.sh tells bugs from faults)
+    if ! PROGRESS_DIR="$OUT" ./train.sh "$@" "${resume[@]}"; then
         say "stage $name FAILED"
         exit 1
     fi
@@ -44,15 +45,15 @@ run_stage() {
     say "stage $name done: $(stage_run "$name")"
 }
 
-# eval_detector <label> <checkpoint>: eval-model on validation-lite (a
-# detector checkpoint, or the detector inside a GNN / joint wrapper)
+# eval_detector <label> <checkpoint>: eval-model on $VAL (validation-lite by
+# default; a detector checkpoint, or the detector inside a GNN / joint wrapper)
 eval_detector() {
-    local eval_log="$OUT/eval_$1.log"
+    local eval_log="$OUT/eval_$1.log" val=${VAL:-data/validation-lite}
     say "eval $1: $2 -> $eval_log"
     for attempt in 1 2 3; do
         # a class whose mAP worker crashes is silently scored 0: retry
         uv run eval-model --checkpoint "$2" \
-            --img-dir data/validation-lite/imgs --ann-dir data/validation-lite/annotations \
+            --img-dir "$val/imgs" --ann-dir "$val/annotations" \
             --config conf-lite/config.json --hierarchy conf-lite/hierarchy.json \
             --tb-dir "$OUT/eval_tb" > "$eval_log" 2>&1
         grep -q "mAP @" "$eval_log" && ! grep -q "\[!\]" "$eval_log" && break

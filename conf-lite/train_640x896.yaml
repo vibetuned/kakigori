@@ -34,6 +34,11 @@ use_bottom_up: false
 # ReGLA stages to detect on, one head each: [0, 1, 2] = strides 4/8/16,
 # [0, 1, 2, 3] adds stage 4 and a stride-32 head (train_stage4.yaml)
 out_indices: [0, 1, 2]
+# One box regression slot per structure class and one for composites
+# (model.regression_slots): with one shared slot 21% of the boxes lost their
+# regression target to another box centred on the same cell (checkpoints_lite_896
+# was trained that way; checkpoints_lite_896s with slots)
+regression_slots: true
 
 # Trainer args
 reg_weight: 5.0

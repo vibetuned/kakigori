@@ -1,0 +1,37 @@
+# STAGE D: the joint model trained on its own detections. Each page trains,
+# with probability det_prob, on the detector's boxes for it (cache-detections,
+# after bbox repair) instead of the ground-truth boxes: detections are matched
+# to the ground truth per class (Hungarian on IoU), matched ones carry the
+# ground-truth edges, unmatched ones (false positives, duplicates) only "no
+# edge" candidates, and the keep head learns which boxes belong (node_weight).
+# The other pages keep the ground-truth boxes with jitter, so the edge task
+# stays anchored. Same recipe as the joint stage otherwise.
+# pipeline-gnn.sh sets detector_checkpoint, fine_tune (the joint run) and
+# det_dir (the joint detector's boxes on img_dir).
+img_dir: "data/train-lite/imgs"
+ann_dir: "data/train-lite/annotations"
+graph_dir: "data/train-lite/graphs"
+config: "conf-lite/config.json"
+detector_checkpoint: "checkpoints_lite_896s/run_003"
+fine_tune: "checkpoints_gnn_lite_896s/run_003"
+det_dir: "checkpoints_gnn_lite_896s/detections-train"
+det_prob: 0.7
+node_weight: 1.0
+unfreeze: "full"
+vision_lr: 0.00001
+head_lr: 0.00003
+box_jitter: 1.5
+det_weight: 0.5
+edge_weight: 10.0
+cls_weight: 1.0
+reg_weight: 5.0
+max_gamma: 4.0
+output_dir: "checkpoints_gnn_lite_896s"
+logging_dir: "runs_gnn_lite_896s"
+epochs: 8
+batch_size: 2
+lr: 0.0003
+logging_steps: 10
+eval_steps: 5000
+save_steps: 250
+seed: 42

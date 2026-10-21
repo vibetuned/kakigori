@@ -32,6 +32,37 @@ def parse_scale_ranges(value) -> list[tuple[float, float]] | None:
     return [(float(lo), float(hi)) for lo, hi in value]
 
 
+def regression_loss(outputs, reg_targets, obj_masks, ciou_loss_fn) -> torch.Tensor:
+    """CIoU over the positive (cell, slot) entries of every level, the
+    prediction read from the target's slot (OMRTrainer.build_targets)."""
+    total = torch.tensor(0.0, device=outputs[0]["reg"].device)
+    for out, reg_target, mask in zip(outputs, reg_targets, obj_masks):
+        if not mask.any():
+            continue
+        b_idx, s_idx, r_idx, c_idx = mask.nonzero(as_tuple=True)
+        channels = 4 * s_idx
+        pred = torch.stack([out["reg"][b_idx, channels + k, r_idx, c_idx] for k in range(4)], dim=1)
+        tgt = torch.stack([reg_target[b_idx, channels + k, r_idx, c_idx] for k in range(4)], dim=1)
+        fw, fh = out["reg"].shape[3], out["reg"].shape[2]
+
+        # Offsets inside the cell through a sigmoid; positive sizes through an
+        # exp (clamped against fp16 overflow)
+        pred_boxes = torch.stack([
+            (pred[:, 0].sigmoid() + c_idx) / fw,
+            (pred[:, 1].sigmoid() + r_idx) / fh,
+            torch.exp(pred[:, 2].clamp(max=10.0)),
+            torch.exp(pred[:, 3].clamp(max=10.0)),
+        ], dim=1)
+        tgt_boxes = torch.stack([
+            (tgt[:, 0] + c_idx) / fw,
+            (tgt[:, 1] + r_idx) / fh,
+            tgt[:, 2],
+            tgt[:, 3],
+        ], dim=1)
+        total = total + ciou_loss_fn(pred_boxes, tgt_boxes)
+    return total
+
+
 class OMRTrainer(Trainer):
     def __init__(
         self,
@@ -63,41 +94,43 @@ class OMRTrainer(Trainer):
             return self.custom_sampler
         return super()._get_train_sampler(*args, **kwargs)
 
-    def build_targets(self, targets_list, feature_sizes, num_classes, device, canvas=(640, 640)):
+    def build_targets(self, targets_list, feature_sizes, num_classes, device, canvas=(640, 640),
+                      reg_slot=None):
         """Assign ground-truth boxes to grid cells based on object scale.
+
+        Each box goes to the level its area selects and to the cell holding
+        its centre. The class map is multi-label: every class centred on a
+        cell is positive there. The regression map holds one box per cell and
+        regression slot (``reg_slot``: each class's slot, None = one slot):
+        of the boxes sharing a cell and slot, the smallest.
 
         ``canvas``: (width, height) of the input, for the pixel areas the
         scale ranges are expressed in (see REFERENCE_AREA).
+
+        Returns per level: cls (B, C, H, W), reg (B, 4 * slots, H, W) and the
+        positive mask (B, slots, H, W).
         """
         if len(self.scale_ranges) != len(feature_sizes):
             raise ValueError(
                 f"{len(self.scale_ranges)} scale ranges for {len(feature_sizes)} detection levels: "
                 "set scale_ranges with one (min, max) pair per level"
             )
+        if reg_slot is None:
+            reg_slot = torch.zeros(num_classes, dtype=torch.long)
+        reg_slot = reg_slot.to(device)
+        num_slots = int(reg_slot.max()) + 1
         area_factor = canvas[0] * canvas[1] / REFERENCE_AREA
         batch_size = len(targets_list)
         cls_targets = []
         reg_targets = []
         obj_masks = []
 
-        # 1. Define Area Thresholds (Normalized 0.0 to 1.0)
-        # Assumes 3 feature maps from highest-res (P3) to lowest-res (P5).
-        # Area = width * height. A box covering 20% width and 20% height has an area of 0.04.
-        # - Scale 0 (e.g., 64x64 grid): For tiny objects like dots and noteheads (< 4% of image area)
-        # - Scale 1 (e.g., 32x32 grid): For medium objects like short stems and rests (4% to 16%)
-        # - Scale 2 (e.g., 16x16 grid): For large objects like Clefs, beams, and brackets (> 16%)
-        # scale_ranges = [(0.0, 0.04), (0.04, 0.16), (0.16, 2.0)]
-        # P2 (Tiny - < 0.0002): artic, stem, notehead, tie, flag.
-        # P3 (Medium - 0.0002 to 0.002): note, slur, keySig, chord, clef, beam.
-        # P4 (Large - > 0.002): tuplet, staff, measure, system, page-margin.
-
         for scale_idx, (fh, fw) in enumerate(feature_sizes):
-            # Initialize empty target tensors for this specific scale
             cls_map = torch.zeros(batch_size, num_classes, fh, fw, device=device)
-            reg_map = torch.zeros(batch_size, 4, fh, fw, device=device)
-            obj_mask = torch.zeros(batch_size, fh, fw, dtype=torch.bool, device=device)
+            reg_map = torch.zeros(batch_size, 4 * num_slots, fh, fw, device=device)
+            obj_mask = torch.zeros(batch_size, num_slots, fh, fw, dtype=torch.bool, device=device)
 
-            # Get the min and max allowed area for this feature map
+            # The min and max box area for this level
             min_area, max_area = self.scale_ranges[scale_idx]
 
             for b, tgt in enumerate(targets_list):
@@ -107,10 +140,7 @@ class OMRTrainer(Trainer):
                 if boxes.numel() == 0:
                     continue
 
-                # Calculate the area of every ground truth box
                 box_areas = boxes[:, 2] * boxes[:, 3] * area_factor
-
-                # Filter boxes: Keep only the ones that belong to this feature scale
                 valid_mask = (box_areas >= min_area) & (box_areas < max_area)
                 valid_boxes = boxes[valid_mask]
                 valid_labels = labels[valid_mask]
@@ -119,38 +149,35 @@ class OMRTrainer(Trainer):
                 if valid_boxes.numel() == 0:
                     continue
 
-                # --- THE MAGIC FIX: Area Sorting ---
-                # Sort descending so the smallest objects are processed LAST
-                sort_idx = torch.argsort(valid_areas, descending=True)
-                valid_boxes = valid_boxes[sort_idx]
-                valid_labels = valid_labels[sort_idx]
-
-                # Map the valid box centers strictly to this grid's coordinates
+                # The box centres on this level's grid
                 gi = valid_boxes[:, 0] * fw
                 gj = valid_boxes[:, 1] * fh
-
-                # Get the integer grid cell coordinates
                 gi_idx = gi.long().clamp(0, fw - 1)
                 gj_idx = gj.long().clamp(0, fh - 1)
 
-                # --- NO MORE FOR LOOPS: Vectorized Grid Assignment ---
-
-                # Calculate all local offsets simultaneously
-                tx = gi - gi_idx
-                ty = gj - gj_idx
-
-                # 1. Update Class Map
-                # PyTorch handles the multi-dimensional mapping across the batch instantly
+                # Multi-label classes: setting 1.0 twice is harmless
                 cls_map[b, valid_labels, gj_idx, gi_idx] = 1.0
 
-                # 2. Update Regression Map
-                reg_map[b, 0, gj_idx, gi_idx] = tx
-                reg_map[b, 1, gj_idx, gi_idx] = ty
-                reg_map[b, 2, gj_idx, gi_idx] = valid_boxes[:, 2]
-                reg_map[b, 3, gj_idx, gi_idx] = valid_boxes[:, 3]
+                # One box per (cell, slot), the smallest. Resolved here, not by
+                # write order: a CUDA index assignment with repeated indices
+                # keeps an arbitrary write, per channel (measured: the last
+                # write kept 65% of the time, and the four channels of 12% of
+                # the shared cells taken from different boxes)
+                slots = reg_slot[valid_labels]
+                key = (slots * fh + gj_idx) * fw + gi_idx
+                by_area = torch.argsort(valid_areas, descending=True, stable=True)
+                by_key = by_area[torch.argsort(key[by_area], stable=True)]
+                sorted_key = key[by_key]
+                last = torch.ones_like(sorted_key, dtype=torch.bool)
+                last[:-1] = sorted_key[1:] != sorted_key[:-1]
+                win = by_key[last]
 
-                # 3. Update Object Mask
-                obj_mask[b, gj_idx, gi_idx] = True
+                s, y, x = slots[win], gj_idx[win], gi_idx[win]
+                reg_map[b, 4 * s, y, x] = gi[win] - x
+                reg_map[b, 4 * s + 1, y, x] = gj[win] - y
+                reg_map[b, 4 * s + 2, y, x] = valid_boxes[win, 2]
+                reg_map[b, 4 * s + 3, y, x] = valid_boxes[win, 3]
+                obj_mask[b, s, y, x] = True
 
             cls_targets.append(cls_map)
             reg_targets.append(reg_map)
@@ -178,11 +205,10 @@ class OMRTrainer(Trainer):
         feature_sizes = [(o["cls"].shape[2], o["cls"].shape[3]) for o in outputs]
         cls_targets, reg_targets, obj_masks = self.build_targets(
             targets_list, feature_sizes, num_classes, device,
-            canvas=(images.shape[-1], images.shape[-2]),
+            canvas=(images.shape[-1], images.shape[-2]), reg_slot=outputs[0]["reg_slot"],
         )
 
         total_cls = torch.tensor(0.0, device=device)
-        total_reg = torch.tensor(0.0, device=device)
 
         # Calculate progress (0.0 to 1.0) using HF Trainer state
         max_steps = self.state.max_steps
@@ -195,45 +221,7 @@ class OMRTrainer(Trainer):
                 out["cls"], cls_targets[scale_idx], progress=progress
             )
 
-            # Regression loss (CIoU)
-            mask = obj_masks[scale_idx]
-            mask = obj_masks[scale_idx]
-            if mask.any():
-                pos_indices = mask.nonzero(as_tuple=False)
-                b_idx, r_idx, c_idx = (
-                    pos_indices[:, 0],
-                    pos_indices[:, 1],
-                    pos_indices[:, 2],
-                )
-
-                pred_pos = out["reg"][b_idx, :, r_idx, c_idx]
-                tgt_pos = reg_targets[scale_idx][b_idx, :, r_idx, c_idx]
-
-                fw, fh = out["reg"].shape[3], out["reg"].shape[2]
-
-                # THE FIX: Convert (tx, ty) back to global (cx, cy)
-                # Apply sigmoid to force the network's offset prediction strictly between 0 and 1
-                pred_cx = (pred_pos[:, 0].sigmoid() + c_idx) / fw
-                pred_cy = (pred_pos[:, 1].sigmoid() + r_idx) / fh
-
-                # THE FIX: Apply exponential to guarantee strictly positive width/height
-                # Clamp to prevent overflow with fp16
-                pred_w = torch.exp(pred_pos[:, 2].clamp(max=10.0))
-                pred_h = torch.exp(pred_pos[:, 3].clamp(max=10.0))
-
-                tgt_cx = (tgt_pos[:, 0] + c_idx) / fw
-                tgt_cy = (tgt_pos[:, 1] + r_idx) / fh
-                tgt_w = tgt_pos[:, 2]
-                tgt_h = tgt_pos[:, 3]
-
-                pred_boxes = torch.stack([pred_cx, pred_cy, pred_w, pred_h], dim=1)
-                tgt_boxes = torch.stack([tgt_cx, tgt_cy, tgt_w, tgt_h], dim=1)
-
-                total_reg = total_reg + self.ciou_loss_fn(
-                    pred_boxes,
-                    tgt_boxes,
-                )
-
+        total_reg = regression_loss(outputs, reg_targets, obj_masks, self.ciou_loss_fn)
         total_loss = (self.cls_weight * total_cls) + (self.reg_weight * total_reg)
 
         self._custom_metrics = {

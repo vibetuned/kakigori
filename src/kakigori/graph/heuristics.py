@@ -53,10 +53,65 @@ def generate_text_candidate_edges(boxes, labels, class_to_idx):
 import torch
 from torch_geometric.nn import knn_graph
 
+# Boxes drawn around a span of the timeline: they only connect to what lies
+# under them, and are never the next event to the right of anything
+SPAN_CLASSES = ("system", "system-staff", "measure", "staff", "layer", "tuplet",
+                "beam8", "beam16", "beam32", "beamBroken")
+CONTAINER_CLASSES = ("system", "system-staff", "measure", "staff", "layer")
+# Staff context drawn ahead of the first measure's span (clef, key and time
+# signatures) or on its edge (barlines): exempt from the span rule
+SPAN_EXEMPT_PREFIXES = ("clef", "keySig", "keyAccid", "meterSig", "timeSig", "barline")
+
+
+def _class_mask(labels, class_to_idx, names):
+    idx = [class_to_idx[c] for c in names if c in class_to_idx]
+    return torch.isin(labels, torch.tensor(idx, dtype=labels.dtype, device=labels.device))
+
+
+def _lane_centres(boxes, labels, class_to_idx):
+    """The vertical centre of each staff row of a system, top to bottom.
+
+    Rows are the staff cells' centres clustered (a new row where the gap
+    exceeds half a cell height): cells exist in training and at inference
+    alike, while system-staff rows never reach the GT training graphs (a row
+    shares its id with its system's annotation). Detected rows serve only
+    where a group has no cells."""
+    cells = _class_mask(labels, class_to_idx, ("staff",))
+    if not cells.any():
+        cells = _class_mask(labels, class_to_idx, ("system-staff",))
+    if not cells.any():
+        return boxes.new_zeros(0)
+    cell_cy = ((boxes[cells, 1] + boxes[cells, 3]) / 2.0).sort().values
+    gap = 0.5 * (boxes[cells, 3] - boxes[cells, 1]).median()
+    starts = torch.ones_like(cell_cy, dtype=torch.bool)
+    starts[1:] = (cell_cy[1:] - cell_cy[:-1]) > gap
+    row_of = torch.cumsum(starts.long(), 0) - 1
+    n_rows = int(row_of[-1]) + 1
+    sums = torch.zeros(n_rows, dtype=cell_cy.dtype, device=cell_cy.device).index_add_(0, row_of, cell_cy)
+    counts = torch.bincount(row_of, minlength=n_rows).to(cell_cy.dtype)
+    return sums / counts
+
+
 def generate_axis_aware_edges(boxes, labels, class_to_idx, k_neighbors=3):
     """
-    Generates orthogonal candidate edges with multi-staff lane routing and a small KNN safety net.
+    Candidate edges for the GNN to classify, from three geometric rules.
     boxes: Tensor of (N, 4) in [x1, y1, x2, y2] relative coordinates.
+
+    1. Vertical (structural and modifier links): pairs whose centres are
+       within 1.5x their mean width horizontally. A span box (container,
+       beam, tuplet) pairs only with boxes centred over its own x-span: a
+       layer is a measure wide, and its 1.5x window used to reach the beams
+       and notes of the neighbouring measures (the GNN linked enough of them
+       that 18% of the detection path's notes were emitted twice).
+    2. Horizontal (temporal flow): from each box, a ray to the 3 nearest
+       boxes to its right in the same staff lane. Lanes are the system's
+       staff rows (_lane_centres); a lane per staff CELL split one row into
+       several wherever the cells' centres differed by a pixel (74% of the
+       detected rows). Containers are neither sources nor targets: their
+       centres sit mid-measure on the staff line and took the ray's slots.
+       Temporal-edge candidate recall: 74.7 -> 91.9% (GT boxes), 68.5 ->
+       82.9% (detections).
+    3. A kNN safety net (k_neighbors).
     """
     num_nodes = boxes.shape[0]
     device = boxes.device
@@ -66,55 +121,58 @@ def generate_axis_aware_edges(boxes, labels, class_to_idx, k_neighbors=3):
     cx = (boxes[:, 0] + boxes[:, 2]) / 2.0
     cy = (boxes[:, 1] + boxes[:, 3]) / 2.0
     w = boxes[:, 2] - boxes[:, 0]
-    
-    # -----------------------------------------------------------------------
-    # PHASE 1: Vertical Axis (Structural & Modifier)
-    # -----------------------------------------------------------------------
-    dx_matrix = torch.abs(cx.unsqueeze(1) - cx.unsqueeze(0)) 
-    avg_w = (w.unsqueeze(1) + w.unsqueeze(0)) / 2.0 
-    
+
+    # --- 1. Vertical axis (structural & modifier) ---
+    dx_matrix = torch.abs(cx.unsqueeze(1) - cx.unsqueeze(0))
+    avg_w = (w.unsqueeze(1) + w.unsqueeze(0)) / 2.0
     vertical_mask = dx_matrix < (avg_w * 1.5)
     vertical_mask.fill_diagonal_(False)
+
+    span = _class_mask(labels, class_to_idx, SPAN_CLASSES)
+    if span.any():
+        # j under i's span: j's box overlaps it, padded by a quarter of i's
+        # height (detected beams and layers end a little short of their
+        # outer noteheads; ~1 staff space for a staff cell)
+        half = w / 2.0
+        pad = (boxes[:, 3] - boxes[:, 1]) / 4.0
+        under = (cx.unsqueeze(0) + half.unsqueeze(0) >= (boxes[:, 0] - pad).unsqueeze(1)) & (
+            cx.unsqueeze(0) - half.unsqueeze(0) <= (boxes[:, 2] + pad).unsqueeze(1)
+        )
+        exempt = _class_mask(labels, class_to_idx, [
+            c for c in class_to_idx if c.startswith(SPAN_EXEMPT_PREFIXES)
+        ])
+        under |= exempt.unsqueeze(0)
+        ok = ~span.unsqueeze(1) | under          # i a span box: j under it
+        ok &= ~span.unsqueeze(0) | under.t()     # j a span box: i under it
+        vertical_mask &= ok
     vertical_edges = vertical_mask.nonzero(as_tuple=False).t()
 
-    # -----------------------------------------------------------------------
-    # PHASE 2: Horizontal Axis (Staff-Aware Temporal Flow)
-    # -----------------------------------------------------------------------
-    staff_idx = class_to_idx.get('staff', -1)
-    staff_mask = (labels == staff_idx)
-    staff_boxes = boxes[staff_mask]
-    
-    node_staff_assignment = torch.zeros(num_nodes, dtype=torch.long, device=device)
-    
-    if staff_boxes.shape[0] > 1:
-        # Sort staves vertically so lane 0 is always the top staff
-        staff_y_centers = (staff_boxes[:, 1] + staff_boxes[:, 3]) / 2.0
-        sorted_staves_idx = torch.argsort(staff_y_centers)
-        
-        # Assign every node to the vertically closest staff lane
-        dy_to_staves = torch.abs(cy.unsqueeze(1) - staff_y_centers[sorted_staves_idx].unsqueeze(0))
-        node_staff_assignment = torch.argmin(dy_to_staves, dim=1)
-
-    # Boolean mask preventing cross-staff connections
-    same_staff_mask = node_staff_assignment.unsqueeze(1) == node_staff_assignment.unsqueeze(0)
+    # --- 2. Horizontal axis (staff-lane temporal flow) ---
+    lane = torch.zeros(num_nodes, dtype=torch.long, device=device)
+    lane_cy = _lane_centres(boxes, labels, class_to_idx)
+    if lane_cy.numel() > 1:
+        lane = torch.argmin(torch.abs(cy.unsqueeze(1) - lane_cy.unsqueeze(0)), dim=1)
+    same_staff_mask = lane.unsqueeze(1) == lane.unsqueeze(0)
 
     # Directional raycast: dx_dir[i, j] > 0 means j is to the right of i
-    dx_dir = cx.unsqueeze(0) - cx.unsqueeze(1) 
-    dy_abs = torch.abs(cy.unsqueeze(0) - cy.unsqueeze(1)) 
+    dx_dir = cx.unsqueeze(0) - cx.unsqueeze(1)
+    dy_abs = torch.abs(cy.unsqueeze(0) - cy.unsqueeze(1))
 
     # Heavily penalize vertical deviation so the ray shoots straight across the staff
     ray_distance = dx_dir + (dy_abs * 3.0)
-    
-    # Mask out leftward nodes, perfectly stacked nodes, and cross-staff nodes
+
+    # Mask out leftward and stacked nodes, other lanes, and containers
+    container = _class_mask(labels, class_to_idx, CONTAINER_CLASSES)
     invalid_horizontal = (dx_dir <= 1.0) | (~same_staff_mask)
+    invalid_horizontal |= container.unsqueeze(0) | container.unsqueeze(1)
     ray_distance.masked_fill_(invalid_horizontal, float('inf'))
 
     # Top-K connection for polyphonic voices within the same staff lane
     k_right = min(3, num_nodes - 1)
     nearest_dists, nearest_right_idx = torch.topk(ray_distance, k=k_right, dim=1, largest=False)
-    
+
     valid_right_mask = nearest_dists != float('inf')
-    
+
     u_horiz = torch.arange(num_nodes, device=device).unsqueeze(1).expand(-1, k_right)[valid_right_mask]
     v_horiz = nearest_right_idx[valid_right_mask]
 
@@ -122,20 +180,17 @@ def generate_axis_aware_edges(boxes, labels, class_to_idx, k_neighbors=3):
     horizontal_edges_fwd = torch.stack([u_horiz, v_horiz], dim=0)
     horizontal_edges_rev = torch.stack([v_horiz, u_horiz], dim=0)
 
-    # -----------------------------------------------------------------------
-    # PHASE 3: KNN Safety Net & Combine
-    # -----------------------------------------------------------------------
+    # --- 3. KNN safety net & combine ---
     pos = torch.stack([cx, cy], dim=1)
     k_knn = min(k_neighbors, num_nodes - 1)
-    # knn_edges = knn_graph(pos, k=k_knn, loop=False)
     knn_edges = pure_pytorch_knn_graph(pos, k=k_knn, loop=False)
     combined_edges = torch.cat([
-        vertical_edges, 
-        horizontal_edges_fwd, 
+        vertical_edges,
+        horizontal_edges_fwd,
         horizontal_edges_rev,
         knn_edges
     ], dim=1)
-    
+
     # Strict deduplication
     candidate_edge_index = torch.unique(combined_edges, dim=1)
 

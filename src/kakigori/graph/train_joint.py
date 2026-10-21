@@ -32,6 +32,7 @@ from pathlib import Path
 
 # Third party imports
 import torch
+import torch.nn.functional as F
 from transformers import TrainingArguments, set_seed
 from transformers.trainer_utils import get_last_checkpoint
 
@@ -40,8 +41,10 @@ from .trainer import GNNTrainer, compute_gnn_metrics
 from .dataset import OMRFullPageDataset
 from .utils import omr_collate_fn, split_into_systems
 from .heuristics import generate_axis_aware_edges, map_gt_to_candidates
-from .model import GraphVisualExtractor, ScoreGraphReconstructor, GNNPhase2Model
-from kakigori.vision.trainer import OMRTrainer
+from .model import (
+    GraphVisualExtractor, ScoreGraphReconstructor, GNNPhase2Model, NODE_IN_DIM, node_features,
+)
+from kakigori.vision.trainer import OMRTrainer, regression_loss
 from kakigori.vision.losses import DynamicFocalLoss, CIoULoss
 from kakigori.vision.utils import detector_for_checkpoint, load_checkpoint, checkpoint_input_size
 from kakigori.vision.model import MusicDetector
@@ -65,10 +68,11 @@ class JointTrainer(GNNTrainer):
 
     def __init__(self, *args, det_weight=0.1, edge_weight=10.0,
                  cls_weight=1.0, reg_weight=5.0, base_gamma=2.0,
-                 max_gamma=3.0, scale_ranges=None, **kwargs):
+                 max_gamma=3.0, scale_ranges=None, node_weight=1.0, **kwargs):
         super().__init__(*args, **kwargs)
         self.det_weight = det_weight
         self.edge_weight = edge_weight
+        self.node_weight = node_weight
         self.cls_weight = cls_weight
         self.reg_weight = reg_weight
         # the detector's own ranges: the levels it was trained to split boxes on
@@ -93,7 +97,7 @@ class JointTrainer(GNNTrainer):
         outputs = []
         for feature, head in zip(fused_features, model.detector.heads):
             cls_out, reg_out = head(feature)
-            outputs.append({"cls": cls_out, "reg": reg_out})
+            outputs.append({"cls": cls_out, "reg": reg_out, "reg_slot": model.detector.reg_slot})
 
         # GNN dataset boxes are absolute xyxy on the letterboxed canvas;
         # build_targets wants normalized cxcywh
@@ -114,34 +118,19 @@ class JointTrainer(GNNTrainer):
         num_classes = model.detector.heads[0].cls_branch[-1].out_channels
         feature_sizes = [(o["cls"].shape[2], o["cls"].shape[3]) for o in outputs]
         cls_targets, reg_targets, obj_masks = OMRTrainer.build_targets(
-            self, targets_list, feature_sizes, num_classes, device, canvas=input_size
+            self, targets_list, feature_sizes, num_classes, device, canvas=input_size,
+            reg_slot=model.detector.reg_slot,
         )
 
         max_steps = self.state.max_steps
         progress = self.state.global_step / max_steps if max_steps > 0 else 0.0
 
         total_cls = torch.tensor(0.0, device=device)
-        total_reg = torch.tensor(0.0, device=device)
         for scale_idx, out in enumerate(outputs):
             total_cls = total_cls + self.det_focal(
                 out["cls"], cls_targets[scale_idx], progress=progress
             )
-            mask = obj_masks[scale_idx]
-            if mask.any():
-                pos = mask.nonzero(as_tuple=False)
-                b_idx, r_idx, c_idx = pos[:, 0], pos[:, 1], pos[:, 2]
-                pred_pos = out["reg"][b_idx, :, r_idx, c_idx]
-                tgt_pos = reg_targets[scale_idx][b_idx, :, r_idx, c_idx]
-                fw, fh = out["reg"].shape[3], out["reg"].shape[2]
-                pred_cx = (pred_pos[:, 0].sigmoid() + c_idx) / fw
-                pred_cy = (pred_pos[:, 1].sigmoid() + r_idx) / fh
-                pred_w = torch.exp(pred_pos[:, 2].clamp(max=10.0))
-                pred_h = torch.exp(pred_pos[:, 3].clamp(max=10.0))
-                tgt_cx = (tgt_pos[:, 0] + c_idx) / fw
-                tgt_cy = (tgt_pos[:, 1] + r_idx) / fh
-                pred_boxes = torch.stack([pred_cx, pred_cy, pred_w, pred_h], dim=1)
-                tgt_boxes = torch.stack([tgt_cx, tgt_cy, tgt_pos[:, 2], tgt_pos[:, 3]], dim=1)
-                total_reg = total_reg + self.det_ciou(pred_boxes, tgt_boxes)
+        total_reg = regression_loss(outputs, reg_targets, obj_masks, self.det_ciou)
 
         return self.cls_weight * total_cls + self.reg_weight * total_reg, total_cls, total_reg
 
@@ -159,7 +148,13 @@ class JointTrainer(GNNTrainer):
         class_to_idx = {c: i for i, c in enumerate(self.class_list)}
         unfreeze = getattr(model, "unfreeze", "neck")
 
+        scores_list = inputs.get("scores")
+        synth_list = inputs.get("synthesized")
+        keep_list = inputs.get("keep")
+        from_det_list = inputs.get("from_detections") or [False] * len(images)
+
         edge_loss = 0.0
+        node_loss, node_systems = 0.0, 0
         det_loss_sum = torch.tensor(0.0, device=device)
         det_cls_sum, det_reg_sum = 0.0, 0.0
         all_logits, all_targets = [], []
@@ -178,7 +173,8 @@ class JointTrainer(GNNTrainer):
             # destroyed localization (mAP@.75 0.58 -> 0.21) in the first
             # joint run before this split.
             clean_boxes = abs_boxes
-            if model.training and self.box_jitter > 0:
+            # detected boxes (stage D) carry the detector's own noise
+            if model.training and self.box_jitter > 0 and not from_det_list[i]:
                 abs_boxes = abs_boxes + torch.randn_like(abs_boxes) * self.box_jitter
                 abs_boxes[:, 2:] = torch.maximum(abs_boxes[:, 2:], abs_boxes[:, :2] + 1.0)
 
@@ -215,15 +211,29 @@ class JointTrainer(GNNTrainer):
                 sys_rel_boxes[:, [0, 2]] -= sx1
                 sys_rel_boxes[:, [1, 3]] -= sy1
                 norm_boxes = sys_rel_boxes / img.shape[-1]
-                class_embeds = model.gnn.class_embedding(sys_labels)
-                x = torch.cat([roi_feats, norm_boxes, class_embeds], dim=1)
+                idx = sys_data["node_indices"]
+                x = node_features(
+                    model.gnn, roi_feats, norm_boxes, sys_labels,
+                    scores=scores_list[i].to(device)[idx] if scores_list else None,
+                    synthesized=synth_list[i].to(device)[idx] if synth_list else None,
+                )
                 candidates = generate_axis_aware_edges(sys_rel_boxes, sys_labels, class_to_idx)
                 if candidates.shape[1] == 0:
                     continue
                 y_targets = map_gt_to_candidates(candidates, sys_data["edge_targets"])
-                edge_logits = model.gnn(x, candidates)
+                edge_logits, node_logits = model.gnn(x, candidates, return_nodes=True)
                 edge_loss = edge_loss + self.loss_fn(edge_logits, y_targets)
                 valid_systems += 1
+
+                # keep head: only nodes with a target (detected boxes)
+                if keep_list is not None and node_logits is not None:
+                    keep = keep_list[i].to(device)[idx]
+                    has_target = keep >= 0
+                    if has_target.any():
+                        node_loss = node_loss + F.binary_cross_entropy_with_logits(
+                            node_logits[has_target].float(), keep[has_target]
+                        )
+                        node_systems += 1
 
                 if return_outputs or not model.training:
                     all_logits.append(edge_logits)
@@ -241,14 +251,20 @@ class JointTrainer(GNNTrainer):
             edge_loss = sum(p.sum() for p in model.parameters() if p.requires_grad) * 0.0
         if n_pages > 0:
             det_loss_sum = det_loss_sum / n_pages
+        if node_systems > 0:
+            node_loss = node_loss / node_systems
 
         total_loss = self.edge_weight * edge_loss + self.det_weight * det_loss_sum
+        if node_systems > 0:
+            total_loss = total_loss + self.node_weight * node_loss
 
         self._custom_metrics = {
             "train/det_cls": det_cls_sum / max(1, n_pages),
             "train/det_reg": det_reg_sum / max(1, n_pages),
             "train/edge_loss": float(edge_loss.detach()) if torch.is_tensor(edge_loss) else edge_loss,
         }
+        if node_systems > 0:
+            self._custom_metrics["train/node_loss"] = float(node_loss.detach())
 
         if return_outputs:
             if all_logits:
@@ -286,6 +302,12 @@ def parse_args():
     parser.add_argument("--head-lr", type=float, default=1e-4,
                         help="LR for the detection heads (re-aligning with the adapted neck)")
     parser.add_argument("--box-jitter", type=float, default=0.0)
+    parser.add_argument("--det-dir", type=str, default=None,
+                        help="cache-detections output for the training pages (stage D)")
+    parser.add_argument("--det-prob", type=float, default=0.0,
+                        help="Probability that a page trains on its cached detections")
+    parser.add_argument("--node-weight", type=float, default=1.0,
+                        help="Weight of the keep head's loss (detection-sourced pages)")
     parser.add_argument("--det-weight", type=float, default=0.1)
     parser.add_argument("--edge-weight", type=float, default=10.0)
     parser.add_argument("--cls-weight", type=float, default=1.0)
@@ -342,7 +364,10 @@ def main():
         class_remap=class_remap,
         # pages letterboxed into the detector's canvas
         input_size=checkpoint_input_size(args.detector_checkpoint) if args.detector_checkpoint else 640,
+        det_dir=args.det_dir, det_prob=args.det_prob,
     )
+    if args.det_dir and args.det_prob > 0:
+        logger.info(f"Stage D: pages train on their detections ({args.det_dir}) with p={args.det_prob}")
     train_size = int(0.95 * len(full_ds))
     train_dataset, val_dataset = torch.utils.data.random_split(
         full_ds, [train_size, len(full_ds) - train_size])
@@ -356,7 +381,7 @@ def main():
         detector = MusicDetector(num_classes=num_classes)
 
     gnn = ScoreGraphReconstructor(
-        node_in_dim=256 + 4 + 32, num_classes=num_classes, class_embed_dim=32)
+        node_in_dim=NODE_IN_DIM, num_classes=num_classes, class_embed_dim=32, node_head=True)
     model = JointModel(detector, GraphVisualExtractor(), gnn, unfreeze=args.unfreeze)
 
     if args.fine_tune:
@@ -410,6 +435,7 @@ def main():
         det_weight=args.det_weight, edge_weight=args.edge_weight,
         cls_weight=args.cls_weight, reg_weight=args.reg_weight,
         base_gamma=args.base_gamma, max_gamma=args.max_gamma,
+        node_weight=args.node_weight,
         optimizers=(optimizer, None),
     )
 

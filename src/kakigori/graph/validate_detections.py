@@ -33,7 +33,7 @@ from .graph_repair import repair_page_edges
 from .bbox_repair import repair_page_boxes
 from .infer import detect_page_nodes
 from .validate_predictions import (
-    _load_gnn, predict_page_edges, _inject_system_measure_edges,
+    _load_gnn, predict_page_edges, _inject_system_measure_edges, prune_nodes,
 )
 from kakigori.vision.model import MusicDetector
 from kakigori.vision.utils import load_detector
@@ -62,7 +62,7 @@ def process_score(stem: str, page_paths: list, out_dir: Path, node_roles: dict,
                   detector, gnn_wrapper, class_list: list, class_to_idx: dict,
                   device, conf_thresh: float, iou_thresh: float,
                   input_size: int, bbox_repair: bool = True,
-                  graph_repair: bool = True) -> bool:
+                  graph_repair: bool = True, prune_threshold: float = 0.0) -> bool:
     try:
         all_edges, all_pages, node_ids = [], [], []
         for page_idx, img_path in enumerate(page_paths):
@@ -75,10 +75,13 @@ def process_score(stem: str, page_paths: list, out_dir: Path, node_roles: dict,
                 continue
             if bbox_repair:
                 repair_page_boxes(page_nodes, page_prefix=f"p{page_idx}")
+            keep_probs = {}
             page_edges = predict_page_edges(
                 gnn_wrapper, page_nodes, img_path, class_to_idx, device,
-                input_size=input_size,
+                input_size=input_size, keep_probs=keep_probs,
             )
+            if prune_threshold > 0:
+                prune_nodes(page_nodes, page_edges, keep_probs, prune_threshold)
             _inject_system_measure_edges(page_nodes, page_edges)
             if graph_repair:
                 repair_page_edges(page_nodes, page_edges)
@@ -132,6 +135,9 @@ def main():
                         help="Disable the spatial graph-repair heuristics")
     parser.add_argument("--skip-existing", action="store_true",
                         help="Skip scores whose .krn already exists (crash resume)")
+    parser.add_argument("--prune-threshold", type=float, default=0.0,
+                        help="Drop events, measures and barlines the GNN's keep head scores "
+                        "below this (0: off; GNNs without a keep head keep everything)")
     args = parser.parse_args()
 
     with open(args.config) as f:
@@ -163,7 +169,8 @@ def main():
                          gnn_wrapper, class_list, class_to_idx, device,
                          args.conf_thresh, args.iou_thresh, None,
                          bbox_repair=not args.no_bbox_repair,
-                         graph_repair=not args.no_repair):
+                         graph_repair=not args.no_repair,
+                         prune_threshold=args.prune_threshold):
             success += 1
     logger.info(f"Finished. Generated {success}/{len(stems)} detection-driven Humdrum files.")
 

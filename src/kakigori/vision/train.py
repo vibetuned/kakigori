@@ -17,7 +17,7 @@ from transformers import TrainingArguments, set_seed
 from transformers.trainer_utils import get_last_checkpoint
 
 # Local folder imports
-from .model import MusicDetector
+from .model import MusicDetector, regression_slots
 from .utils import RatioSampler, omr_collate_fn, load_checkpoint, detector_for_checkpoint
 from .dataset import OMRDataset
 from .trainer import OMRTrainer, parse_scale_ranges
@@ -98,6 +98,13 @@ def parse_args():
         default=[0, 1, 2],
         help="Backbone stages to detect on, one head each: 0 1 2 (strides 4/8/16) "
         "or 0 1 2 3 (adds stride 32). Ignored with --fine-tune (from the checkpoint).",
+    )
+    parser.add_argument(
+        "--regression-slots",
+        action="store_true",
+        help="One box regression slot per structure class and one for composites "
+        "(model.regression_slots) instead of one shared by all classes. Ignored "
+        "with --fine-tune (from the checkpoint).",
     )
 
     # Trainer args
@@ -227,6 +234,7 @@ def main():
             out_indices=tuple(args.out_indices),
             backbone=args.backbone,
             input_size=_input_size(args.input_size) or 640,
+            reg_slots=regression_slots(class_list) if args.regression_slots else None,
         )
     n_params = sum(p.numel() for p in model.parameters())
     logger.info(f"Detector: {model.backbone_name} backbone, {n_params / 1e6:.2f}M parameters")

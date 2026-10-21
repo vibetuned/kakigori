@@ -76,8 +76,9 @@ class PANetNeck(nn.Module):
 
 
 class DecoupledHead(nn.Module):
-    def __init__(self, in_channels, num_classes):
+    def __init__(self, in_channels, num_classes, num_slots=1):
         super().__init__()
+        self.num_slots = num_slots
 
         # The Classification Branch (What is it?)
         self.cls_branch = nn.Sequential(
@@ -90,7 +91,8 @@ class DecoupledHead(nn.Module):
         self.reg_branch = nn.Sequential(
             DepthwiseSeparableConv(in_channels, in_channels),
             DepthwiseSeparableConv(in_channels, in_channels),
-            nn.Conv2d(in_channels, 4, kernel_size=1),  # 4 outputs: cx, cy, w, h
+            # 4 outputs per regression slot: cx, cy, w, h
+            nn.Conv2d(in_channels, 4 * num_slots, kernel_size=1),
         )
         # Initialize the biases
         self._init_biases()
@@ -108,7 +110,7 @@ class DecoupledHead(nn.Module):
         # Safely overwrite the 1D bias tensor all at once
         with torch.no_grad():
             self.reg_branch[-1].bias.copy_(
-                torch.tensor([0.0, 0.0, math.log(0.01), math.log(0.01)])
+                torch.tensor([0.0, 0.0, math.log(0.01), math.log(0.01)]).repeat(self.num_slots)
             )
 
     def forward(self, x):

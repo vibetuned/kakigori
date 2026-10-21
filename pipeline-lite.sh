@@ -13,7 +13,9 @@
 #   tail -f checkpoints_lite_896/pipeline.log
 #
 # Env: FT_CONFIG, CONS_CONFIG (default conf-lite/{fine_tune,consolidation}.yaml),
-# NUM_WORKERS (default 4), LOGGING_STEPS (default 200).
+# NUM_WORKERS (default 4), LOGGING_STEPS (default 200), VAL (evaluation set,
+# default data/validation-lite), EXTRA_ARGS (appended to every training
+# command, e.g. a smoke test: EXTRA_ARGS="--max-steps 20 --save-steps 20").
 
 set -u
 cd "$(dirname "$0")"
@@ -24,6 +26,7 @@ FT_CONFIG=${FT_CONFIG:-conf-lite/fine_tune.yaml}
 CONS_CONFIG=${CONS_CONFIG:-conf-lite/consolidation.yaml}
 NUM_WORKERS=${NUM_WORKERS:-4}
 LOGGING_STEPS=${LOGGING_STEPS:-200}
+EXTRA_ARGS=${EXTRA_ARGS:-}
 
 mkdir -p "$OUT"
 exec > >(tee -a "$OUT/pipeline.log") 2>&1
@@ -34,7 +37,7 @@ train() {  # train <stage> <config> [extra args]: train-model into $OUT, then ev
     shift 2
     run_stage "$name" uv run train-model --train-config "$config" \
         --output-dir "$OUT" --logging-dir "$OUT/tb" \
-        --num-workers "$NUM_WORKERS" --logging-steps "$LOGGING_STEPS" "$@"
+        --num-workers "$NUM_WORKERS" --logging-steps "$LOGGING_STEPS" "$@" $EXTRA_ARGS
     [ -f "$OUT/eval_$name.log" ] || eval_detector "$name" "$(stage_run "$name")"
 }
 

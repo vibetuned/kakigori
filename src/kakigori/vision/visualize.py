@@ -533,7 +533,8 @@ class ModelVisualizer(QMainWindow):
         with torch.inference_mode():
             raw_outputs = self.model(tensor)
         raw_cpu = [
-            {"cls": out["cls"].detach().float().cpu(), "reg": out["reg"].detach().float().cpu()}
+            {"cls": out["cls"].detach().float().cpu(), "reg": out["reg"].detach().float().cpu(),
+             "reg_slot": out["reg_slot"].cpu()}
             for out in raw_outputs
         ]
         entry = {

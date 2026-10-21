@@ -1,31 +1,62 @@
 # End-to-end training guide
 
 How to go from a pile of MusicXML files to a trained detector + GNN and a
-measurable `**kern` output. Each stage lists the command, what it consumes and
-produces, and how to check it worked before moving on.
+measured `**kern` output. Each stage lists the commands, what they consume and
+produce, and how to check the result before moving on. The design and the
+reasons behind each choice are in [vision.md](vision.md) (detector) and
+[graph.md](graph.md) (GNN, repairs, serializer).
 
 ```
-MXL corpus ─▶ musicset select ─▶ musicset build ─▶ imgs + annotations + graphs
-                                                          │
-              detector (vision) ◀── imgs + annotations ───┤
-                     │ frozen                             │
-              GNN (graph) ◀── imgs + annotations + graphs ┘
-                     │
-              **kern serialization ─▶ compare-kern / eval
+MXL corpus ─▶ musicset select / synth ─▶ musicset build ─▶ imgs + annotations + graphs + mei + kern
+                                                                  │
+   pipeline-lite.sh:  detector  base ─▶ fine-tune ─▶ consolidation ◀┤
+                                                    │               │
+   pipeline-gnn.sh:   GNN  phase 1 ─▶ phase 2 ─▶ joint ─▶ stage D ◀─┘
+                                                             │ one checkpoint: boxes + edges
+                 validate-groundtruth / -predictions / -detections, infer-omr
+                                                   │
+                         **kern ─▶ compare-kern, musicset view --pred-kern
 ```
+
+This guide follows the **LITE track** (`conf-lite/`, 99 classes, one part
+with at most two staves, one voice per staff), the 0.2.0 proving ground.
+The full track (`conf/`, 109 classes) uses the same tools with its own
+configs; its 0.1.x recipe and numbers are kept at the end.
 
 Conventions: all commands run from the repo root with `uv run`. A "dataset
-directory" always means the parallel triplet `imgs/` (PNG), `annotations/`
-(JSON), `graphs/` (JSON; old sets: PyG `.pt`), plus `mei/` and `kern/`
-groundtruth, all built by [musicset](modules/dataset.md) from the curated
-sources in `filter/`.
+directory" holds `imgs/` (PNG), `annotations/` (JSON), `graphs/` (JSON),
+`mei/` (the real ground truth) and `kern/`, all built by
+[musicset](modules/dataset.md) from the curated sources in `filter/`.
+
+## The whole queue
+
+`pipeline-full.sh` runs Stages 3 and 4 back to back, unattended: about two
+and a half days on the DGX Spark. Every stage is evaluated, and the queue
+resumes after a reboot when rerun.
+
+```
+tmux new-session -d -s full './pipeline-full.sh checkpoints_lite_896s checkpoints_gnn_lite_896s'
+tail -f pipeline-full.log
+```
+
+Before a long run, smoke-test the whole queue at 10 steps per stage on small
+symlinked sets (the usage block in `pipeline-full.sh`; ~10 minutes), on
+this machine before pushing. Run it with `MAX_STALLED_RESTARTS=0` so that a
+crash fails at once.
+
+`train.sh` resumes a crashed stage for as long as it makes progress: it
+gives up only after 3 restarts in a row that saved no new checkpoint
+(`MAX_STALLED_RESTARTS`), i.e. a bug. Hardware faults every few hours are
+resumed indefinitely.
 
 ## Prerequisites
 
-- `uv sync` completed (PyTorch ≥ 2.7 CUDA wheels; musicset brings Verovio ≥ 6.3
-  and music21). Run musicset's `scripts/install-fonts.sh` once per machine.
-- A GPU. Vision training defaults to batch 4 @ 640px; the GNN runs full-page
-  graphs at batch 2.
+- `uv sync` completed. musicset is a sibling checkout (`../musicset`) and
+  brings Verovio ≥ 6.3 and music21. Run musicset's
+  `scripts/install-fonts.sh` once per machine.
+- A GPU. At 640×896 the detector trains at batch 4 in bf16. On an RTX 5090
+  a step takes 51 ms; on the DGX Spark (GB10) it takes 297 ms (see
+  "Training on the DGX Spark").
 - A source corpus of `.mxl` files.
 
 ## Stage 0 — Curate the corpus
@@ -36,325 +67,373 @@ uv run musicset select ../music_data/mxl data/train-lite/filter --lite --limit 9
 ```
 
 `--lite` keeps one part, at most two staves, one voice per staff, no
-tablature or percussion, no gestural-only accidentals; `--max-voices` /
-`--per-voice` shape a full-track selection; `--exclude-from` keeps holdouts
-out. Synthetic scores (choose per experiment) are MusicXML too:
+tablature or percussion, and no gestural-only accidentals. `--max-voices` /
+`--per-voice` shape a full-track selection. `--exclude-from` keeps holdouts
+out.
+
+Synthetic scores are MusicXML too. Choose them per experiment:
 
 | Command | What it does |
 | --- | --- |
-| `musicset synth exercise` | Scales and chord progressions, curriculum switches, `--profile detector` weights weak classes |
+| `musicset synth exercise` | Scales and chord progressions; `--profile rare` / `detector` weights the weak classes |
 | `musicset synth piano` | Melody/chords over accompaniment patterns on functional harmony |
 | `musicset synth counterpoint` | Species counterpoint from a pool (`musicset counterpoint-pool`): piano, duet with C clefs, one staff, choir |
 | `musicset synth mutate` / `arrange` | Real scores with rare notation injected / one mutation per measure |
+
+The current sets:
+- `data/train-lite`: 9,500 scores, 10,387 pages.
+- `data/validation-lite`: 500 scores, 555 pages.
+- `data/synthetic-lite`: 5,991 scores, 10,497 pages. Exercises, short
+  rare-meter exercises and piano pieces on the `rare` profile, plus 1,500
+  mutations and arrangements of train-lite.
 
 ## Stages 1-2 — Engrave, annotate, graphs
 
 ```
 ./regenerate-dataset.sh data/train-lite                    # varied engraving, seed 0
 SEED=1 ./regenerate-dataset.sh data/validation-lite
-PROFILE=fixed CONF=conf ./regenerate-dataset.sh data/train-small
+./regenerate-dataset.sh data/synthetic-lite
 ```
 
-One `musicset build` per set: stable ids, Verovio engraving (`varied`: a font,
-staff size, line weights, spacing and page per score; `fixed`: Verovio's
-default look), PNG pages, bbox JSONs under the conf's label set, MEI, graphs
-(`edge_index`, `y` with 6 edge classes: 0 none / 1 structural / 2 modifier /
-3 temporal / 4 sync-text / 5 simultaneity, `node_ids`, `json_files`) and
-`**kern`. The MEI is the real groundtruth used downstream; score kern with
-`compare-kern` against it.
+This runs one `musicset build` per set (label set `CONF=conf-lite` by
+default). It produces:
+- stable ids;
+- Verovio engraving. `varied` draws a font, staff size, line weights,
+  spacing and page per score; `fixed` uses Verovio's default look;
+- PNG pages and bbox JSONs under the label set;
+- MEI and `**kern`;
+- graphs: `edge_index`, `node_ids`, `json_files`, and `y` with the six edge
+  classes (0 none, 1 structural, 2 modifier, 3 temporal, 4 sync-text,
+  5 simultaneity).
 
-Builds are resumable and never stale: each score's manifest records its
-settings, so a changed conf re-projects annotations and graphs from the stored
-canonical pages without re-rendering (and graphs always match the JSONs they
-were built from). Rejections (a staff off the page, or the optional density
-gates) are listed in `failures.jsonl`. Adding a glyph class touches four
-config files and must append to the end of `target_classes` — see "Adding a
-new glyph class" in the README.
+Builds are resumable and never stale:
+- Each score's manifest records its settings. A changed conf re-projects
+  annotations and graphs from the stored canonical pages without
+  re-rendering, so graphs always match the JSONs they were built from.
+- Rejections (a staff off the page, or the optional density gates) are
+  listed in `failures.jsonl`.
+- Adding a glyph class touches four config files and must append to the end
+  of `target_classes`. See "Adding a new glyph class" in the README.
 
-Sanity check: `uv run musicset view data/<set> --labels conf-lite` (boxes,
-graph edges, the score graph).
+Sanity checks:
+- `uv run musicset view data/<set> --labels lite` shows boxes, graph edges
+  and the score graph.
+- The Kern tab engraves the ground-truth `**kern` next to the source pages.
+- Stage 5's ceiling path audits the ground truth: a score far below 95%
+  with ground-truth graphs has a broken source or annotation, not a model
+  problem.
 
-## Stage 3 — Train the vision detector
-
-The detector is trained in an **evaluate-driven loop**: a base run on real
-data first, then per-class evaluation decides what synthetic data to
-generate for the weak classes, and only then the synthetic fine-tune runs.
-
-### 3a. Base training from scratch (real data only)
-
-```
-./train.sh          # supervisor: relaunches `train-model --resume` until clean exit
-# equivalent foreground run: uv run train-model --train-config conf/train.yaml
-```
-
-Data dirs, class list (`conf/config.json`), epochs etc. come from
-`conf/train.yaml`. Checkpoints land in `checkpoints/run_NNN`
-(auto-incrementing); TensorBoard logs in `runs/`. After *any* change to the
-class list you either train from scratch (this stage) or widen an existing
-checkpoint with `uv run retrain-model --old-num-classes N` — mixing an old
-checkpoint with a new class count without one of these will not load.
-
-### 3b. Evaluate per-class mAP to find the weak classes
+## Stage 3 — Train the detector
 
 ```
-uv run eval-model --checkpoint checkpoints/run_NNN \
-                  --img-dir <val>/imgs --ann-dir <val>/annotations
+./pipeline-lite.sh conf-lite/train_640x896.yaml checkpoints_lite_896s
+tail -f checkpoints_lite_896s/pipeline.log
 ```
 
-This prints per-class mAP/IoU (grouped via `conf/hierarchy.json`). Three
-distinct causes of a weak class, with different remedies:
+`pipeline-lite.sh` chains the three stages unattended. Each stage
+warm-starts from the previous one through `--fine-tune`, and each stage is
+evaluated on validation-lite (`eval_<stage>.log`):
 
-- **Rare in the corpus** (few training examples) → generate synthetic data
-  targeting it (3c).
-- **Badly annotated** (extraction bug, wrong bbox) → inspect Stage-2 output
-  with `musicset view` for that class first; more data won't fix wrong
-  boxes.
-- **Below the input's resolving power** → if the class differs from a common
-  one only by a few pixels at `input_size` 640, data stops helping once
-  localization is solid. Diagnose by matching predictions to GT boxes: when
-  every GT box has a high-IoU prediction but the class votes go to the
-  look-alike, you've hit this. Seen with `clefG8va` (a ~3 px "8" above an
-  otherwise identical treble clef): three synthetic rounds took it
-  0.019 → 0.117 → 0.317 and plateaued while its data exceeded `clefG8vb`'s
-  (which sits at 0.986). The fix is input resolution / `scale_ranges` work,
-  not a fourth round.
+| stage | config | data | lr | epochs | current run |
+| --- | --- | --- | --- | --- | --- |
+| base | `conf-lite/train_640x896.yaml` (regression slots) | train-lite | 2e-3 | 40 | `run_001` |
+| fine-tune | `conf-lite/fine_tune.yaml` | 1 real : 3 synthetic-lite | 2e-4 | 10 | `run_002` |
+| consolidation | `conf-lite/consolidation.yaml` | 9 real : 1 synthetic-lite | 2e-4 | 30 | `run_003` |
 
-### 3c. Generate targeted synthetic data
+How the pipeline runs:
+- Every stage runs under `train.sh`, which relaunches `train-model
+  --resume` after a crash.
+- `.started_<stage>` / `.done_<stage>` markers in the output directory let
+  a rerun after a reboot skip finished stages and resume an interrupted
+  one.
+- `FT_CONFIG`, `CONS_CONFIG`, `NUM_WORKERS` and `LOGGING_STEPS` override
+  the defaults.
+- The fine-tune and consolidation configs inherit the canvas and the scale
+  ranges from their checkpoint (`input_size: null`, `scale_ranges: null`).
+  Their own `fine_tune:` paths are overridden by the pipeline.
 
-Use `musicset synth` to oversample the weak classes — `exercise --profile
-detector` (weighted toward weak classes), `piano`, `counterpoint`, `mutate`
-(aggressive mutations of real scores), `arrange` (mild per-measure mutations)
-— into `data/synthetic-<name>/filter`, then run
-`./regenerate-dataset.sh data/synthetic-<name>` to engrave and annotate it.
-
-### 3d. Synthetic fine-tune and consolidation
+**Read the per-class table** in `eval_<stage>.log`, or run it yourself:
 
 ```
-uv run train-model --train-config conf/fine_tune.yaml      # + synthetic 1:3, higher lr/gamma
-uv run train-model --train-config conf/consolidation.yaml  # mostly real again, low lr
+uv run eval-model --checkpoint checkpoints_lite_896/run_003 \
+    --img-dir data/validation-lite/imgs --ann-dir data/validation-lite/annotations \
+    --config conf-lite/config.json --hierarchy conf-lite/hierarchy.json
 ```
 
-Each stage warm-starts from the previous run's checkpoint via the
-`fine_tune:` key in its YAML — **update those paths** (`checkpoints/run_NNN/`)
-to the run the previous stage actually produced, and point
-`synthetic_img_dir`/`synthetic_ann_dir` at the 3c output. Re-run 3b after
-each stage; iterate 3c–3d until the weak classes converge.
+- Compare runs over a fixed class set (the 80 classes with validation
+  ground truth), not the printed global mean, which skips zero-mAP classes.
+- A class whose mAP worker crashed shows `[!] Crash` and scores 0. The
+  pipeline retries the evaluation up to three times.
+
+**A weak class has one of three causes,** each with a different remedy:
+- **Rare in the corpus** (few training examples): generate synthetic data
+  that targets it (Stage 0, `musicset synth`), rebuild `synthetic-lite`,
+  and rerun the fine-tune and consolidation stages.
+- **Badly annotated** (an extraction bug, a wrong box): inspect it with
+  `musicset view` first. More data won't fix wrong boxes.
+- **Below the input's resolving power**: data stops helping once
+  localization is solid.
+  - Diagnose it by matching predictions to ground-truth boxes. If every
+    ground-truth box has a high-IoU prediction but the class votes go to a
+    look-alike, this is the cause.
+  - It was seen with `clefG8va` on the full track: a ~3 px "8" above a
+    treble clef. Three synthetic rounds took it 0.019 → 0.117 → 0.317,
+    then it plateaued.
+  - The fix is resolution, which is why the canvas went from 640×640 to
+    640×896.
+  - Whenever the canvas changes, scale the level ranges by the area factor
+    ([vision.md](vision.md) §5, lesson 3).
+
+**Inspect a detector** with `visualize-model --checkpoint <run> --img_dir
+<set>/imgs --ann-dir <set>/annotations`. It shows misses, false positives
+and wrong-class detections per page, with the worst pages first.
 
 **Troubleshooting:** a `CUBLAS_STATUS_NOT_INITIALIZED` / CUDA init error at
-the first training step (seen on newer GPUs) is an environment problem, not
-a model problem — upgrade the pinned wheels with
-`uv lock --upgrade-package torch --upgrade-package torchvision && uv sync`.
+the first training step is an environment problem, not a model problem.
+Upgrade the pinned wheels with `uv lock --upgrade-package torch
+--upgrade-package torchvision && uv sync`.
 
-### 3e. Class expansion (adding glyphs after a trained run)
-
-When classes are appended to `conf/config.json` (see the README's
-"how to add a glyph"), widen the newest consolidated checkpoint instead of
-retraining from scratch:
+## Stage 4 — Train the GNN and the joint model
 
 ```
-uv run retrain-model --train-config conf/update_model.yaml   # old_num_classes: N
+./pipeline-gnn.sh checkpoints_lite_896s/run_003 checkpoints_gnn_lite_896s
+tail -f checkpoints_gnn_lite_896s/pipeline.log
 ```
 
-`retrain-model` copies the old head weights positionally (hence *append*
-classes, never reorder), gives the new slots the focal bias prior, and runs a
-two-stage schedule: frozen backbone at `lr` to fit the new heads, then full
-unfreeze at `lr_unfrozen` (stage-2 checkpoints land in `run_NNN/stage2/`;
-both stages crash-resume independently). Before launching, make sure **every
-annotation source actually contains the new labels** — real *and* synthetic:
-a synthetic set extracted before the new SMuFL mapping contributes zero
-signal even if its SVGs contain the glyph, and re-extracting is cheap
-(rebuild the set with the new conf: musicset re-projects from the stored
-pages, no re-render). Then re-enter the 3b–3d loop for the new classes. Reference run:
-107 → 109 (`clefG8vb`/`clefG8va`, 2026-07-17): expansion `run_004` valsmall
-mAP@.50 0.704 (vs 0.687 before — no regression), octave-boost consolidations
-`run_005`/`run_006` → 0.724, `clefG8vb` 0.986, `clefG8va` capped at 0.317 by
-input resolution (see 3b).
+`pipeline-gnn.sh` runs four stages on the trained detector, each one
+warm-starting from the previous (rationale in [graph.md](graph.md) §3):
 
-## Stage 4 — Train the GNN (phased)
+| stage | command | config | current run |
+| --- | --- | --- | --- |
+| phase 1: detector frozen | `train-gnn` | `conf-lite/train_gnn_phase1.yaml` | `run_001` |
+| phase 2: the neck adapts | `train-gnn` | `conf-lite/train_gnn_phase2.yaml` | `run_002` |
+| joint: full backbone + detection loss | `train-joint` | `conf-lite/train_joint_full.yaml` | `run_003` |
+| stage D: on its own detections, plus the keep head | `train-joint` | `conf-lite/train_stage_d.yaml` | `run_004` |
 
-The GNN trains in four phases that release one constraint at a time — the
-full rationale, monitoring guide, and hard-won lessons live in
-[graph.md](graph.md). Operationally each phase is one run of:
+Before stage D, `cache-detections` stores the joint detector's boxes for
+every training page (`<out>/detections-train`, a few minutes).
 
-```
-./train.sh uv run train-gnn --train-config conf/train_gnn.yaml --resume
-```
+**The last run is the deliverable** (stage D; the joint run before it). It
+is one checkpoint for both halves: pass it as both `--detector-checkpoint`
+and `--gnn-checkpoint`.
+`eval-model`, `visualize-model` and the `infer-*` / `validate-*` tools also
+accept it as a detector.
 
-with the per-phase config (pre-create the next `checkpoints_gnn/run_NNN`
-so `--resume` targets it rather than the previous run):
+After each stage the pipeline scores kern on validation-lite (Stage 5):
+- `krn-gt-<stage>`: ground-truth boxes, predicted edges;
+- `krn-det-<stage>`: detected boxes, after phase 2, joint and stage D;
+- `krn-det-prune-staged`: stage D with the keep head pruning
+  (`--prune-threshold`, `PRUNE` 0.5);
+- each with a `.compare.txt`, plus `eval_joint.log` for the joint
+  detector.
 
-| Phase | config | Notes |
-| --- | --- | --- |
-| 1 | `conf/train_gnn_phase1.yaml` | GNN + RoI head from scratch, frozen detector |
-| 2 | `conf/train_gnn_phase2.yaml` | PANet adapts as a vision→graph adaptation layer |
-| 3 | `conf/train_gnn_phase3.yaml` | in reserve — only if phase 2 plateaus early |
-| 4 | `conf/train_gnn_phase4.yaml` | GT-box noise, narrows the gap to detector boxes |
-| 5 | `conf/train_gnn_phase5.yaml` | class expansion: after a detector class change (3e) |
+Settings:
+- `P1_CONFIG`, `P2_CONFIG`, `JOINT_CONFIG` and `D_CONFIG` override the
+  configs; `TRAIN_IMGS` sets the pages to cache detections for.
+- `VAL` sets the evaluation set.
+- `EXTRA_ARGS` is appended to every training command. Smoke-test a change
+  before a day-long run:
 
-Update each phase file's `fine_tune:` to point at the previous phase's
-actual run directory before launching.
+  ```
+  VAL=<small set> EXTRA_ARGS="--max-steps 30 --eval-steps 30 --save-steps 30" \
+      ./pipeline-gnn.sh checkpoints_lite_896/run_003 <scratch dir>
+  ```
 
-Phase 5 exists because a class change ripples differently through the GNN
-than through the detector: glyph classes are GNN *inputs* (a
-`class_embedding` row each), not outputs, so there is no head to widen and
-no frozen stage — `old_num_classes:` in the yaml makes `train-gnn` load only
-the old checkpoint's `gnn.*` weights, widen the embedding, and seed each new
-row from a look-alike class via `new_class_templates:` (octave clefs copy
-`clefG` — same structural role). The old wrapper's adapted neck is
-deliberately dropped: the detector underneath moved, and re-adapting the
-neck to it (with `unfreeze: neck` + the phase-4 jitter) is the actual work
-of this phase. Regenerate annotations *and* graphs (Stage 2) before it so
-the new classes exist as nodes.
+**Monitoring.** TensorBoard is in `<out>/tb`. Watch:
+- per-edge-class F1;
+- the topology deltas. Deltas frozen at identical values across evals mean
+  the model has collapsed into an attractor: all-background, or the
+  inverse rare-class flood. See graph.md §4 for the diagnosis and §5 for
+  the fixes.
 
-Common settings: `detector_checkpoint:` → the Stage-3 consolidation run;
-`img_dir`/`ann_dir`/`graph_dir` → the Stage-2 triplet; `config:` stays
-`conf/config.json`. `fine_tune:` accepts an HF checkpoint dir and
-warm-starts the whole wrapper. **After any unfrozen phase, re-run
-`eval-model` on the detector**: the same backbone serves detection at
-inference, and joint fine-tuning can silently degrade box quality.
+The joint run logs its edge and detection losses separately.
 
-Candidate edges come from `heuristics.generate_axis_aware_edges` (vertical,
-staff-lane horizontal, kNN safety net); the GNN classifies candidates, so
-recall is capped by the heuristics — if an edge type never appears as a
-candidate, no amount of training recovers it.
+**After a detector class change** (full track): train-gnn's phase 5
+widens the GNN's class embedding instead of retraining (graph.md §3, "in
+reserve"). Regenerate the annotations *and* graphs first, so the new
+classes exist as nodes.
 
-Monitoring (eval runs every `eval_steps`; TensorBoard in `runs_gnn/`):
-watch per-edge-class F1 (all six classes) *and* the topology deltas.
-Topology deltas frozen at identical values across evals mean the model has
-collapsed into an attractor (all-background, or the inverse rare-class
-flood) — see graph.md §4 for the diagnosis recipe and §5 for the fixes.
-Phase-1 reference: macro-F1 0.825 after 30 epochs (~2.2 h on an RTX 5090
-at ~20 it/s).
+## Training on the DGX Spark
 
-## Stage 5 — Validate the serializer (no models involved)
-
-Before judging the models, pin down the serializer's ceiling on perfect
-input by running it directly on ground-truth graphs:
+The Spark (`dgx-spark@spark-458f.local`, GB10, 119 GB unified memory) is
+about 5× slower than an RTX 5090 but free to run for a day. Each pipeline
+takes about a day there:
+- detector: 25 h, at 3.0 it/s;
+- GNN: 21 h (phase 1 7.0 h, phase 2 3.8 h, joint 9.9 h).
 
 ```
-uv run validate-groundtruth --graph_dir <d>/graphs --json_dir <d>/annotations \
-                            --out_dir <d>/krn-me --roles_file conf/structure.json
-uv run compare-kern --mei_dir <d>/mei --krn_dir <d>/krn-me
+# once, from this machine: the three datasets (~11 GB, ~2 min)
+rsync -a data/train-lite data/validation-lite data/synthetic-lite \
+    dgx-spark@spark-458f.local:kakigori/data/
+
+# on the Spark, after pushing the code from here
+ssh dgx-spark@spark-458f.local
+export PATH="$HOME/.local/bin:$PATH"            # uv is not on the non-interactive PATH
+cd ~/musicset && git pull && cd ~/kakigori && git pull && uv sync
+tmux new-session -d -s full './pipeline-full.sh checkpoints_lite_896s checkpoints_gnn_lite_896s'
+tail -f pipeline-full.log
+
+# back here, when it is done (the detection cache can stay there)
+rsync -a --exclude detections-train dgx-spark@spark-458f.local:kakigori/checkpoints_lite_896s \
+    dgx-spark@spark-458f.local:kakigori/checkpoints_gnn_lite_896s .
 ```
 
-Current ceiling on `data/validation-test`: **99.9% pitch / 99.9% rhythm**
-(see "Serializer status & TODO" in the README for what the last 0.1% is).
-Any end-to-end score is bounded above by this number — regressions here are
-serializer bugs, not model problems.
+The pipelines resume after a reboot: relaunch the same tmux command. The
+evaluations in a pipeline log are scored with the code of the time. When
+the serializer or the repairs change, rescore the runs (Stage 5) before
+comparing.
 
-## Stage 6 — End-to-end test on *predicted* graphs
+## Stage 5 — Measure: three paths to `**kern`
 
-This is the step that answers "does the graph model work":
+Three paths over the same validation set separate where errors come from
+(graph.md §7):
 
 ```
-uv run validate-predictions --graph_dir <d>/graphs --json_dir <d>/annotations \
-    --img_dir <d>/imgs --out_dir <d>/krn-pred \
-    --gnn_checkpoint checkpoints_gnn/run_NNN
-uv run compare-kern --mei_dir <d>/mei --krn_dir <d>/krn-pred
+VAL=data/validation-lite
+RUN=checkpoints_gnn_lite_896/run_003
+
+# ceiling: the serializer alone, on ground-truth graphs
+uv run validate-groundtruth --graph_dir $VAL/graphs --json_dir $VAL/annotations \
+    --out_dir $VAL/krn-me --roles_file conf-lite/structure.json
+
+# GT boxes: the GNN + edge repairs, on ground-truth boxes
+uv run validate-predictions --graph_dir $VAL/graphs --json_dir $VAL/annotations \
+    --img_dir $VAL/imgs --out_dir $VAL/krn-gt --gnn_checkpoint $RUN \
+    --config conf-lite/config.json --roles_file conf-lite/structure.json
+
+# detections: the whole pipeline, as at inference
+uv run validate-detections --img_dir $VAL/imgs --mei_dir $VAL/mei --out_dir $VAL/krn-det \
+    --detector-checkpoint $RUN --gnn-checkpoint $RUN \
+    --config conf-lite/config.json --roles_file conf-lite/structure.json
+
+uv run compare-kern --mei_dir $VAL/mei --krn_dir $VAL/krn-det
 ```
 
-`validate-predictions` mirrors `validate-groundtruth` but replaces the
-ground-truth edge labels with GNN predictions: per page it letterboxes the
-image, runs the (wrapper-checkpoint) detector features + heuristic
-candidates + GNN, maps predicted edges back to annotation node ids, injects
-the one scaffold the GNN structurally cannot predict (system→measure —
-system nodes are excluded from the per-system groups), and hands the result
-to `MinimalHumdrumSerializer`. Compare against the ceiling (`compare-kern`
-on `validate-groundtruth` output for the *same* dataset) to separate
-serializer limitations from model errors.
+- **`compare-kern` output:** pitch and rhythm recall (`TOTAL`), pitch
+  precision and F1 with the output's note count relative to the ground
+  truth (`PITCH PRECISION / F1 (1.15x notes out)`), and the median file.
+  - Recall alone hides extra notes. Always read the precision line.
+  - Scores that produced no kern are listed and excluded from the totals.
+- **Ablations:**
+  - `--no-repair` disables the edge repairs.
+  - `--no-bbox-repair` disables the box repairs.
+  - Each repair is also individually toggleable in code, for A/B runs.
+- **Noise:** GNN inference is nondeterministic (cuDNN), about ±0.5 per
+  file. Validate heuristics on the deterministic ceiling path, or on
+  aggregate deltas well above the noise.
 
-Predicted edges pass through `graph/graph_repair.py` before serialization:
-guarded spatial heuristics that recover the *geometric certainties* the GNN
-loses (note→notehead→stem chains, meterSig digits, keySig accidentals,
-staff context, orphaned events) without ever overriding a model prediction.
-Ownership means structural/modifier parenthood — temporal/sync neighbors
-never satisfy a guard — and class checks are exact (`"note"` must not
-prefix-match `"noteheadBlack"`; that single bug cost 42 pitch points).
-Repairs are individually toggleable (`enabled`/`loose`) for ablations;
-`--no-repair` gives the raw-GNN baseline.
+Current numbers (validation-lite, 500 scores, 57,398 notes; joint run
+`checkpoints_gnn_lite_896/run_003`):
 
-Reference numbers on `data/validation-small` (GT boxes; ceiling with GT
-edges 95.5% pitch / 94.3% rhythm): the 107-class stack reached 89.6% /
-76.6% (median file 97.9% pitch), up from 39.5% / 23.2% without repairs.
-The 109-class stack (detector `run_006` + phase-5 GNN at f1_macro 0.856)
-initially landed at 89.7% / 76.6% with individual files swinging up to
-±26 pitch points; edge-level diagnosis of those swings (compare predicted
-edges against the graph `.pt` labels, per relation family) attributed them
-to missed `measure→staff` links and stems/flags blocked from repair by the
-any-edge guard, and the second repair iteration (repair 10 + selective
-structural guards) brought the stack to 91.6% / 78.3%. Two measured
-negatives worth remembering: chord→note recovery by containment pulls in
-other-voice notes (net-negative, default-off as repair 11), and temporal
-chain bridging changes nothing (the serializer's cx fallback already
-orders identically — default-off as repair 12). Serializer hardening on top of the repairs, in order: grace detection
-relative to the page's median notehead height (one small-notehead render
-style serialized a whole file as grace notes); C-clef staff lines measured
-from the glyph's position (`*clefC1`–`*clefC5`; one 6-part early-music
-score went 57%/51% → 97%/95% at the ceiling); and staff-identity tracking
-for optimized layouts (pages buffered, spines sized from the widest
-system, reduced systems' rows mapped to parts by monotone DP over printed
-clef/key evidence, hidden parts padded with full-measure rests — full
-measures still map by order, and the predicted path y-filters rows and
-rejects double-mapped parts so bad edges can't desynchronize spines).
-Current stack: **93.2% / 80.4%** against a ceiling of **98.4% / 97.7%**
-(validation-small); held-out test-small: 82.3% / 75.0% against a
-90.0% / 89.0% ceiling. Investigating the worst files showed no
-actually-missing systems — the residue is broken sources (gestural-only
-accidentals, tablature) and orchestral scores whose full part set never
-appears in one system (identification needs label OCR).
-Caveat for future measurements: GNN inference is nondeterministic (cuDNN),
-giving a ~±0.5 per-file noise floor end-to-end — validate heuristics on
-the deterministic ceiling path or on aggregate deltas well above noise.
+| path | pitch recall | rhythm recall | pitch precision | pitch F1 | median file (pitch) |
+| --- | --- | --- | --- | --- | --- |
+| ceiling | 99.8 | 99.6 | 99.8 | 99.8 | 100.0 |
+| GT boxes | 97.2 | 93.2 | 90.4 | 93.7 | 99.1 |
+| detections | 82.3 | 77.5 | 71.7 | 76.6 | 92.4 |
 
-**Held-out generalization** (`data/test-small`, 224 unseen scores / 484
-pages / 82.6k notes, curated from `raw/` with the old `filter-mxl`, 2026-07-17):
-detector mAP@.50 0.722 / .50:.95 0.637 (validation-small: 0.724/0.644) —
-no overfitting. Ceiling 90.0% / 89.0% with **median file 100% / 100%**
-(200 of 223 files ≥99% pitch); end-to-end 82.3% / 75.0%. The model-path
-cost over the ceiling matches validation-small, confirming the GNN +
-repairs transfer. The aggregate residue is two huge orchestral scores
-whose full part set never appears in a single system — geometric identity
-cannot name their rows (label OCR territory); together they hold ~12% of
-the corpus notes.
+**Finding the bottleneck:** substitute ground-truth boxes for one part of
+the detection path at a time (systems, rows, measures, glyphs), keeping
+everything else, and see which swap recovers the most (graph.md §7). The
+current lever is measure segmentation.
 
-**Stage 6b — the detection-driven path** (`validate-detections`, the
-honest `infer-omr` measurement: detector boxes only). Baseline was 5.1% /
-3.2% with only 104/201 scores serializing — structural detection at
-inference thresholds misses 64% of measures, 44% of systems, 38% of staff
-rows. `graph/bbox_repair.py` recovers the skeleton before the graph is
-built: band-NMS FP filtering (systems/rows never y-overlap; one 0.30-score
-"blanket" system turned a solo piece into a phantom duet), systems from
-uncovered structure bands, measures from barline x-clusters (barlines
-detect at ~0.86), staff rows from fixed-line-clef geometry (a clef bbox
-determines its row EXACTLY — constants have zero variance), and cells from
-measure×row intersections. Together with graph repair 13 (orphan
-beam/tuplet/layer subtrees → containing staff; on detections, container
-chains break constantly): **29.0% / 23.3%**, 201/201 scores, median 33%,
-best files 90–93%. The GT-box path is unaffected by any of it. The
-remaining gap is the edge model meeting detection noise it never saw —
-v0.2.0: train the GNN on detected boxes with GT-matched edge labels.
+## Stage 6 — Look at the output
 
-> **Roadmap:** `MinimalHumdrumSerializer` stays the minimal variant;
-> `graph_repair` (edges) and `bbox_repair` (detections) carry the
-> hardening iterations. Missing-system recovery on the GT-box path was
-> investigated and not needed, but IS needed and implemented on the
-> detection path (bbox repairs 1/4/5). Temporal bridging: measured, no
-> effect (repair 12, default-off). Next: GNN trained on detections
-> (v0.2.0 headline), instrument-label OCR for never-full orchestral
-> scores. `validate-predictions`/`validate-detections` keep every stage
-> swappable for A/B.
+**On a labelled set:**
 
-Also useful: `graph/eval.py` (SER/CER/LER on kern text) for
-sequence-level comparison.
+```
+uv run musicset view data/validation-lite --labels lite --pred-kern data/validation-lite/krn-det
+```
+
+The Kern tab shows, side by side:
+- the source pages;
+- the ground-truth kern and the predicted kern, both engraved by Verovio
+  at the same width;
+- each kern's scores against the MEI.
+
+Order the scores worst first to find failure patterns. Checkboxes hide
+any column, and the kern texts can be shown below.
+
+**On real scans** (no ground truth):
+
+```
+uv run infer-omr --pdf <score>.pdf --detector-checkpoint $RUN --gnn-checkpoint $RUN \
+    --config conf-lite/config.json --roles_file conf-lite/structure.json \
+    --output-dir inference_out/<name> --split
+uv run python scripts/qa_views.py inference_out/<name>
+```
+
+`qa_views.py` writes, per page:
+- `overlay/`: the scan with the structure the serializer reads after box
+  repair. Rows show with their assumed five staff lines, along with
+  systems, measures and clefs. A misplaced row is the first thing to look
+  for.
+- `render/`: the predicted kern engraved on white.
+
+`musicset view <set> --scans <dir>` puts real scans next to the
+augmentation preview.
+
+## Full track (0.1.x) reference
+
+The full track (`conf/`, ConvNeXt-B DINOv3 detector, 109 classes) was
+trained with the same stages, run by hand:
+
+- **Detector:** `./train.sh` with `conf/train.yaml`, then
+  `conf/fine_tune.yaml` and `conf/consolidation.yaml`, updating each
+  `fine_tune:` path.
+- **Class expansion:** `retrain-model` with `conf/update_model.yaml`
+  (`old_num_classes: N`). It copies the old head weights positionally
+  (hence *append* classes, never reorder) and gives the new slots the focal
+  bias prior. It then trains with a frozen backbone, then fully unfrozen.
+  - Before launching, make sure every annotation source contains the new
+    labels, synthetic sets included. Rebuilding with the new conf
+    re-projects without re-rendering.
+  - Reference: 107 → 109 classes (`run_004`, then `run_006` at mAP@.50
+    0.724).
+- **GNN:** phases 1, 2, 4 and 5 (`conf/train_gnn_phase*.yaml`) with
+  `./train.sh uv run train-gnn --train-config ... --resume`. Pre-create the
+  next `checkpoints_gnn/run_NNN`, and point each `fine_tune:` at the
+  previous phase. Phase-1 reference: macro-F1 0.825 after 30 epochs
+  (~2.2 h on an RTX 5090).
+
+Results (recall only):
+
+| set | ceiling | GT boxes + predicted edges | detections |
+| --- | --- | --- | --- |
+| validation-small | 98.4 / 97.7 | 93.2 / 80.4 | 29.0 / 23.3 (median 33) |
+| test-small (224 unseen scores) | 90.0 / 89.0 | 82.3 / 75.0 | — |
+
+Lessons from that track that still apply:
+- **Class checks in repairs must be exact.** `"note"` must not
+  prefix-match `"noteheadBlack"`; that single bug cost 42 pitch points.
+- **Ownership means structural or modifier parenthood.** Temporal and
+  sync neighbours never satisfy a repair guard.
+- **Two measured negatives.** Chord → note recovery by containment pulls
+  in other-voice notes (repair 11, default off). Temporal chain bridging
+  changes nothing (repair 12, default off).
+- **Serializer hardening:**
+  - grace notes are detected relative to the page's median notehead
+    height;
+  - C-clef staff lines are measured from the glyph's position;
+  - staff identity is tracked for optimized layouts (reduced systems
+    mapped to parts by clef and key evidence, hidden parts padded with
+    rests).
+- **The test-small residue** is broken sources (gestural-only accidentals,
+  tablature) and orchestral scores whose full part set never appears in
+  one system. Naming their rows needs instrument-label OCR.
+
+`graph/eval.py` (SER/CER/LER on the kern text) gives a sequence-level
+comparison.
 
 ## Quick reference — what feeds what
 
 | Artifact | Produced by | Consumed by |
 | --- | --- | --- |
-| `imgs/*.png` | `musicset build` | vision + GNN training, inference |
-| `annotations/*.json` | `musicset build` | vision targets, GNN nodes, serializer bboxes |
-| `mei/*.mei` | `musicset build` | graphs, `compare-kern` |
-| `graphs/*.json` | `musicset build --graph` | GNN targets, `validate-groundtruth` |
-| `checkpoints/run_NNN` | `train-model` | `train-gnn` (frozen), `infer-model` |
-| `checkpoints_gnn/run_NNN` | `train-gnn` | Stage-6 inference |
-| `krn-me/*.krn` | `validate-groundtruth` | `compare-kern`, `eval.py` |
+| `<set>/imgs`, `annotations`, `graphs`, `mei`, `kern` | `musicset build` (`regenerate-dataset.sh`) | training, validation, `compare-kern`, `musicset view` |
+| `checkpoints_lite_896s/run_NNN` | `pipeline-lite.sh` (`train-model`) | `pipeline-gnn.sh`, `eval-model`, `visualize-model` |
+| `checkpoints_gnn_lite_896s/run_NNN` | `pipeline-gnn.sh` (`train-gnn`, `train-joint`) | `validate-*`, `infer-omr`; the last run (stage D) as detector and GNN |
+| `<out>/pipeline.log`, `eval_<stage>.log` | the pipelines | you, with `tail -f` |
+| `<out>/krn-{gt,det,det-prune}-<stage>/` + `.compare.txt` | `pipeline-gnn.sh` | stage comparisons |
+| `<out>/detections-train/` | `cache-detections` | stage D training (`det_dir`) |
+| `pipeline-full.log` | `pipeline-full.sh` | you, with `tail -f` |
+| `krn-me/`, `krn-gt/`, `krn-det/` | `validate-groundtruth` / `-predictions` / `-detections` | `compare-kern`, `musicset view --pred-kern` |
+| `inference_out/<name>/` | `infer-omr --split` | `scripts/qa_views.py` |

@@ -21,6 +21,29 @@ DEFAULT_SCALE_RANGES = {
 # The 0.1.x detectors (released weights included): ImageNet-pretrained, RGB
 LEGACY_BACKBONE = "convnext_base.dinov3_lvd1689m"
 
+# A target cell regresses one box per slot. With a single slot, 21% of the
+# lite training boxes shared their cell with another box of their level and
+# lost their regression target to it (measure/staff/layer of one staff,
+# a notehead under its note, a beam centred on a note, keySig over its one
+# accidental, system over its only row). Structure classes get a slot each,
+# composites (boxes drawn around other annotated glyphs) one together, and
+# every other glyph slot 0: 0.4% of the boxes still share a slot.
+STRUCTURE_SLOT_CLASSES = ("system", "system-staff", "measure", "staff", "layer", "page-margin")
+COMPOSITE_SLOT_CLASSES = ("note", "chord", "keySig", "meterSig", "mRest", "tuplet")
+
+
+def regression_slots(class_list) -> list[int]:
+    """Each class's regression slot (see STRUCTURE_SLOT_CLASSES): numbered
+    over the classes present, slot 0 for the plain glyphs."""
+    slots = {}
+    for name in STRUCTURE_SLOT_CLASSES:
+        if name in class_list:
+            slots[name] = len(slots) + 1
+    composite = len(slots) + 1
+    present = [name for name in COMPOSITE_SLOT_CLASSES if name in class_list]
+    slots.update({name: composite for name in present})
+    return [slots.get(name, 0) for name in class_list]
+
 
 def timm_backbone(name: str, out_indices, pretrained: bool = True) -> nn.Module:
     """A pretrained timm feature extractor; grey pages are repeated to RGB.
@@ -88,15 +111,26 @@ def detector_layout(state_dict: dict, prefix: str = "") -> dict:
     if f"{prefix}input_wh" in state_dict:
         width, height = (int(v) for v in state_dict[f"{prefix}input_wh"].tolist())
         layout["input_size"] = (width, height)
+    if f"{prefix}reg_slot" in state_dict:
+        layout["reg_slots"] = [int(v) for v in state_dict[f"{prefix}reg_slot"].tolist()]
     return layout
 
 
 class MusicDetector(nn.Module):
     def __init__(self, num_classes=91, use_bottom_up=False, out_indices=(0, 1, 2),
-                 backbone=DEFAULT_BACKBONE, pretrained=True, input_size=640, scale_ranges=None):
+                 backbone=DEFAULT_BACKBONE, pretrained=True, input_size=640, scale_ranges=None,
+                 reg_slots=None):
         super().__init__()
         self.backbone_name = backbone
         self.out_indices = tuple(out_indices)
+
+        # Each class's regression slot (regression_slots; None: one shared
+        # slot, the pre-slot detectors), stored with the weights
+        reg_slots = list(reg_slots) if reg_slots is not None else [0] * num_classes
+        if len(reg_slots) != num_classes:
+            raise ValueError(f"{len(reg_slots)} regression slots for {num_classes} classes")
+        self.register_buffer("reg_slot", torch.tensor(reg_slots, dtype=torch.long))
+        num_slots = max(reg_slots) + 1
 
         # The canvas the detector is trained and run at, (width, height): it
         # travels with the weights so every tool letterboxes pages the same way
@@ -120,7 +154,7 @@ class MusicDetector(nn.Module):
         # 3. The Heads (One for each feature scale)
         # We use a ModuleList because we need a head for the micro, mid, and macro features
         self.heads = nn.ModuleList(
-            [DecoupledHead(hidden_dim, num_classes) for _ in range(len(out_indices))]
+            [DecoupledHead(hidden_dim, num_classes, num_slots) for _ in range(len(out_indices))]
         )
 
     @property
@@ -157,6 +191,8 @@ class MusicDetector(nn.Module):
         outputs = []
         for feature, head in zip(fused_features, self.heads):
             cls_out, reg_out = head(feature)
-            outputs.append({"cls": cls_out, "reg": reg_out})
+            # "reg": 4 channels (tx, ty, log w, log h) per slot; "reg_slot"
+            # tells decoders and losses which slot holds each class's box
+            outputs.append({"cls": cls_out, "reg": reg_out, "reg_slot": self.reg_slot})
 
         return outputs

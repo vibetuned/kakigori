@@ -36,7 +36,7 @@ from musicset.views.kern import MinimalHumdrumSerializer
 from .graph_repair import repair_page_edges
 from .bbox_repair import repair_page_boxes
 from .validate_predictions import (
-    _load_gnn, predict_page_edges, _inject_system_measure_edges,
+    _load_gnn, predict_page_edges, _inject_system_measure_edges, prune_nodes,
 )
 from kakigori.vision.utils import load_detector, decode_model_outputs
 from kakigori.vision.infer import pdf_to_pages, preprocess
@@ -46,6 +46,13 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+
+# Temporal anchors are decoded multi-label only where they are the cell's
+# argmax: as a secondary label they carry a notehead's box and become
+# duplicate events (validation-lite: notes out 1.25x -> 1.16x of the truth,
+# pitch F1 73.3 -> 74.6; real scans: ~2.4x fewer notes)
+ARGMAX_ONLY_CLASSES = ("note", "chord")
 
 
 @torch.inference_mode()
@@ -59,7 +66,10 @@ def detect_page_nodes(detector, page_image: Image.Image, page_idx: int,
     input_size = input_size or detector.input_size
     tensor, meta = preprocess(page_image, input_size, device)
     outputs = detector(tensor)
-    preds = decode_model_outputs(outputs, conf_thresh, iou_thresh, input_size, multi_label=multi_label)[0]
+    argmax_only = [class_list.index(c) for c in ARGMAX_ONLY_CLASSES if c in class_list]
+    preds = decode_model_outputs(
+        outputs, conf_thresh, iou_thresh, input_size, multi_label=multi_label, argmax_only=argmax_only
+    )[0]
 
     nodes = []
     boxes = canvas_to_page(preds["boxes"].float().cpu(), meta)
@@ -103,6 +113,9 @@ def main():
                         help="Disable the spatial graph-repair heuristics")
     parser.add_argument("--no-bbox-repair", action="store_true",
                         help="Disable detection-level structure box repairs")
+    parser.add_argument("--prune-threshold", type=float, default=0.0,
+                        help="Drop events, measures and barlines the GNN's keep head scores "
+                        "below this (0: off)")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -156,9 +169,12 @@ def main():
             continue
         if not args.no_bbox_repair:
             repair_page_boxes(page_nodes, page_prefix=f"p{page_idx}")
+        keep_probs = {}
         page_edges = predict_page_edges(
-            gnn_wrapper, page_nodes, img_path, class_to_idx, device,
+            gnn_wrapper, page_nodes, img_path, class_to_idx, device, keep_probs=keep_probs,
         )
+        if args.prune_threshold > 0:
+            prune_nodes(page_nodes, page_edges, keep_probs, args.prune_threshold)
         _inject_system_measure_edges(page_nodes, page_edges)
         if not args.no_repair:
             repair_page_edges(page_nodes, page_edges)

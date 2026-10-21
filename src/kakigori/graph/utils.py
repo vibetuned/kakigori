@@ -1,4 +1,42 @@
 import torch
+from scipy.optimize import linear_sum_assignment
+from torchvision.ops import box_iou
+
+# Structure boxes must overlap their ground truth more than glyphs: a measure
+# at IoU 0.3 may be half of another measure, a 3 px stem at 0.5 may be exact
+STRUCTURE_MATCH_CLASSES = ("system", "system-staff", "measure", "staff", "layer")
+STRUCTURE_MIN_IOU, GLYPH_MIN_IOU = 0.5, 0.3
+# Classes matched as one: a detection of the right object with the wrong
+# variant (beam8 for beam16: detected beams match a ground-truth beam of some
+# class at a median IoU of 0.97, of their own class at 0.0-0.93) still takes
+# its edges
+MATCH_GROUP_PREFIXES = ("beam", "stem", "notehead")
+
+
+def match_detections(det_boxes, det_labels, gt_boxes, gt_labels, class_list) -> dict:
+    """{gt index: detection index}: per class (MATCH_GROUP_PREFIXES: per
+    group), a Hungarian assignment on IoU, pairs below the class's minimum
+    IoU left unmatched (xyxy boxes)."""
+    structure = {class_list.index(c) for c in STRUCTURE_MATCH_CLASSES if c in class_list}
+    group = torch.arange(len(class_list))
+    for prefix in MATCH_GROUP_PREFIXES:
+        members = [i for i, c in enumerate(class_list) if c.startswith(prefix)]
+        if members:
+            group[members] = members[0]
+    gt_group, det_group = group[gt_labels.cpu()], group[det_labels.cpu()]
+    matched = {}
+    for g in torch.unique(gt_group).tolist():
+        gi = torch.nonzero(gt_group == g).flatten()
+        di = torch.nonzero(det_group == g).flatten()
+        if len(gi) == 0 or len(di) == 0:
+            continue
+        iou = box_iou(gt_boxes[gi].float(), det_boxes[di].float()).cpu().numpy()
+        rows, cols = linear_sum_assignment(-iou)
+        min_iou = STRUCTURE_MIN_IOU if g in structure else GLYPH_MIN_IOU
+        for r, c in zip(rows, cols):
+            if iou[r, c] >= min_iou:
+                matched[int(gi[r])] = int(di[c])
+    return matched
 
 def omr_collate_fn(batch):
     """
@@ -33,6 +71,10 @@ def omr_collate_fn(batch):
     if batch and "det_boxes" in batch[0]:
         out["det_boxes"] = [item["det_boxes"] for item in batch]
         out["det_labels"] = [item["det_labels"] for item in batch]
+    # Per-node detection features and keep targets (stage D)
+    for key in ("scores", "synthesized", "keep", "from_detections"):
+        if batch and key in batch[0]:
+            out[key] = [item[key] for item in batch]
     return out
 def split_into_systems(abs_boxes, labels, gt_edges, class_to_idx):
     """

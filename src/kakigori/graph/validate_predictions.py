@@ -19,7 +19,9 @@ from .graph_repair import repair_page_edges
 from .validate_groundtruth import _load_and_resolve_nodes, _build_page_nodes
 from .utils import split_into_systems
 from .heuristics import generate_axis_aware_edges
-from .model import GraphVisualExtractor, ScoreGraphReconstructor, GNNPhase2Model
+from .model import (
+    GraphVisualExtractor, ScoreGraphReconstructor, GNNPhase2Model, node_features, is_synthesized,
+)
 import torchvision.transforms.functional as TF
 from kakigori.vision.model import MusicDetector, detect_backbone, detector_layout
 from kakigori.vision.utils import complete_legacy_state
@@ -62,7 +64,10 @@ def _load_gnn(checkpoint_dir: str, device):
         ),
         GraphVisualExtractor(),
         ScoreGraphReconstructor(
-            node_in_dim=256 + 4 + 32, num_classes=num_classes, class_embed_dim=32
+            # with or without the detection features and the keep head
+            node_in_dim=weights["gnn.conv1.lin_l.weight"].shape[1],
+            num_classes=num_classes, class_embed_dim=32,
+            node_head=any(k.startswith("gnn.node_classifier.") for k in weights),
         ),
     )
     model.load_state_dict(complete_legacy_state(model, weights), strict=True)
@@ -74,9 +79,10 @@ def _load_gnn(checkpoint_dir: str, device):
 
 @torch.no_grad()
 def predict_page_edges(model, page_nodes: list, img_path: Path,
-                       class_to_idx: dict, device, input_size=None) -> list:
+                       class_to_idx: dict, device, input_size=None, keep_probs: dict | None = None) -> list:
     """Run detector features + GNN over one page; return (u_id, v_id, cls).
-    ``input_size``: the detector's own canvas unless given."""
+    ``input_size``: the detector's own canvas unless given. ``keep_probs``:
+    filled with node id -> the keep head's probability (GNNs with one)."""
     canvas, geo = letterbox_image(Image.open(img_path).convert("L"), input_size or model.detector.input_size)
     img = TF.to_tensor(canvas).to(device)
 
@@ -108,14 +114,21 @@ def predict_page_edges(model, page_nodes: list, img_path: Path,
         sx1, sy1, _, _ = group["system_bbox"]
         rel[:, [0, 2]] -= sx1
         rel[:, [1, 3]] -= sy1
-        x = torch.cat(
-            # normalised by the canvas width, as in GNN training (img.shape[-1])
-            [roi, rel / geo["canvas_w"], model.gnn.class_embedding(group["labels"])], dim=1
+        local = group["node_indices"].cpu().tolist()
+        x = node_features(
+            # boxes normalised by the canvas width, as in GNN training (img.shape[-1])
+            model.gnn, roi, rel / geo["canvas_w"], group["labels"],
+            scores=torch.tensor([float(page_nodes[i].get("score", 1.0)) for i in local], device=device),
+            synthesized=torch.tensor([float(is_synthesized(page_nodes[i])) for i in local], device=device),
         )
         candidates = generate_axis_aware_edges(rel, group["labels"], class_to_idx)
         if candidates.shape[1] == 0:
             continue
-        classes = model.gnn(x, candidates).argmax(dim=1)
+        edge_logits, node_logits = model.gnn(x, candidates, return_nodes=True)
+        if keep_probs is not None and node_logits is not None:
+            for i, p in zip(local, node_logits.sigmoid().tolist()):
+                keep_probs[node_ids[i]] = p
+        classes = edge_logits.argmax(dim=1)
 
         keep = classes > 0
         if not keep.any():
@@ -129,6 +142,27 @@ def predict_page_edges(model, page_nodes: list, img_path: Path,
             predicted.append((u, v, int(cls[j])))
 
     return predicted
+
+
+# What the keep head may remove: events, measures and barlines (the extra
+# notes and measures of the detection path). Staff cells, rows and glyphs
+# stay: a lost cell drops a whole staff of a measure.
+PRUNE_CLASSES = ("note", "chord", "mRest", "measure")
+PRUNE_PREFIXES = ("rest", "barline")
+
+
+def prune_nodes(page_nodes: list, edges: list, keep_probs: dict, threshold: float) -> int:
+    """Drop the prunable nodes whose keep probability is below ``threshold``,
+    with their edges (both lists in place). Returns how many were dropped."""
+    drop = {
+        n["id"] for n in page_nodes
+        if (n["class"] in PRUNE_CLASSES or n["class"].startswith(PRUNE_PREFIXES))
+        and keep_probs.get(n["id"], 1.0) < threshold
+    }
+    if drop:
+        page_nodes[:] = [n for n in page_nodes if n["id"] not in drop]
+        edges[:] = [e for e in edges if e[0] not in drop and e[1] not in drop]
+    return len(drop)
 
 
 def _inject_system_measure_edges(page_nodes: list, edges: list):

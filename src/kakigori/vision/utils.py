@@ -96,7 +96,7 @@ def resolve_weights(checkpoint_path: str) -> Path | None:
 
 def _checkpoint_tensors(checkpoint_path: str, prefix: str = "") -> dict:
     """A detector checkpoint's weights as shapes only (meta tensors), except
-    the small ``input_wh`` buffer, which is read for its value."""
+    the small ``input_wh`` and ``reg_slot`` buffers, read for their values."""
     weights = resolve_weights(checkpoint_path)
     if weights is None:
         raise FileNotFoundError(f"no weights under {checkpoint_path}")
@@ -110,7 +110,7 @@ def _checkpoint_tensors(checkpoint_path: str, prefix: str = "") -> dict:
         for k in f.keys():
             if not k.startswith(prefix):
                 continue
-            if k == f"{prefix}input_wh":
+            if k in (f"{prefix}input_wh", f"{prefix}reg_slot"):
                 tensors[k] = f.get_tensor(k)
             else:
                 tensors[k] = torch.empty(f.get_slice(k).get_shape(), device="meta")
@@ -190,11 +190,12 @@ def detector_for_checkpoint(checkpoint_path: str, num_classes: int, prefix: str 
 
 
 def complete_legacy_state(model, state: dict) -> dict:
-    """Detectors from before the canvas and scale ranges were stored keep the
-    model's: square 640 (what detector_for_checkpoint gives them) and the
-    default 3-level ranges they were trained with."""
+    """Detectors from before the canvas, scale ranges and regression slots
+    were stored keep the model's: square 640 (what detector_for_checkpoint
+    gives them), the default 3-level ranges and the one shared slot they were
+    trained with."""
     for key, value in model.state_dict().items():
-        if key.endswith(("input_wh", "level_areas")) and key not in state:
+        if key.endswith(("input_wh", "level_areas", "reg_slot")) and key not in state:
             state[key] = value
     return state
 
@@ -245,7 +246,8 @@ def load_checkpoint(
         model.eval()
 
 
-def decode_model_outputs(outputs, conf_thresh, iou_thresh, input_size, multi_label=True):
+def decode_model_outputs(outputs, conf_thresh, iou_thresh, input_size, multi_label=True,
+                         argmax_only=None):
     """
     Decodes multi-scale raw model outputs into absolute pixel bounding boxes
     on the canvas (``input_size``: int or (width, height)).
@@ -256,6 +258,11 @@ def decode_model_outputs(outputs, conf_thresh, iou_thresh, input_size, multi_lab
     classes centred on a cell positive, and with the argmax coincident boxes
     (measure/staff/layer of a single staff, mRest over its whole-rest glyph,
     a one-accidental keySig) suppress each other.
+
+    ``argmax_only``: class indices emitted (with ``multi_label``) only where
+    they are the cell's argmax. A secondary label carries the cell's box,
+    i.e. another class's: a secondary note/chord on a notehead cell becomes
+    a notehead-sized duplicate anchor that NMS cannot merge with the real one.
 
     Returns:
         list[dict]: A list of length BatchSize, containing dicts with "boxes", "scores", and "labels".
@@ -271,11 +278,22 @@ def decode_model_outputs(outputs, conf_thresh, iou_thresh, input_size, multi_lab
     for out in outputs:
         cls_map = out["cls"].sigmoid()
         reg_map = out["reg"]
+        # each class reads its box from its regression slot (one slot: 0)
+        reg_slot = out.get("reg_slot")
+        if reg_slot is None:
+            reg_slot = torch.zeros(cls_map.shape[1], dtype=torch.long, device=device)
 
         B, _, H, W = reg_map.shape
 
         if multi_label:
-            pos = (cls_map >= conf_thresh).nonzero(as_tuple=False)
+            keep = cls_map >= conf_thresh
+            if argmax_only:
+                secondary = torch.ones_like(keep)
+                secondary.scatter_(1, cls_map.argmax(dim=1, keepdim=True), False)
+                only = torch.zeros(cls_map.shape[1], dtype=torch.bool, device=device)
+                only[list(argmax_only)] = True
+                keep &= ~(secondary & only.view(1, -1, 1, 1))
+            pos = keep.nonzero(as_tuple=False)
             if pos.numel() == 0:
                 continue
             b_idx, cls_idx, y_idx, x_idx = pos[:, 0], pos[:, 1], pos[:, 2], pos[:, 3]
@@ -293,10 +311,11 @@ def decode_model_outputs(outputs, conf_thresh, iou_thresh, input_size, multi_lab
             scores = max_scores[b_idx, y_idx, x_idx]
             cls_idx = max_classes[b_idx, y_idx, x_idx]
 
-        tx = reg_map[b_idx, 0, y_idx, x_idx].sigmoid()
-        ty = reg_map[b_idx, 1, y_idx, x_idx].sigmoid()
-        tw = reg_map[b_idx, 2, y_idx, x_idx].exp()
-        th = reg_map[b_idx, 3, y_idx, x_idx].exp()
+        ch = 4 * reg_slot.to(device)[cls_idx]
+        tx = reg_map[b_idx, ch, y_idx, x_idx].sigmoid()
+        ty = reg_map[b_idx, ch + 1, y_idx, x_idx].sigmoid()
+        tw = reg_map[b_idx, ch + 2, y_idx, x_idx].exp()
+        th = reg_map[b_idx, ch + 3, y_idx, x_idx].exp()
 
         cx_n = (tx + x_idx) / W
         cy_n = (ty + y_idx) / H

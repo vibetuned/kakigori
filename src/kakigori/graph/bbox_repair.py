@@ -7,10 +7,11 @@ measure, staff cells, system-staff rows) whose detection AP is mediocre
 (0.52-0.77) compared to the glyphs they contain — one missing staff cell
 silently drops a measure of content, one missing system drops a whole band.
 
-Every repair only SYNTHESIZES a box whose geometry is derivable from other
-detections (unions of members, intersections of spans) and is guarded: it
-never moves or removes a detector prediction. Synthesized nodes carry
-score 0.0 so they remain distinguishable downstream.
+Repairs SYNTHESIZE boxes whose geometry is derivable from other detections
+(unions of members, intersections of spans); synthesized nodes carry score
+0.0 so they remain distinguishable downstream. Two repairs change detector
+predictions: 6 removes structure false positives, 7 moves row edges onto
+the geometry their clef determines.
 
 Repairs (numbered, toggleable via `enabled`, measured on validation-small):
   1. system from uncovered y-bands of measures + system-staff rows
@@ -20,6 +21,13 @@ Repairs (numbered, toggleable via `enabled`, measured on validation-small):
   4. measures from barlines: boundaries = x-clusters of barlines within a
      system band (barlines are the best-detected structural signal, ~0.86
      AP, vs 64%-missed measures at inference thresholds)
+  5. system-staff row from a fixed-line clef with no row under it
+  6. structure false-positive filtering (fragment rows, band-NMS, duplicates)
+  7. row y-extent from the row's clef: every pitch on a row is read from
+     its 5-line box, which the detector places a median 3.6 pitch steps
+     off; the clef-derived row is within half a step 96% of the time
+  8. duplicate temporal anchors: a note inside a note, a chord inside a
+     chord (a chord's member notes, inside it, are legitimate)
 """
 
 STRUCTURE_CLASSES = ("system", "system-staff", "measure", "staff")
@@ -37,7 +45,8 @@ CLEF_ROW_CONSTANTS = {
     "clefF":    (-0.510, 0.714),
 }
 
-ALL_BOX_REPAIRS = frozenset({1, 2, 3, 4, 5, 6})
+ALL_BOX_REPAIRS = frozenset({1, 2, 3, 4, 5, 6, 7, 8})
+ANCHOR_CLASSES = ("note", "chord")
 
 
 def _y_overlap(a_bbox, b_bbox) -> float:
@@ -53,6 +62,13 @@ def _union(bboxes) -> list:
         min(b[0] for b in bboxes), min(b[1] for b in bboxes),
         max(b[2] for b in bboxes), max(b[3] for b in bboxes),
     ]
+
+
+def _clef_row(clef: dict) -> tuple[float, float]:
+    """The 5-line row (y1, y2) a fixed-line clef sits on."""
+    a, b = CLEF_ROW_CONSTANTS[clef["class"]]
+    h = clef["bbox"][3] - clef["bbox"][1]
+    return clef["cy"] + a * h, clef["cy"] + b * h
 
 
 def _bands(nodes: list) -> list:
@@ -162,6 +178,54 @@ def repair_page_boxes(page_nodes: list, page_prefix: str = "p0",
             }
             page_nodes[:] = [n for n in page_nodes if n["id"] not in orphan]
 
+    # --- 8. duplicate temporal anchors. Every note/chord is one event: a
+    # box mostly (>80%) inside a higher-scoring box of the SAME class is the
+    # detector firing twice on one stack (real scans: two chords over one
+    # chord). Cross-class nesting is legitimate — a chord's member notes sit
+    # inside it — and is left alone.
+    if 8 in enabled:
+        for cls in ANCHOR_CLASSES:
+            group = sorted(of(cls), key=lambda n: -n.get("score", 0.0))
+            drop = set()
+            for i, hi in enumerate(group):
+                if hi["id"] in drop:
+                    continue
+                for lo in group[i + 1:]:
+                    if lo["id"] in drop:
+                        continue
+                    a, b = hi["bbox"], lo["bbox"]
+                    inter = max(0.0, _x_overlap(a, b)) * max(0.0, _y_overlap(a, b))
+                    smaller = min((a[2] - a[0]) * (a[3] - a[1]), (b[2] - b[0]) * (b[3] - b[1]))
+                    if smaller > 0 and inter > 0.8 * smaller:
+                        drop.add(lo["id"])
+            if drop:
+                page_nodes[:] = [n for n in page_nodes if n["id"] not in drop]
+
+    # --- 7. row y-extent from the row's clef. A row is a ~2000x80 px box
+    # regressed from a single stride-16 cell: the detector places its edges
+    # a median 3.6 pitch steps (row height / 8) off, and every pitch on the
+    # row is read from them. A fixed-line clef's bbox determines its row
+    # (CLEF_ROW_CONSTANTS): within half a step for 96% of the rows
+    # (validation-lite, 640x896 detector). The leftmost clef — the one
+    # restated at each system start — whose row is centred within ~3/4 of
+    # a row height of the detected row sets its y-extent; x stays detected.
+    if 7 in enabled:
+        clefs = sorted(
+            (n for n in page_nodes if n.get("class") in CLEF_ROW_CONSTANTS),
+            key=lambda n: n["bbox"][0],
+        )
+        for row in of("system-staff"):
+            r_x1, r_y1, r_x2, r_y2 = row["bbox"]
+            r_cy = (r_y1 + r_y2) / 2.0
+            for clef in clefs:
+                y1, y2 = _clef_row(clef)
+                if y2 - y1 <= 0 or not r_x1 - 20.0 <= clef["cx"] <= r_x2:
+                    continue
+                if abs((y1 + y2) / 2.0 - r_cy) <= 0.75 * (y2 - y1):
+                    row["bbox"] = [r_x1, round(y1, 1), r_x2, round(y2, 1)]
+                    row["cy"] = (y1 + y2) / 2.0
+                    break
+
     # --- 5. system-staff row from a fixed-line clef with no row under it.
     # Runs FIRST: rows feed pitch geometry (staff_space) and everything
     # downstream. Clefs detect at ~1.0 AP and their bbox determines the row
@@ -172,9 +236,8 @@ def repair_page_boxes(page_nodes: list, page_prefix: str = "p0",
         row_x1 = min((r["bbox"][0] for r in rows), default=None)
         row_x2 = max((r["bbox"][2] for r in rows), default=None)
         for clef in [n for n in page_nodes if n.get("class") in CLEF_ROW_CONSTANTS]:
-            a, b = CLEF_ROW_CONSTANTS[clef["class"]]
             h = clef["bbox"][3] - clef["bbox"][1]
-            y1, y2 = clef["cy"] + a * h, clef["cy"] + b * h
+            y1, y2 = _clef_row(clef)
             covered = any(
                 _y_overlap([0, y1, 0, y2], r["bbox"]) > 0.5 * (y2 - y1)
                 for r in of("system-staff")

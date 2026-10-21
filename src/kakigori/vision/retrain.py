@@ -264,6 +264,10 @@ def main():
             new_conv.bias[args.old_num_classes:].fill_(focal_bias)
             
         head.cls_branch[-1] = new_conv
+    # the appended classes regress in the glyph slot: the heads keep their slots
+    model.reg_slot = torch.cat([
+        model.reg_slot, model.reg_slot.new_zeros(num_classes - args.old_num_classes)
+    ])
 
     # 3. Freeze backbone and neck
     for param in model.backbone.parameters():

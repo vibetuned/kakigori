@@ -119,11 +119,40 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import GATv2Conv
 
+# Node features: RoI (256) + box (4) + class embedding (32), then the
+# detection features: the detector's score and whether bbox repair
+# synthesized the box (score 0). Ground-truth boxes are score 1, not
+# synthesized. Checkpoints from before the detection features have 292.
+ROI_DIM, BOX_DIM, CLASS_EMBED_DIM, DETECTION_DIM = 256, 4, 32, 2
+NODE_IN_DIM = ROI_DIM + BOX_DIM + CLASS_EMBED_DIM + DETECTION_DIM
+
+
+def is_synthesized(node: dict) -> bool:
+    """A box bbox_repair added (it carries score 0 and a 'bbr' id)."""
+    return "bbr" in str(node.get("id", "")) and node.get("score", 1.0) == 0.0
+
+
+def node_features(gnn, roi_feats, norm_boxes, labels, scores=None, synthesized=None):
+    """The GNN's node input: [RoI, box, class embedding(, score, synthesized)],
+    the detection features only for a GNN built with them."""
+    parts = [roi_feats, norm_boxes, gnn.class_embedding(labels)]
+    base_dim = sum(part.shape[1] for part in parts)
+    if gnn.node_in_dim == base_dim + DETECTION_DIM:
+        n = labels.shape[0]
+        if scores is None:
+            scores = roi_feats.new_ones(n)
+        if synthesized is None:
+            synthesized = roi_feats.new_zeros(n)
+        parts.append(torch.stack([scores.to(roi_feats), synthesized.to(roi_feats)], dim=1))
+    return torch.cat(parts, dim=1)
+
 
 class ScoreGraphReconstructor(nn.Module):
-    def __init__(self, node_in_dim, num_classes, class_embed_dim=32, hidden_dim=256, num_edge_classes=6, num_heads=4, dropout=0.2):
+    def __init__(self, node_in_dim, num_classes, class_embed_dim=32, hidden_dim=256, num_edge_classes=6, num_heads=4, dropout=0.2,
+                 node_head=False):
         super().__init__()
-        
+        self.node_in_dim = node_in_dim
+
         # 1. Class Embedding Layer
         # Maps the integer class ID (0 to num_classes-1) to a dense vector
         self.class_embedding = nn.Embedding(num_classes, class_embed_dim)
@@ -147,7 +176,16 @@ class ScoreGraphReconstructor(nn.Module):
             nn.Linear(hidden_dim // 2, num_edge_classes)
         )
 
-    def forward(self, x, edge_index):
+        # 4. The node keep head: does this box belong in the score? Trained on
+        # detected boxes matched to the ground truth (stage D); the logit of
+        # keeping it
+        self.node_classifier = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ELU(),
+            nn.Linear(hidden_dim // 2, 1),
+        ) if node_head else None
+
+    def forward(self, x, edge_index, return_nodes=False):
         """
         x: Node features (Number of Nodes, node_in_dim) -> RoI + BBox + Class
         edge_index: Candidate edges (2, Number of Edges) -> From your Axis-Aware heuristics
@@ -179,5 +217,8 @@ class ScoreGraphReconstructor(nn.Module):
         
         # --- PHASE 3: Classify the Edges ---
         edge_logits = self.edge_classifier(edge_features) # Shape: (E, num_edge_classes)
-        
+
+        if return_nodes:
+            node_logits = self.node_classifier(h).squeeze(1) if self.node_classifier is not None else None
+            return edge_logits, node_logits
         return edge_logits
