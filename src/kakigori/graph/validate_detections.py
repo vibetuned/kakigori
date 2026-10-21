@@ -87,6 +87,7 @@ def process_score(stem: str, page_paths: list, out_dir: Path, node_roles: dict,
             node_ids.extend(n["id"] for n in page_nodes)
 
         if not all_edges:
+            logger.warning(f"{stem}: no edges on any page (no detections or no predicted edges)")
             return False
 
         known = set(node_ids)
