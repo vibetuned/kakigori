@@ -25,6 +25,7 @@ Usage:
 
 # Standard library imports
 import os
+import copy
 import json
 import logging
 import argparse
@@ -40,7 +41,8 @@ from transformers.trainer_utils import get_last_checkpoint
 from .trainer import GNNTrainer, compute_gnn_metrics
 from .dataset import OMRFullPageDataset
 from .utils import omr_collate_fn, split_into_systems
-from .heuristics import generate_axis_aware_edges, map_gt_to_candidates
+from .heuristics import generate_axis_aware_edges, map_gt_to_candidates, _class_mask
+from .validate_predictions import PRUNE_CLASSES, PRUNE_PREFIXES
 from .model import (
     GraphVisualExtractor, ScoreGraphReconstructor, GNNPhase2Model, NODE_IN_DIM, node_features,
 )
@@ -225,13 +227,24 @@ class JointTrainer(GNNTrainer):
                 edge_loss = edge_loss + self.loss_fn(edge_logits, y_targets)
                 valid_systems += 1
 
-                # keep head: only nodes with a target (detected boxes)
-                if keep_list is not None and node_logits is not None:
-                    keep = keep_list[i].to(device)[idx]
-                    has_target = keep >= 0
+                # keep head: only nodes with a target (detected boxes).
+                # False positives (keep == 0) are ~2-4% of detected nodes, and
+                # only PRUNE_CLASSES / PRUNE_PREFIXES are pruned at inference:
+                # up-weight keep == 0 (5x) and prunable classes (2x) so the
+                # 0.5 threshold does not collapse to predicting keep=1 everywhere.
+                sys_keep = keep_list[i].to(device)[idx] if keep_list is not None else None
+                if sys_keep is not None and node_logits is not None:
+                    has_target = sys_keep >= 0
                     if has_target.any():
+                        tgt_keep = sys_keep[has_target]
+                        prunable_names = [
+                            c for c in class_to_idx
+                            if c in PRUNE_CLASSES or c.startswith(PRUNE_PREFIXES)
+                        ]
+                        prunable = _class_mask(sys_labels[has_target], class_to_idx, prunable_names)
+                        weights = torch.where(tgt_keep == 0.0, 5.0, 1.0) * torch.where(prunable, 2.0, 1.0)
                         node_loss = node_loss + F.binary_cross_entropy_with_logits(
-                            node_logits[has_target].float(), keep[has_target]
+                            node_logits[has_target].float(), tgt_keep, weight=weights
                         )
                         node_systems += 1
 
@@ -243,6 +256,10 @@ class JointTrainer(GNNTrainer):
                             edge_index=candidates, gt_edges=y_targets,
                             pred_edges=torch.argmax(edge_logits, dim=1),
                             num_nodes=len(sys_abs_boxes),
+                            node_labels=sys_labels,
+                            class_to_idx=class_to_idx,
+                            node_logits=node_logits,
+                            node_keep=sys_keep,
                         )
 
         if valid_systems > 0:
@@ -371,6 +388,13 @@ def main():
     train_size = int(0.95 * len(full_ds))
     train_dataset, val_dataset = torch.utils.data.random_split(
         full_ds, [train_size, len(full_ds) - train_size])
+    if args.det_dir and args.det_prob > 0:
+        # Deterministic validation on detections in stage D (rather than a
+        # random det_prob mix at each eval step) so edge and keep-head metrics
+        # are comparable across evaluations
+        val_full_ds = copy.copy(full_ds)
+        val_full_ds.det_prob = 1.0
+        val_dataset = torch.utils.data.Subset(val_full_ds, val_dataset.indices)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if args.detector_checkpoint:
@@ -387,6 +411,11 @@ def main():
     if args.fine_tune:
         logger.info(f"Warm-starting wrapper from {args.fine_tune}")
         load_checkpoint(model, args.fine_tune, device=torch.device("cpu"), eval=False)
+
+    if not (args.det_dir and args.det_prob > 0):
+        # Stage C trains on ground-truth boxes only (scores=1, synthesized=0
+        # constant): keep conv1's detection-feature columns at zero until stage D
+        model.gnn.freeze_detection_features()
 
     n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info(f"Joint model ({args.unfreeze}): {n_train/1e6:.1f}M trainable params, "

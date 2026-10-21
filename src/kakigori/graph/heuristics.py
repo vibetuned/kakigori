@@ -58,6 +58,9 @@ from torch_geometric.nn import knn_graph
 SPAN_CLASSES = ("system", "system-staff", "measure", "staff", "layer", "tuplet",
                 "beam8", "beam16", "beam32", "beamBroken")
 CONTAINER_CLASSES = ("system", "system-staff", "measure", "staff", "layer")
+# Temporal anchors: the events the temporal (class 3) edges join
+ANCHOR_CLASSES = ("note", "chord", "mRest")
+ANCHOR_PREFIXES = ("rest",)
 # Staff context drawn ahead of the first measure's span (clef, key and time
 # signatures) or on its edge (barlines): exempt from the span rule
 SPAN_EXEMPT_PREFIXES = ("clef", "keySig", "keyAccid", "meterSig", "timeSig", "barline")
@@ -98,20 +101,20 @@ def generate_axis_aware_edges(boxes, labels, class_to_idx, k_neighbors=3):
     boxes: Tensor of (N, 4) in [x1, y1, x2, y2] relative coordinates.
 
     1. Vertical (structural and modifier links): pairs whose centres are
-       within 1.5x their mean width horizontally. A span box (container,
-       beam, tuplet) pairs only with boxes centred over its own x-span: a
-       layer is a measure wide, and its 1.5x window used to reach the beams
+       within 1.5x their mean width horizontally. A pair with a span box
+       (container, beam, tuplet) needs the narrower box's centre within the
+       wider one's x-span (padded by a quarter of its height, at most 10 px):
+       a layer is a measure wide, and its 1.5x window used to reach the beams
        and notes of the neighbouring measures (the GNN linked enough of them
        that 18% of the detection path's notes were emitted twice).
     2. Horizontal (temporal flow): from each box, a ray to the 3 nearest
-       boxes to its right in the same staff lane. Lanes are the system's
-       staff rows (_lane_centres); a lane per staff CELL split one row into
-       several wherever the cells' centres differed by a pixel (74% of the
-       detected rows). Containers are neither sources nor targets: their
-       centres sit mid-measure on the staff line and took the ray's slots.
-       Temporal-edge candidate recall: 74.7 -> 91.9% (GT boxes), 68.5 ->
-       82.9% (detections).
-    3. A kNN safety net (k_neighbors).
+       boxes to its right in the same staff lane, and the same ray over the
+       temporal anchors alone. Lanes are the system's staff rows
+       (_lane_centres); a lane per staff CELL split one row into several
+       wherever the cells' centres differed by a pixel (74% of the detected
+       rows). Containers are neither sources nor targets: their centres sit
+       mid-measure on the staff line and took the ray's slots.
+    3. A kNN safety net (k_neighbors), under the same span rule.
     """
     num_nodes = boxes.shape[0]
     device = boxes.device
@@ -129,21 +132,24 @@ def generate_axis_aware_edges(boxes, labels, class_to_idx, k_neighbors=3):
     vertical_mask.fill_diagonal_(False)
 
     span = _class_mask(labels, class_to_idx, SPAN_CLASSES)
+    ok = None
     if span.any():
-        # j under i's span: j's box overlaps it, padded by a quarter of i's
-        # height (detected beams and layers end a little short of their
-        # outer noteheads; ~1 staff space for a staff cell)
-        half = w / 2.0
-        pad = (boxes[:, 3] - boxes[:, 1]) / 4.0
-        under = (cx.unsqueeze(0) + half.unsqueeze(0) >= (boxes[:, 0] - pad).unsqueeze(1)) & (
-            cx.unsqueeze(0) - half.unsqueeze(0) <= (boxes[:, 2] + pad).unsqueeze(1)
+        # j under i's span: the narrower box's centre sits within the wider
+        # box's x-span, padded by a quarter of the wider box's height (capped
+        # at 10 px so tall measure/staff boxes do not reach into neighbouring
+        # measures; detected beams and layers end a little short of their
+        # outer noteheads).
+        pad = ((boxes[:, 3] - boxes[:, 1]) / 4.0).clamp(max=10.0)
+        in_span = (cx.unsqueeze(0) >= (boxes[:, 0] - pad).unsqueeze(1)) & (
+            cx.unsqueeze(0) <= (boxes[:, 2] + pad).unsqueeze(1)
         )
         exempt = _class_mask(labels, class_to_idx, [
             c for c in class_to_idx if c.startswith(SPAN_EXEMPT_PREFIXES)
         ])
-        under |= exempt.unsqueeze(0)
-        ok = ~span.unsqueeze(1) | under          # i a span box: j under it
-        ok &= ~span.unsqueeze(0) | under.t()     # j a span box: i under it
+        in_span |= exempt.unsqueeze(0)
+        i_wider = w.unsqueeze(1) >= w.unsqueeze(0)
+        pair_in_span = torch.where(i_wider, in_span, in_span.t())
+        ok = ~(span.unsqueeze(1) | span.unsqueeze(0)) | pair_in_span
         vertical_mask &= ok
     vertical_edges = vertical_mask.nonzero(as_tuple=False).t()
 
@@ -180,10 +186,31 @@ def generate_axis_aware_edges(boxes, labels, class_to_idx, k_neighbors=3):
     horizontal_edges_fwd = torch.stack([u_horiz, v_horiz], dim=0)
     horizontal_edges_rev = torch.stack([v_horiz, u_horiz], dim=0)
 
+    # The same ray over the temporal anchors only: temporal edges join events,
+    # and a note's own notehead, stem and beam otherwise take the 3 slots
+    # (temporal candidate recall 87.5 -> 99.8% on GT boxes, 81.5 -> 99.9% on
+    # detections, for 5% more candidates)
+    anchor = _class_mask(labels, class_to_idx, [
+        c for c in class_to_idx if c in ANCHOR_CLASSES or c.startswith(ANCHOR_PREFIXES)
+    ])
+    if anchor.sum() > 1:
+        anchor_distance = ray_distance.masked_fill(
+            ~(anchor.unsqueeze(0) & anchor.unsqueeze(1)), float('inf')
+        )
+        k_anchor = min(3, num_nodes - 1)
+        a_dists, a_idx = torch.topk(anchor_distance, k=k_anchor, dim=1, largest=False)
+        a_valid = a_dists != float('inf')
+        a_u = torch.arange(num_nodes, device=device).unsqueeze(1).expand(-1, k_anchor)[a_valid]
+        a_v = a_idx[a_valid]
+        horizontal_edges_fwd = torch.cat([horizontal_edges_fwd, torch.stack([a_u, a_v])], dim=1)
+        horizontal_edges_rev = torch.cat([horizontal_edges_rev, torch.stack([a_v, a_u])], dim=1)
+
     # --- 3. KNN safety net & combine ---
     pos = torch.stack([cx, cy], dim=1)
     k_knn = min(k_neighbors, num_nodes - 1)
     knn_edges = pure_pytorch_knn_graph(pos, k=k_knn, loop=False)
+    if ok is not None and knn_edges.numel() > 0:
+        knn_edges = knn_edges[:, ok[knn_edges[0], knn_edges[1]]]
     combined_edges = torch.cat([
         vertical_edges,
         horizontal_edges_fwd,

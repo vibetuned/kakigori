@@ -97,20 +97,23 @@ The model in detail:
      (§3).
    - **How sure the detector was (2-d).** Its score, and whether bbox
      repair synthesized the box (score 0). Ground-truth boxes are score 1,
-     not synthesized; the features only vary once training sees detections
-     (stage D, §3).
+     not synthesized. Their input weights start at zero and stay frozen
+     there through the ground-truth stages, where the values are constant;
+     they train from stage D on (§3).
 4. **Candidate edges** come from geometric heuristics
    (`heuristics.generate_axis_aware_edges`):
    - **Vertical:** pairs whose centres are within 1.5× their mean width
-     horizontally, for structural and modifier links. A *span* box
-     (system, row, measure, staff cell, layer, beam, tuplet) pairs only
-     with boxes over its own x-span, padded by a quarter of its height.
-     Clefs, key and time signatures and barlines are exempt.
+     horizontally, for structural and modifier links. In a pair with a
+     *span* box (system, row, measure, staff cell, layer, beam, tuplet), the
+     narrower box's centre must lie within the wider box's x-span, padded
+     by a quarter of its height and at most 10 px. Clefs, key and time
+     signatures and barlines are exempt.
    - **Horizontal:** a raycast to the 3 nearest boxes to the right in the
-     same staff lane, in both directions, for the temporal flow. Lanes are
-     the system's staff rows, found by clustering the staff cells' centres.
-     Containers are neither sources nor targets of the ray.
-   - **Safety net:** the 3 nearest neighbours.
+     same staff lane, in both directions, for the temporal flow, plus the
+     same ray over the temporal anchors alone (notes, chords, rests). Lanes
+     are the system's staff rows, found by clustering the staff cells'
+     centres. Containers are neither sources nor targets of the ray.
+   - **Safety net:** the 3 nearest neighbours, under the same span rule.
 
    The heuristics are ranking-based, so they don't depend on the canvas
    scale. The GNN only classifies candidates, so anything the heuristics
@@ -181,8 +184,13 @@ Three runs, each releasing one constraint, chained unattended by
   - Each page then trains on them with probability `det_prob` (0.7).
   - The detections are matched to the page's ground-truth nodes per class
     (`utils.match_detections`): Hungarian on IoU, at least 0.5 for
-    structure and 0.3 for glyphs, with beam, stem and notehead variants
-    matched as one group.
+    structure and 0.3 for glyphs.
+    - Variants of one object family (beams, stems, noteheads, rests,
+      barlines, flags, accidentals, key accidentals, time digits, clefs,
+      dynamics) match as one group: a wrong variant is still the object.
+    - A same-class detection always wins: multi-label decoding often emits
+      two variants on one object (rest8th and rest16th on one rest), and the
+      wrong one is the duplicate to drop.
   - A matched box takes its ground-truth node's edges and keep target 1.
     An unmatched one (a false positive, or a duplicate such as one beam
     decoded as beam8 and beam16) gets no edges, so its candidates train
@@ -190,6 +198,11 @@ Three runs, each releasing one constraint, chained unattended by
     edges survive the transfer.
   - The keep head's BCE (`node_weight` 1.0) joins the edge and detection
     losses. Ground-truth pages carry no keep targets.
+    - False positives are ~3% of the prunable detections, so keep-0 targets
+      weigh 5× and the prunable classes (events, measures, barlines) 2×.
+      Otherwise the head would settle on "keep" everywhere.
+  - Validation runs on detections only (`det_prob` 1), so the edge and keep
+    metrics compare across evaluations.
 
 **In reserve (full track, 0.1.x):**
 - phase 3, full backbone without the detection loss: superseded by the
@@ -202,7 +215,7 @@ Three runs, each releasing one constraint, chained unattended by
 
 ## 4. How to tell it is learning (and the two failure attractors)
 
-Watch three things every eval (`eval_steps` in the yaml):
+Watch these every eval (`eval_steps` in the yaml):
 
 - **Per-class F1** (`f1_structural` … `f1_simultaneity`). Structural moves
   first; modifier is historically the laggard. In lite, sync-text reads 0
@@ -211,6 +224,18 @@ Watch three things every eval (`eval_steps` in the yaml):
   compare the *predicted* active graph against GT structure. If they sit
   **frozen at identical values across evals**, the model is not changing
   its predictions: it has collapsed into an attractor.
+- **What the serializer will see** (`metrics.GraphTopologyEvaluator`):
+  - `event_reach_recall`: the events a staff cell reaches through the
+    predicted structural edges, out of those it reaches in the ground
+    truth.
+  - `multi_staff_event_rate`: events reached from two or more staff cells
+    (other staff or other measure: the duplicate sources of §6).
+  - `multi_owner_rate`: layers with several staff parents, beams and
+    tuplets with several layers, events with several containers.
+  - `temporal_branch_rate`: events with more than one temporal successor
+    or predecessor.
+- **The keep head** (stage D): `prune_fp_precision` / `_recall` / `_f1` on
+  the prunable classes, and `keep_node_acc`.
 - **The prediction histogram.** Run a checkpoint over a few pages and
   `argmax` the logits. It's cheap, and it distinguishes the two degenerate
   states that per-class F1 alone can hide:
@@ -297,7 +322,10 @@ Healthy runs look like this:
       mid-measure on the staff line and took the ray's slots.
 
     The fixes raised temporal candidate recall to 91.9% / 82.9%, with
-    11–14% fewer candidates.
+    11–14% fewer candidates. Once note anchors became real training nodes
+    (lesson 11), each note's own notehead, stem and beam took the slots
+    again (87.5% / 81.5%). A second ray over the temporal anchors alone
+    gives 99.8% / 99.9%, for 5% more candidates.
 13. **Bound what a wide box can reach.** A layer is a measure wide, so the
     1.5× vertical window gave it candidates among the neighbouring
     measures' beams and notes. The GNN linked enough of them that 18% of

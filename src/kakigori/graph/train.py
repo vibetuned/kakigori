@@ -238,6 +238,10 @@ def main():
         # chains runs this way (phase 2 starts from phase 1's weights)
         load_checkpoint(model_wrapper, args.fine_tune, device=torch.device("cpu"), eval=False)
 
+    # Phases 1-2 train on ground-truth boxes only (scores=1, synthesized=0
+    # constant): keep conv1's detection-feature columns at zero
+    model_wrapper.gnn.freeze_detection_features()
+
     # Initialize Training Arguments
     training_args = TrainingArguments(
         output_dir=str(run_dir),
@@ -322,6 +326,7 @@ def main():
 
     logger.info("Starting Phase 2 Graph Training...")
     trainer.train(resume_from_checkpoint=checkpoint)
+    trainer.save_model()
     
     # Save the final GNN weights independently of the wrapper
     torch.save(gnn_model.state_dict(), run_dir / "gnn_final.pth")

@@ -193,10 +193,21 @@ def complete_legacy_state(model, state: dict) -> dict:
     """Detectors from before the canvas, scale ranges and regression slots
     were stored keep the model's: square 640 (what detector_for_checkpoint
     gives them), the default 3-level ranges and the one shared slot they were
-    trained with."""
-    for key, value in model.state_dict().items():
+    trained with. GNN wrappers from before the 2-d detection features (292 ->
+    294) and the keep head zero-pad conv1's input weights and keep the fresh
+    node_classifier weights."""
+    model_state = model.state_dict()
+    for key, value in model_state.items():
         if key.endswith(("input_wh", "level_areas", "reg_slot")) and key not in state:
             state[key] = value
+        elif ".node_classifier." in key and key not in state:
+            state[key] = value
+        elif key.endswith(("conv1.lin_l.weight", "conv1.lin_r.weight")) and key in state:
+            old_w = state[key]
+            if old_w.shape[0] == value.shape[0] and old_w.shape[1] < value.shape[1]:
+                padded = torch.zeros_like(value, device=old_w.device, dtype=old_w.dtype)
+                padded[:, :old_w.shape[1]] = old_w
+                state[key] = padded
     return state
 
 

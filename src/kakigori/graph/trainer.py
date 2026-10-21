@@ -128,7 +128,9 @@ class GNNTrainer(Trainer):
                             edge_index=candidate_edge_index,
                             gt_edges=y_targets,
                             pred_edges=preds,
-                            num_nodes=len(sys_abs_boxes)
+                            num_nodes=len(sys_abs_boxes),
+                            node_labels=sys_labels,
+                            class_to_idx=class_to_idx,
                         )
         
         # FIX 5: The "Dummy Loss Trick" 
@@ -238,7 +240,9 @@ class GNNTrainer(Trainer):
                             edge_index=candidate_edge_index,
                             gt_edges=y_targets,
                             pred_edges=preds,
-                            num_nodes=len(sys_abs_boxes)
+                            num_nodes=len(sys_abs_boxes),
+                            node_labels=sys_labels,
+                            class_to_idx=class_to_idx,
                         )
         
         if valid_systems > 0:

@@ -1,3 +1,4 @@
+# Third party imports
 import torch
 from scipy.optimize import linear_sum_assignment
 from torchvision.ops import box_iou
@@ -9,8 +10,13 @@ STRUCTURE_MIN_IOU, GLYPH_MIN_IOU = 0.5, 0.3
 # Classes matched as one: a detection of the right object with the wrong
 # variant (beam8 for beam16: detected beams match a ground-truth beam of some
 # class at a median IoU of 0.97, of their own class at 0.0-0.93) still takes
-# its edges
-MATCH_GROUP_PREFIXES = ("beam", "stem", "notehead")
+# its edges and keep target 1. A same-class detection is always preferred: a
+# multi-label decode often emits two variants on one object (rest8th and
+# rest16th on one rest), and the wrong one is the duplicate to drop.
+MATCH_GROUP_PREFIXES = (
+    "beam", "stem", "notehead", "rest", "barline", "flag", "accidental",
+    "keyAccid", "timeSig", "clef", "dynamic",
+)
 
 
 def match_detections(det_boxes, det_labels, gt_boxes, gt_labels, class_list) -> dict:
@@ -31,7 +37,8 @@ def match_detections(det_boxes, det_labels, gt_boxes, gt_labels, class_list) -> 
         if len(gi) == 0 or len(di) == 0:
             continue
         iou = box_iou(gt_boxes[gi].float(), det_boxes[di].float()).cpu().numpy()
-        rows, cols = linear_sum_assignment(-iou)
+        same_class = (gt_labels[gi].unsqueeze(1) == det_labels[di].unsqueeze(0)).cpu().numpy()
+        rows, cols = linear_sum_assignment(-(iou + same_class * (iou >= GLYPH_MIN_IOU)))
         min_iou = STRUCTURE_MIN_IOU if g in structure else GLYPH_MIN_IOU
         for r, c in zip(rows, cols):
             if iou[r, c] >= min_iou:

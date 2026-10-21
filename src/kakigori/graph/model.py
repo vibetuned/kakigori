@@ -185,6 +185,31 @@ class ScoreGraphReconstructor(nn.Module):
             nn.Linear(hidden_dim // 2, 1),
         ) if node_head else None
 
+        # Zero-init the detection-feature columns (score, synthesized) so
+        # constant ground-truth values (1, 0) do not act as an uncalibrated
+        # bias before stage D trains on detections
+        if node_in_dim == NODE_IN_DIM:
+            with torch.no_grad():
+                self.conv1.lin_l.weight[:, -DETECTION_DIM:].zero_()
+                self.conv1.lin_r.weight[:, -DETECTION_DIM:].zero_()
+
+    def freeze_detection_features(self) -> None:
+        """Keep the detection-feature input columns of conv1 at zero while
+        training on ground-truth boxes only (phases 1-2 and stage C joint)."""
+        if self.node_in_dim != NODE_IN_DIM:
+            return
+        with torch.no_grad():
+            self.conv1.lin_l.weight[:, -DETECTION_DIM:].zero_()
+            self.conv1.lin_r.weight[:, -DETECTION_DIM:].zero_()
+
+        def _zero_det_grad(grad):
+            grad = grad.clone()
+            grad[:, -DETECTION_DIM:] = 0.0
+            return grad
+
+        self.conv1.lin_l.weight.register_hook(_zero_det_grad)
+        self.conv1.lin_r.weight.register_hook(_zero_det_grad)
+
     def forward(self, x, edge_index, return_nodes=False):
         """
         x: Node features (Number of Nodes, node_in_dim) -> RoI + BBox + Class

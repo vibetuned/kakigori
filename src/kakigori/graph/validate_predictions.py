@@ -160,6 +160,31 @@ def prune_nodes(page_nodes: list, edges: list, keep_probs: dict, threshold: floa
         and keep_probs.get(n["id"], 1.0) < threshold
     }
     if drop:
+        # If a false-positive measure is pruned, also drop the synthesized
+        # staff cells bbox_repair created for its x-span so repair_page_edges
+        # does not re-attach them to an adjacent surviving measure
+        dropped_measures = [
+            n["bbox"] for n in page_nodes
+            if n["id"] in drop and n["class"] == "measure"
+        ]
+        if dropped_measures:
+            surviving_measures = [
+                n["bbox"] for n in page_nodes
+                if n["id"] not in drop and n["class"] == "measure"
+            ]
+            for n in page_nodes:
+                if n["class"] != "staff" or not is_synthesized(n):
+                    continue
+                bx1, by1, bx2, by2 = n["bbox"]
+                bcy = (by1 + by2) / 2.0
+                if any(
+                    bx1 == mx1 and bx2 == mx2 and my1 <= bcy <= my2
+                    for mx1, my1, mx2, my2 in dropped_measures
+                ) and not any(
+                    bx1 == mx1 and bx2 == mx2 and my1 <= bcy <= my2
+                    for mx1, my1, mx2, my2 in surviving_measures
+                ):
+                    drop.add(n["id"])
         page_nodes[:] = [n for n in page_nodes if n["id"] not in drop]
         edges[:] = [e for e in edges if e[0] not in drop and e[1] not in drop]
     return len(drop)
