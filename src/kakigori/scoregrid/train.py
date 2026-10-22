@@ -1,8 +1,8 @@
 """Train the scoregrid decoder on build-scoregrid-data output.
 
 Usage:
-    train-scoregrid --train data/scoregrid/train-lite --val data/scoregrid/validation-lite \\
-                    --out checkpoints_scoregrid/gnn [--no-gnn] [--epochs 30]
+    train-scoregrid --train data/scoregrid/train-lite [data/scoregrid/synthetic-grand-lite] \\
+                    --val data/scoregrid/validation-lite --out checkpoints_scoregrid/gnn [--no-gnn] [--epochs 30]
 """
 
 # Standard library imports
@@ -134,7 +134,8 @@ def eval_loss(model, loader, device) -> float:
 
 def main():
     parser = argparse.ArgumentParser(description="Train the scoregrid decoder")
-    parser.add_argument("--train", type=str, required=True)
+    parser.add_argument("--train", type=str, nargs="+", required=True,
+                        help="build-scoregrid-data dirs, mixed (e.g. train-lite and synthetic grand staves)")
     parser.add_argument("--val", type=str, required=True)
     parser.add_argument("--out", type=str, required=True)
     parser.add_argument("--config", type=str, default="conf-lite/config.json")
@@ -151,7 +152,11 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     device = torch.device("cuda")
     num_classes = len(json.load(open(args.config))["target_classes"])
-    train = load_records(Path(args.train))
+    train = []
+    for train_dir in args.train:
+        records = load_records(Path(train_dir))
+        logger.info(f"{train_dir}: {len(records)} systems")
+        train += records
     val = load_records(Path(args.val))
     logger.info(f"{len(train)} training systems, {len(val)} validation systems")
     # Workers fork (Python 3.14 defaults to forkserver, which pickles the

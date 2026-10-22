@@ -4,9 +4,9 @@
 # temporal 0.822, simultaneity 0.467 (scarce: grand-staff minority only),
 # sync-text 0 by construction (no syl/verse in lite), 6-class macro 0.665.
 
-img_dir: "data/train-lite/imgs"
-ann_dir: "data/train-lite/annotations"
-graph_dir: "data/train-lite/graphs"
+img_dir: "data/gnn-mix-lite/imgs"
+ann_dir: "data/gnn-mix-lite/annotations"
+graph_dir: "data/gnn-mix-lite/graphs"
 config: "conf-lite/config.json"
 
 # Paths follow pipeline-gnn.sh (which sets them anyway): the 640x896 ReGLA

@@ -8,9 +8,9 @@
 # stays anchored. Same recipe as the joint stage otherwise.
 # pipeline-gnn.sh sets detector_checkpoint, fine_tune (the joint run) and
 # det_dir (the joint detector's boxes on img_dir).
-img_dir: "data/train-lite/imgs"
-ann_dir: "data/train-lite/annotations"
-graph_dir: "data/train-lite/graphs"
+img_dir: "data/gnn-mix-lite/imgs"
+ann_dir: "data/gnn-mix-lite/annotations"
+graph_dir: "data/gnn-mix-lite/graphs"
 config: "conf-lite/config.json"
 detector_checkpoint: "checkpoints_lite_896s/run_003"
 fine_tune: "checkpoints_gnn_lite_896s/run_003"

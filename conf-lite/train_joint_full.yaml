@@ -4,9 +4,9 @@
 # the lite GNN phase-2 wrapper (its detector copy carries the adapted neck).
 # Loss scales at start: L_det ~1.2, L_edge ~0.01 -> weights balance them
 # roughly 50:50 while keeping detection as a live anchor.
-img_dir: "data/train-lite/imgs"
-ann_dir: "data/train-lite/annotations"
-graph_dir: "data/train-lite/graphs"
+img_dir: "data/gnn-mix-lite/imgs"
+ann_dir: "data/gnn-mix-lite/annotations"
+graph_dir: "data/gnn-mix-lite/graphs"
 config: "conf-lite/config.json"
 # Paths follow pipeline-gnn.sh (which sets them anyway): the 640x896 ReGLA
 # detector, every GNN stage in checkpoints_gnn_lite_896 (phase 1 run_001,

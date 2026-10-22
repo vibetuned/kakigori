@@ -22,10 +22,17 @@
 #
 # Stage D is also scored with the keep head pruning (det-prune, PRUNE).
 #
+# The GNN trains on data/gnn-mix-lite: train-lite (5% grand-staff pages) plus
+# the clean synthetic-lite grand-staff scores of conf-lite/gnn_mix_synthetic.txt
+# (26% grand staff in all), built from symlinks on the first run
+# (scripts/mix_sets.py). On ground-truth boxes the train-lite GNN scored F1
+# 98.1 on single-staff scores and 78.5 on grand staves.
+#
 # Env: P1_CONFIG, P2_CONFIG, JOINT_CONFIG, D_CONFIG (default
 # conf-lite/train_gnn_phase1, train_gnn_phase2, train_joint_full,
 # train_stage_d .yaml), TRAIN_IMGS (pages to cache detections for, default
-# data/train-lite/imgs: the stage-D config's img_dir), PRUNE (keep
+# data/gnn-mix-lite/imgs: the stage-D config's img_dir), MIX (the training
+# mix to build if missing), PRUNE (keep
 # threshold, default 0.5), LOGGING_STEPS (default 100),
 # VAL (validation set for the kern evaluations, default data/validation-lite),
 # EXTRA_ARGS (appended to every training command, e.g. a smoke test:
@@ -40,7 +47,8 @@ P1_CONFIG=${P1_CONFIG:-conf-lite/train_gnn_phase1.yaml}
 P2_CONFIG=${P2_CONFIG:-conf-lite/train_gnn_phase2.yaml}
 JOINT_CONFIG=${JOINT_CONFIG:-conf-lite/train_joint_full.yaml}
 D_CONFIG=${D_CONFIG:-conf-lite/train_stage_d.yaml}
-TRAIN_IMGS=${TRAIN_IMGS:-data/train-lite/imgs}
+TRAIN_IMGS=${TRAIN_IMGS:-data/gnn-mix-lite/imgs}
+MIX=${MIX:-data/gnn-mix-lite}
 PRUNE=${PRUNE:-0.5}
 LOGGING_STEPS=${LOGGING_STEPS:-100}
 VAL=${VAL:-data/validation-lite}
@@ -95,6 +103,11 @@ cache_detections() {  # the joint detector's boxes on the training pages, for st
     say "detections cached: $(ls "$OUT/detections-train" | wc -l) pages"
 }
 
+if [ ! -d "$MIX/graphs" ]; then
+    say "building the GNN training mix $MIX"
+    uv run python scripts/mix_sets.py "$MIX" data/train-lite data/synthetic-lite conf-lite/gnn_mix_synthetic.txt \
+        || { say "building $MIX FAILED"; exit 1; }
+fi
 say "GNN pipeline: detector $DET; $P1_CONFIG -> $P2_CONFIG -> $JOINT_CONFIG -> $OUT"
 train phase1 train-gnn "$P1_CONFIG"
 kern_eval phase1 gt

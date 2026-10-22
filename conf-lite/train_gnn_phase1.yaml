@@ -5,9 +5,9 @@
 # read 0 by construction; judge on the other classes.
 # Reference: the full model's phase 1 reached f1_macro 0.825.
 
-img_dir: "data/train-lite/imgs"
-ann_dir: "data/train-lite/annotations"
-graph_dir: "data/train-lite/graphs"
+img_dir: "data/gnn-mix-lite/imgs"
+ann_dir: "data/gnn-mix-lite/annotations"
+graph_dir: "data/gnn-mix-lite/graphs"
 config: "conf-lite/config.json"
 
 # Paths follow pipeline-gnn.sh (which sets them anyway): the 640x896 ReGLA
