@@ -210,24 +210,28 @@ class ScoreGraphReconstructor(nn.Module):
         self.conv1.lin_l.weight.register_hook(_zero_det_grad)
         self.conv1.lin_r.weight.register_hook(_zero_det_grad)
 
+    def node_states(self, x, edge_index):
+        """The graph-aware node states h (N, hidden_dim) after message passing
+        over the candidate edges (also the scoregrid decoder's input)."""
+        # The nodes look at their neighbors and update their internal representations
+        h = self.conv1(x, edge_index)
+        h = F.elu(h)
+        h = self.dropout(h)
+
+        h = self.conv2(h, edge_index)
+        h = F.elu(h)
+        h = self.dropout(h)
+
+        return self.conv3(h, edge_index)
+
     def forward(self, x, edge_index, return_nodes=False):
         """
         x: Node features (Number of Nodes, node_in_dim) -> RoI + BBox + Class
         edge_index: Candidate edges (2, Number of Edges) -> From your Axis-Aware heuristics
         """
-        
+
         # --- PHASE 1: Contextualize the Nodes (Message Passing) ---
-        # The nodes look at their neighbors and update their internal representations
-        h = self.conv1(x, edge_index)
-        h = F.elu(h)
-        h = self.dropout(h)
-        
-        h = self.conv2(h, edge_index)
-        h = F.elu(h)
-        h = self.dropout(h)
-        
-        h = self.conv3(h, edge_index)
-        # Now 'h' contains deep, graph-aware features for every musical symbol
+        h = self.node_states(x, edge_index)
         
         # --- PHASE 2: Construct Edge Features ---
         # edge_index[0] contains the Source nodes (u)
