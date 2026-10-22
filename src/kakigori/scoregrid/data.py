@@ -6,7 +6,7 @@ Per page: detection and bbox repair (the boxes inference sees), the GNN's
 node states over each detected system, and per detected system a record:
 
   cls [N]            class index
-  geom [N, 5]        centre x and y and size in the system box (fractions),
+  geom [N, 5]        centre x and y and size in the system span (fractions),
                      and staff steps from the top line of the node's row
                      (0 top line, 8 bottom line; the row's box is the
                      clef-derived one of bbox repair 7)
@@ -48,7 +48,7 @@ from kakigori.graph.validate_detections import _score_pages
 from kakigori.graph.validate_predictions import _load_gnn
 
 # Local folder imports
-from .grid import systems_from_mei
+from .grid import systems_from_mei, grid_from_measures
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -115,30 +115,37 @@ def page_systems(wrapper, page_nodes: list, img_path: Path, class_to_idx: dict, 
         rel[:, [0, 2]] -= sx1
         rel[:, [1, 3]] -= sy1
         local = idx.cpu().tolist()
+        synth_list = [is_synthesized(page_nodes[i]) for i in local]
         x = node_features(
             wrapper.gnn, roi, rel / geo["canvas_w"], lab,
             scores=torch.tensor([float(page_nodes[i].get("score", 1.0)) for i in local], device=device),
-            synthesized=torch.tensor([float(is_synthesized(page_nodes[i])) for i in local], device=device),
+            synthesized=torch.tensor([float(s) for s in synth_list], device=device),
         )
         cand = generate_axis_aware_edges(rel, lab, class_to_idx)
         h = wrapper.gnn.node_states(x, cand) if cand.shape[1] else torch.zeros_like(roi)
 
-        sw, sh = max(sx2 - sx1, 1e-3), max(sy2 - sy1, 1e-3)
         cx, cy = (b[:, 0] + b[:, 2]) / 2.0, (b[:, 1] + b[:, 3]) / 2.0
+        unsynth = ~torch.tensor(synth_list, dtype=torch.bool, device=device)
+        if not unsynth.any():
+            unsynth = torch.ones_like(unsynth)
+        nx1, nx2 = float(cx[unsynth].min()), float(cx[unsynth].max())
+        sw, sh = max(nx2 - nx1, 1e-3), max(sy2 - sy1, 1e-3)
         row, steps = _row_geometry(b.cpu(), lab.cpu(), class_to_idx["system-staff"])
         geom = torch.stack([
-            (cx - sx1) / sw, (cy - sy1) / sh, (b[:, 2] - b[:, 0]) / sw, (b[:, 3] - b[:, 1]) / sh,
+            (cx - nx1) / sw, (cy - sy1) / sh, (b[:, 2] - b[:, 0]) / sw, (b[:, 3] - b[:, 1]) / sh,
             steps.to(device),
         ], dim=1)
         page_box = canvas_to_page(torch.tensor([[sx1, sy1, sx2, sy2]]), geo)[0].tolist()
+        span_box = canvas_to_page(torch.tensor([[nx1, sy1, nx2, sy2]]), geo)[0].tolist()
         records.append({
             "system_box": page_box,
+            "x_span": [span_box[0], span_box[2]],
             "cls": lab.cpu().short(),
             "geom": geom.cpu().half(),
             "row": row.char(),
             "meas": _measure_of(b.cpu(), lab.cpu(), class_to_idx["measure"]).short(),
             "conf": torch.tensor([float(page_nodes[i].get("score", 1.0)) for i in local]).half(),
-            "synth": torch.tensor([is_synthesized(page_nodes[i]) for i in local]),
+            "synth": torch.tensor(synth_list),
             "roi": roi.cpu().half(),
             "gnn": h.cpu().half(),
         })
@@ -224,11 +231,16 @@ def main():
             matched = match_systems(records, gt_page)
             for record, m in zip(records, matched, strict=True):
                 gt_index = gt_page[m][0] if m >= 0 else -1
-                record.update(
-                    score=score, page=page_idx, order=order, gt_index=gt_index,
-                    target=grids[gt_index].arrays() if gt_index >= 0 else None,
-                    numbers=grids[gt_index].numbers if gt_index >= 0 else [],
-                )
+                if gt_index >= 0:
+                    target_grid = grid_from_measures(
+                        header["system_measures"][gt_index], header["staves"],
+                        header["ann_by_id"], tuple(record["x_span"]),
+                    )
+                    target, numbers = target_grid.arrays(), target_grid.numbers
+                else:
+                    target, numbers = None, []
+                record.update(score=score, page=page_idx, order=order, gt_index=gt_index,
+                              target=target, numbers=numbers)
                 order += 1
                 stats["systems"] += 1
                 stats["matched"] += gt_index >= 0

@@ -35,12 +35,12 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 
-def tensors_to_grid(cells: torch.Tensor, measure: torch.Tensor, staff: torch.Tensor) -> SystemGrid:
+def tensors_to_grid(cells: torch.Tensor, barline: torch.Tensor, staff: torch.Tensor) -> SystemGrid:
     g = SystemGrid.empty()
     c = cells.cpu().numpy()
     g.event, g.dur, g.dots, g.grace = c[..., EVENT], c[..., DUR], c[..., DOTS], c[..., GRACE]
     g.pitch, g.alter = c[..., PITCH0:ALTER0], c[..., ALTER0:]
-    g.measure = measure.cpu().numpy()
+    g.barline = barline.cpu().numpy()
     s = staff.cpu().numpy()
     g.clef, g.key, g.staff = s[:, 0], s[:, 1], s[:, 2]
     return g
@@ -112,9 +112,9 @@ def main():
             chunk = records[i:i + args.batch_size]
             batch = to_device(collate([dict(r, target=None) for r in chunk]), device)
             with torch.autocast("cuda", dtype=torch.bfloat16):
-                cells, measure, staff = sample(model, batch, steps=args.steps)
+                cells, barline, staff = sample(model, batch, steps=args.steps)
             for j, r in enumerate(chunk):
-                grids[id(r)] = tensors_to_grid(cells[j], measure[j], staff[j])
+                grids[id(r)] = tensors_to_grid(cells[j], barline[j], staff[j])
 
     for score, info in index["scores"].items():
         systems = sorted(by_score.get(score, []), key=lambda r: (r["page"], r["order"]))

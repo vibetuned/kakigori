@@ -17,21 +17,49 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 
 # Local folder imports
-from .model import ScoreGridDecoder, flow_loss, grid_tensors
+from .model import (
+    CELL_VOCAB,
+    STAFF_VOCAB,
+    BARLINE_VOCAB,
+    ScoreGridDecoder,
+    flow_loss,
+    grid_tensors,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-N_MAX = 512  # node tokens per system (detections: p99 ~ 400)
+N_MAX = 640  # node tokens per system (detections: p99 ~ 400)
+
+
+def _target_in_vocab(target: dict) -> bool:
+    """Every target field within its vocabulary (cross-entropy asserts on
+    CUDA otherwise; one train-lite score has a note at a negative octave)."""
+    cells, barline, staff = grid_tensors(target)
+    vocab_c = torch.tensor(CELL_VOCAB)
+    vocab_s = torch.tensor(STAFF_VOCAB)
+    return bool(
+        ((cells >= 0) & (cells < vocab_c)).all()
+        and ((staff >= 0) & (staff < vocab_s)).all()
+        and ((barline >= 0) & (barline < BARLINE_VOCAB)).all()
+    )
 
 
 def load_records(data_dir: Path, matched_only: bool = True) -> list:
-    records = []
+    records, dropped = [], 0
     for shard in sorted(Path(data_dir).glob("shard_*.pt")):
         for r in torch.load(shard, weights_only=False):
-            if matched_only and r["target"] is None:
-                continue
+            if r["target"] is None:
+                if matched_only:
+                    continue
+            elif not _target_in_vocab(r["target"]):
+                dropped += 1
+                if matched_only:
+                    continue
+                r["target"] = None
             records.append(r)
+    if dropped:
+        logger.warning(f"{data_dir}: {dropped} systems with targets outside the vocabulary dropped")
     return records
 
 
@@ -62,19 +90,27 @@ def collate(records: list) -> dict:
         "valid": torch.zeros(b, n, dtype=torch.bool),
     }
     for i, r in enumerate(records):
-        k = min(len(r["cls"]), n)
-        out["cls"][i, :k] = r["cls"][:k].long()
-        out["geom"][i, :k] = r["geom"][:k].float()
-        out["row"][i, :k] = r["row"][:k].long()
-        out["meas"][i, :k] = r["meas"][:k].long()
-        out["conf"][i, :k] = r["conf"][:k].float()
-        out["synth"][i, :k] = r["synth"][:k].float()
-        out["roi"][i, :k] = r["roi"][:k].float()
-        out["gnn"][i, :k] = r["gnn"][:k].float()
+        total_r = len(r["cls"])
+        if total_r <= n:
+            sel = slice(None, total_r)
+            k = total_r
+        else:
+            # Keep synthesized structure nodes (appended at tail by bbox_repair) + earliest nodes
+            order = torch.argsort(r["synth"].int(), descending=True, stable=True)[:n]
+            sel = order.sort().values
+            k = n
+        out["cls"][i, :k] = r["cls"][sel].long()
+        out["geom"][i, :k] = r["geom"][sel].float()
+        out["row"][i, :k] = r["row"][sel].long()
+        out["meas"][i, :k] = r["meas"][sel].long()
+        out["conf"][i, :k] = r["conf"][sel].float()
+        out["synth"][i, :k] = r["synth"][sel].float()
+        out["roi"][i, :k] = r["roi"][sel].float()
+        out["gnn"][i, :k] = r["gnn"][sel].float()
         out["valid"][i, :k] = True
     if all(r["target"] is not None for r in records):
-        cells, measure, staff = zip(*(grid_tensors(r["target"]) for r in records), strict=True)
-        out["cells"], out["measure"], out["staff"] = torch.stack(cells), torch.stack(measure), torch.stack(staff)
+        cells, barline, staff = zip(*(grid_tensors(r["target"]) for r in records), strict=True)
+        out["cells"], out["barline"], out["staff"] = torch.stack(cells), torch.stack(barline), torch.stack(staff)
     return out
 
 
@@ -89,7 +125,7 @@ def eval_loss(model, loader, device) -> float:
     for batch in loader:
         batch = to_device(batch, device)
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            loss, _ = flow_loss(model, batch["cells"], batch["measure"], batch["staff"], batch)
+            loss, _ = flow_loss(model, batch["cells"], batch["barline"], batch["staff"], batch)
         total += float(loss) * batch["cls"].shape[0]
         n += batch["cls"].shape[0]
     model.train()
@@ -147,7 +183,7 @@ def main():
         for batch in train_loader:
             batch = to_device(batch, device)
             with torch.autocast("cuda", dtype=torch.bfloat16):
-                loss, parts = flow_loss(model, batch["cells"], batch["measure"], batch["staff"], batch)
+                loss, parts = flow_loss(model, batch["cells"], batch["barline"], batch["staff"], batch)
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)

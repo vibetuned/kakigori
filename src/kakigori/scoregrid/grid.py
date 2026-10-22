@@ -1,29 +1,29 @@
-"""A system of music as a fixed-shape matrix of categorical fields.
+"""A system of music as a fixed-shape geometric matrix of categorical fields.
 
 The learned decoder of the detection path denoises this matrix instead of
 generating **kern text: every matrix decodes to valid kern, so there is no
-tokenizer and no constrained decoding. It is kern's own grid without the
-text: measures x time slices x staves, one categorical value per field.
+tokenizer and no constrained decoding. Columns are horizontal x-bins across
+the width of the system's nodes rather than abstract onset ordinals, so
+alignment is local and timing is recovered from durations at emission.
 
 Per system (``SystemGrid``):
-  measure[m]              0 pad, 1 the measure exists
-  event[m, l, s]          pad / hold (kern ".") / note / rest / mrest
-  dur[m, l, s]            kern reciprocal duration (DURATIONS), 0 = none
-  dots[m, l, s]           0-3
-  grace[m, l, s]          0/1
-  pitch[m, l, s, k]       diatonic step (octave * 7 + step) + 1, 0 = none;
+  barline[b]              0 no barline, 1 a measure starts at bin b
+  event[b, s]             pad / note / rest / mrest
+  dur[b, s]               kern reciprocal duration (DURATIONS), 0 = none
+  dots[b, s]              0-3
+  grace[b, s]             0/1
+  pitch[b, s, k]          diatonic step (octave * 7 + step) + 1, 0 = none;
                           k < K_MAX chord members, lowest first
-  alter[m, l, s, k]       sounding alteration + 3 (-2..+2), 0 = none
+  alter[b, s, k]          sounding alteration + 3 (-2..+2), 0 = none
   clef[s], key[s]         at the system's start (CLEFS, KEYS), 0 = none
   staff[s]                0 pad, 1 the staff exists
 
-A time slice is a distinct onset of the measure across its staves (kern's
-data lines); grace notes take their own slices before the note they lead.
-Ground truth comes from the MEI (``systems_from_mei``): measures map to
-systems through the page annotations, whose measure ids are MEI ids.
-Sounding alterations follow musicset.evaluate (the initial key signature
-and the measure's carry-over), so a ground-truth round trip scores what
-compare-kern scores.
+Ground truth pairs the MEI (``systems_from_mei``) with the page annotations:
+note, chord, rest, mRest and measure ids are MEI xml:ids, so each event's
+horizontal position and its MEI attributes pair up directly. Sounding
+alterations follow musicset.evaluate (the initial key signature and the
+measure's carry-over), so a ground-truth round trip scores what compare-kern
+scores.
 """
 
 # Future imports
@@ -43,12 +43,11 @@ from musicset.evaluate import _note_alter, _keysig_alters
 MEI = "{http://www.music-encoding.org/ns/mei}"
 XML_ID = "{http://www.w3.org/XML/1998/namespace}id"
 
-# 16 x 16 x 2 covers ~99% of validation-lite systems (measures per system
-# p90 8, time slices per measure p99 12, at most 2 staves, chords <= 4)
-M_MAX, L_MAX, S_MAX, K_MAX = 16, 16, 2, 4
+# 192 x-bins (~8 px each across a system's nodes) x 2 staves, chords <= 4
+B_MAX, S_MAX, K_MAX = 192, 2, 4
 
-EVENTS = ("pad", "hold", "note", "rest", "mrest")
-PAD, HOLD, NOTE, REST, MREST = range(len(EVENTS))
+EVENTS = ("pad", "note", "rest", "mrest")
+PAD, NOTE, REST, MREST = range(len(EVENTS))
 DURATIONS = (
     "none", "1", "2", "4", "8", "16", "32", "64", "128", "0", "00",
     "3", "6", "12", "24", "48", "96", "5", "10", "20", "40", "7", "14", "28", "56",
@@ -61,6 +60,7 @@ N_PITCH = 10 * 7 + 1  # octaves 0-9, + none
 N_ALTER = 6           # none, -2..+2
 CLEFS = ("none", "G2", "F4", "C3", "C4", "C1", "C2", "C5", "G1", "F3", "F5", "G2v", "G2^", "F4v", "other")
 KEYS = ("none", "0", *(f"{n}s" for n in range(1, 8)), *(f"{n}f" for n in range(1, 8)), "other")
+SPAN_EXCLUDE = ("page-margin", "system", "system-staff")
 
 
 @dataclass
@@ -71,6 +71,7 @@ class Event:
     dur: str = "none"
     dots: int = 0
     pitches: list = field(default_factory=list)  # [(diatonic, alter)], lowest first
+    id: str = ""             # MEI xml:id (pairs with its page annotation box)
 
 
 @dataclass
@@ -84,7 +85,7 @@ class Measure:
 
 @dataclass
 class SystemGrid:
-    measure: np.ndarray
+    barline: np.ndarray
     event: np.ndarray
     dur: np.ndarray
     dots: np.ndarray
@@ -98,13 +99,13 @@ class SystemGrid:
     numbers: list = field(default_factory=list)
     overflow: list = field(default_factory=list)
 
-    FIELDS = ("measure", "event", "dur", "dots", "grace", "pitch", "alter", "clef", "key", "staff")
+    FIELDS = ("barline", "event", "dur", "dots", "grace", "pitch", "alter", "clef", "key", "staff")
 
     @classmethod
     def empty(cls) -> SystemGrid:
-        cell = (M_MAX, L_MAX, S_MAX)
+        cell = (B_MAX, S_MAX)
         return cls(
-            measure=np.zeros(M_MAX, np.int64),
+            barline=np.zeros(B_MAX, np.int64),
             event=np.zeros(cell, np.int64),
             dur=np.zeros(cell, np.int64),
             dots=np.zeros(cell, np.int64),
@@ -260,7 +261,7 @@ def _parse_measure(measure, index: int, parents: dict, initial_keys: dict, ppqs:
                     t += _quarters(el, parents, ppqs.get(n, 0))
                     continue
                 if tag == "mRest":
-                    events.append(Event(onset=t, grace=0, kind=MREST))
+                    events.append(Event(onset=t, grace=0, kind=MREST, id=el.get(XML_ID, "")))
                     continue
                 notes = [el] if tag == "note" else el.findall(MEI + "note") if tag == "chord" else []
                 pitches = sorted(
@@ -270,7 +271,7 @@ def _parse_measure(measure, index: int, parents: dict, initial_keys: dict, ppqs:
                 ev = Event(
                     onset=t, grace=0, kind=REST if tag == "rest" else NOTE,
                     dur=_kern_dur(el, parents), dots=min(int(el.get("dots", 0)), MAX_DOTS),
-                    pitches=pitches,
+                    pitches=pitches, id=el.get(XML_ID, ""),
                 )
                 if el.get("grace") is not None:
                     pending_grace.append(ev)
@@ -291,82 +292,119 @@ def _parse_measure(measure, index: int, parents: dict, initial_keys: dict, ppqs:
 # --- systems -------------------------------------------------------------------
 
 
-def score_systems(ann_dir: Path, score: str, page_files: list | None = None) -> list[tuple]:
-    """The score's systems in reading order as (page index, system box, measure
-    ids left to right): measures go to the system whose box holds their
-    centre."""
+def score_systems(ann_dir: Path, score: str, page_files: list | None = None) -> tuple[list[tuple], dict]:
+    """The score's systems in reading order as (page index, system box,
+    horizontal node-centre span, measure ids left to right), plus the score's
+    annotation boxes by MEI xml:id."""
     if page_files is None:
         page_files = sorted(
             (p.name for p in ann_dir.glob(f"{score}_page*.json")),
             key=lambda name: int(name.rsplit("_page", 1)[1].split(".")[0]),
         )
-    systems = []
+    systems, ann_by_id = [], {}
     for page, name in enumerate(page_files):
         anns = json.loads((ann_dir / name).read_text())["annotations"]
+        for a in anns:
+            if "id" in a:
+                ann_by_id[a["id"]] = a["bbox"]
         boxes = sorted((a for a in anns if a["class"] == "system"), key=lambda a: a["bbox"][1])
         measures = [a for a in anns if a["class"] == "measure"]
         for box in boxes:
             _, y1, _, y2 = box["bbox"]
             inside = [m for m in measures if y1 <= (m["bbox"][1] + m["bbox"][3]) / 2 <= y2]
-            systems.append((page, box["bbox"], [m["id"] for m in sorted(inside, key=lambda m: m["bbox"][0])]))
-    return systems
+            in_nodes = [
+                a for a in anns
+                if y1 <= (a["bbox"][1] + a["bbox"][3]) / 2 <= y2 and a["class"] not in SPAN_EXCLUDE
+            ]
+            cxs = [0.5 * (a["bbox"][0] + a["bbox"][2]) for a in in_nodes]
+            x_span = (min(cxs, default=box["bbox"][0]), max(cxs, default=box["bbox"][2]))
+            systems.append((
+                page, box["bbox"], x_span,
+                [m["id"] for m in sorted(inside, key=lambda m: m["bbox"][0])],
+            ))
+    return systems, ann_by_id
 
 
-def grid_from_measures(measures: list[Measure], n_staves: int) -> SystemGrid:
-    """One system's matrix; what does not fit is listed in ``overflow``."""
+def grid_from_measures(
+    measures: list[Measure],
+    n_staves: int,
+    ann_by_id: dict | None = None,
+    x_span: tuple[float, float] = (0.0, 1.0),
+) -> SystemGrid:
+    """One system's geometric x-bin matrix over ``x_span = (x1, x2)``; what
+    does not fit is listed in ``overflow``."""
     g = SystemGrid.empty()
     g.staff[:min(n_staves, S_MAX)] = 1
     if n_staves > S_MAX:
         g.overflow.append(f"{n_staves} staves")
-    if len(measures) > M_MAX:
-        g.overflow.append(f"{len(measures)} measures")
     staff_ns = [str(s + 1) for s in range(min(n_staves, S_MAX))]
     if measures:
         first = measures[0]
         for s, n in enumerate(staff_ns):
             g.clef[s] = CLEFS.index(first.clef.get(n, "none"))
             g.key[s] = KEYS.index(first.key.get(n, "none"))
-    for m, measure in enumerate(measures[:M_MAX]):
-        g.measure[m] = 1
+
+    ann_by_id = ann_by_id or {}
+    x1, x2 = x_span
+    w = max(float(x2 - x1), 1.0)
+    min_b = 0
+    for mi, measure in enumerate(measures):
+        mbbox = ann_by_id.get(measure.id, (x1, 0.0, x2, 0.0))
+        b_bar = 0 if mi == 0 else max(min_b, int(np.clip((mbbox[0] - x1) / w * B_MAX, 0, B_MAX - 1)))
+        if b_bar >= B_MAX:
+            g.overflow.append(f"measure {measure.index}: barline at bin {b_bar}")
+            break
+        g.barline[b_bar] = 1
         g.numbers.append(measure.index)
-        slices = sorted({(ev.onset, -ev.grace) for evs in measure.staves.values() for ev in evs})
-        if len(slices) > L_MAX:
-            g.overflow.append(f"measure {measure.index}: {len(slices)} slices")
-        slot = {key: i for i, key in enumerate(slices[:L_MAX])}
-        g.event[m, :len(slot), :len(staff_ns)] = HOLD
+        max_ev_b = b_bar
         for s, n in enumerate(staff_ns):
-            for ev in measure.staves.get(n, []):
-                i = slot.get((ev.onset, -ev.grace))
-                if i is None:
+            evs = measure.staves.get(n, [])
+            with_x = []
+            for idx_e, ev in enumerate(evs):
+                eb = ann_by_id.get(ev.id, mbbox)
+                cx = 0.5 * (eb[0] + eb[2])
+                with_x.append((ev.onset, -ev.grace, cx, idx_e, ev))
+            with_x.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
+            for _, _, cx, _, ev in with_x:
+                b = int(np.clip((cx - x1) / w * B_MAX, b_bar, B_MAX - 1))
+                while b < B_MAX and g.event[b, s] != PAD:
+                    b += 1
+                if b >= B_MAX:
+                    g.overflow.append(f"measure {measure.index}: bin overflow")
                     continue
-                if g.event[m, i, s] != HOLD:
-                    # a second event on this staff at this onset (another layer)
-                    g.overflow.append(f"measure {measure.index}: two events at one onset")
-                    continue
-                g.event[m, i, s] = ev.kind
-                g.dur[m, i, s] = DUR_INDEX[ev.dur]
-                g.dots[m, i, s] = ev.dots
-                g.grace[m, i, s] = int(ev.grace > 0)
+                g.event[b, s] = ev.kind
+                g.dur[b, s] = DUR_INDEX[ev.dur]
+                g.dots[b, s] = ev.dots
+                g.grace[b, s] = int(ev.grace > 0)
                 if len(ev.pitches) > K_MAX:
                     g.overflow.append(f"measure {measure.index}: chord of {len(ev.pitches)}")
-                for k, (diatonic, alter) in enumerate(ev.pitches[:K_MAX]):
-                    g.pitch[m, i, s, k] = diatonic + 1
-                    g.alter[m, i, s, k] = alter + 3
+                in_range = [(d, a) for d, a in ev.pitches if 0 <= d < N_PITCH - 1 and -2 <= a <= 2]
+                if len(in_range) < len(ev.pitches):
+                    # e.g. a negative octave in a source MEI
+                    g.overflow.append(f"measure {measure.index}: pitch out of range")
+                for k, (diatonic, alter) in enumerate(in_range[:K_MAX]):
+                    g.pitch[b, s, k] = diatonic + 1
+                    g.alter[b, s, k] = alter + 3
+                max_ev_b = max(max_ev_b, b)
+        min_b = max(b_bar + 1, max_ev_b + 1)
     return g
 
 
 def systems_from_mei(mei_path: Path, ann_dir: Path, page_files: list | None = None) -> tuple[list[SystemGrid], dict]:
     """The score's ground-truth system matrices and header: ``boxes`` holds
-    each system's (page index, box), ``unplaced`` the measures no system
-    annotation holds."""
+    each system's (page index, box), ``system_measures`` the MEI Measure
+    lists per system, ``ann_by_id`` the annotation boxes by id, and
+    ``unplaced`` the measures no system annotation holds."""
     measures, header = mei_measures(mei_path)
     by_id = {m.id: m for m in measures}
-    grids, placed, header["boxes"] = [], set(), []
-    for page, box, ids in score_systems(ann_dir, mei_path.stem, page_files):
+    sys_specs, ann_by_id = score_systems(ann_dir, mei_path.stem, page_files)
+    grids, placed, header["boxes"], header["system_measures"], header["ann_by_id"] = [], set(), [], [], ann_by_id
+    for page, box, x_span, ids in sys_specs:
         system = [by_id[i] for i in ids if i in by_id]
         placed.update(m.id for m in system)
-        grids.append(grid_from_measures(system, header["staves"]))
+        grids.append(grid_from_measures(system, header["staves"], ann_by_id, x_span))
         header["boxes"].append((page, box))
+        header["system_measures"].append(system)
     header["unplaced"] = [m.index for m in measures if m.id not in placed]
     return grids, header
 
@@ -381,22 +419,30 @@ def _kern_pitch(diatonic: int, alter: int) -> str:
     return name + {-2: "--", -1: "-", 0: "", 1: "#", 2: "##"}[alter]
 
 
-def _kern_cell(g: SystemGrid, m: int, i: int, s: int) -> str:
-    kind = g.event[m, i, s]
-    if kind in (PAD, HOLD):
+def _dur_quarters(dur_idx: int, dots: int) -> Fraction:
+    dur = DURATIONS[dur_idx]
+    base = {"00": Fraction(16), "0": Fraction(8)}.get(dur)
+    if base is None:
+        base = Fraction(4, int(dur)) if dur.isdigit() else Fraction(1)
+    return base * (2 - Fraction(1, 2 ** int(dots)))
+
+
+def _kern_cell(g: SystemGrid, b: int, s: int) -> str:
+    kind = g.event[b, s]
+    if kind == PAD:
         return "."
     if kind == MREST:
         return "1r"
-    dur = DURATIONS[g.dur[m, i, s]]
+    dur = DURATIONS[g.dur[b, s]]
     dur = "4" if dur == "none" else dur
-    rhythm = dur + "." * int(g.dots[m, i, s])
+    rhythm = dur + "." * int(g.dots[b, s])
     if kind == REST:
         return rhythm + "r"
-    grace = "q" if g.grace[m, i, s] else ""
+    grace = "q" if g.grace[b, s] else ""
     tokens = [
         # a decoded pitch may come without its alteration: unaltered
         rhythm + _kern_pitch(int(p) - 1, int(a) - 3 if a > 0 else 0) + grace
-        for p, a in zip(g.pitch[m, i, s], g.alter[m, i, s], strict=True)
+        for p, a in zip(g.pitch[b, s], g.alter[b, s], strict=True)
         if p > 0
     ]
     return " ".join(tokens) if tokens else rhythm + "r"
@@ -411,9 +457,10 @@ def _key_token(key: str) -> str:
 
 
 def grids_to_kern(grids: list[SystemGrid], meter=None, numbers: list | None = None) -> str:
-    """A score's **kern from its system matrices in reading order. Spines
-    follow kern's convention (the lowest staff leftmost); measures are
-    numbered from ``numbers`` (one list per system) or consecutively."""
+    """A score's **kern from its system matrices in reading order. Within each
+    measure (between consecutive barline bins), each staff's events are read
+    in bin order, their durations accumulated into onsets (resetting at each
+    barline), and onsets merged across staves into **kern lines."""
     n_staves = max((int(g.staff.sum()) for g in grids), default=1) or 1
     cols = list(range(n_staves - 1, -1, -1))  # staff index per spine, lowest first
 
@@ -432,16 +479,54 @@ def grids_to_kern(grids: list[SystemGrid], meter=None, numbers: list | None = No
         out.append(line(f"*M{meter[0]}/{meter[1]}" for _ in cols))
     count = 0
     for gi, g in enumerate(grids):
-        for m in range(M_MAX):
-            if not g.measure[m]:
+        bars = [b for b in range(B_MAX) if g.barline[b]]
+        if not bars:
+            if (g.event[:, :n_staves] != PAD).any():
+                bars = [0]
+            else:
                 continue
+        for mi, b_start in enumerate(bars):
+            b0 = 0 if mi == 0 else b_start
+            b1 = bars[mi + 1] if mi + 1 < len(bars) else B_MAX
             count += 1
-            number = numbers[gi][m] if numbers is not None else (g.numbers[m] if m < len(g.numbers) else count)
+            number = numbers[gi][mi] if numbers is not None else (g.numbers[mi] if mi < len(g.numbers) else count)
             out.append(line(f"={number}" for _ in cols))
-            for i in range(L_MAX):
-                if not (g.event[m, i, :n_staves] != PAD).any():
-                    continue
-                out.append(line(_kern_cell(g, m, i, s) for s in cols))
+            per_staff = {}
+            all_keys = set()
+            for s in range(n_staves):
+                t = Fraction(0)
+                pending_grace = []
+                s_map = {}
+                for b in range(b0, b1):
+                    kind = int(g.event[b, s])
+                    if kind == PAD:
+                        continue
+                    tok = _kern_cell(g, b, s)
+                    if kind == NOTE and g.grace[b, s]:
+                        pending_grace.append(tok)
+                        continue
+                    for rank, gtok in enumerate(reversed(pending_grace), start=1):
+                        k = (t, -rank, 0)
+                        while k in s_map:
+                            k = (k[0], k[1], k[2] + 1)
+                        s_map[k] = gtok
+                        all_keys.add(k)
+                    pending_grace = []
+                    k = (t, 0, 0)
+                    while k in s_map:
+                        k = (k[0], k[1], k[2] + 1)
+                    s_map[k] = tok
+                    all_keys.add(k)
+                    t += Fraction(4) if kind == MREST else _dur_quarters(int(g.dur[b, s]), int(g.dots[b, s]))
+                for rank, gtok in enumerate(reversed(pending_grace), start=1):
+                    k = (t, -rank, 0)
+                    while k in s_map:
+                        k = (k[0], k[1], k[2] + 1)
+                    s_map[k] = gtok
+                    all_keys.add(k)
+                per_staff[s] = s_map
+            for k in sorted(all_keys):
+                out.append(line(per_staff[s].get(k, ".") for s in cols))
     out.append(line("==" for _ in cols))
     out.append(line("*-" for _ in cols))
     return "\n".join(out) + "\n"
