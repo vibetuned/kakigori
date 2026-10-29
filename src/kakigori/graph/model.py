@@ -54,50 +54,37 @@ class GraphVisualExtractor(nn.Module):
         self.fc = nn.Linear(in_channels * roi_size[0] * roi_size[1], out_channels)
         self.activation = nn.ELU()
 
-    def forward(self, feature_maps_dict, normalized_boxes, image_size):
+    def forward(self, feature_maps_dict, boxes_list, image_size):
         """
-        feature_maps_dict: dict mapping string keys (e.g., '0', '1', '2') to tensors 
-                           from the ConvNeXt/DINOv3 PANetNeck
-        normalized_boxes: list of tensors per batch item, shape (N, 4) -> [cx, cy, w, h]
+        feature_maps_dict: dict mapping string keys (e.g., '0', '1', '2') to tensors
+                           from the detector's neck
+        boxes_list: list of tensors per batch item, shape (N, 4): absolute
+                    (x1, y1, x2, y2) pixels on the input canvas, as every caller
+                    passes them. Until 2026-10-29 this denormalized them as if
+                    they were (cx, cy, w, h) fractions: every RoI landed far off
+                    the image, read zeros, and every node got the same feature
+                    (the fc's bias) — GNNs and decoders trained before then never
+                    saw the image, and their fc weights never got a gradient.
         image_size: Tuple (height, width) of the input image to the network
         """
-        abs_boxes_list = []
-        
-        for boxes in normalized_boxes:
-            if boxes.numel() == 0:
-                abs_boxes_list.append(torch.empty((0, 4), dtype=torch.float32, device=boxes.device))
-                continue
-            
-            # 1. Denormalize boxes back to absolute pixel coordinates
-            cx = boxes[:, 0] * image_size[1]
-            cy = boxes[:, 1] * image_size[0]
-            w  = boxes[:, 2] * image_size[1]
-            h  = boxes[:, 3] * image_size[0]
-            
-            x1 = cx - w / 2
-            y1 = cy - h / 2
-            x2 = cx + w / 2
-            y2 = cy + h / 2
-            
-            # 2. Format as [x1, y1, x2, y2]. 
-            # Notice we DON'T need the batch index anymore! MultiScaleRoIAlign handles 
-            # that automatically based on the list structure.
-            formatted_boxes = torch.stack([x1, y1, x2, y2], dim=1)
-            abs_boxes_list.append(formatted_boxes)
-        
+        abs_boxes_list = [
+            boxes.float() if boxes.numel() else torch.empty((0, 4), dtype=torch.float32, device=boxes.device)
+            for boxes in boxes_list
+        ]
+
         # Catch empty batches to prevent crashes
         if all(b.shape[0] == 0 for b in abs_boxes_list):
             # Grab the device from the first feature map in the dictionary
             first_map = next(iter(feature_maps_dict.values()))
             return torch.empty(0, self.fc.out_features, device=first_map.device)
-            
+
         # MultiScaleRoIAlign needs to know the original image shape to calculate strides properly
-        image_shapes = [image_size for _ in range(len(normalized_boxes))]
-        
+        image_shapes = [image_size for _ in range(len(boxes_list))]
+
         # 3. Extract the visual features across all scales automatically
         extracted_rois = self.roi_align(
-            feature_maps_dict, 
-            abs_boxes_list, 
+            feature_maps_dict,
+            abs_boxes_list,
             image_shapes
         )
         
