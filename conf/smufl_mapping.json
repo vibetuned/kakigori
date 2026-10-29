@@ -56,9 +56,18 @@
     "E530": "dynamicFFF",
     "E535": "dynamicForzando",
     "E539": "dynamicSforzato",
-    "E4A0": "articStaccatoAbove",
+    "E4A0": "articAccentAbove",
+    "E4A1": "articAccentAbove",
+    "E4A2": "articStaccatoAbove",
+    "E4A3": "articStaccatoAbove",
     "E4A4": "articTenutoAbove",
-    "E4A8": "articAccentAbove",
-    "E4AC": "articStaccatissimoAbove",
-    "E4B0": "articMarcatoAbove"
+    "E4A5": "articTenutoAbove",
+    "E4A6": "articStaccatissimoAbove",
+    "E4A7": "articStaccatissimoAbove",
+    "E4A8": "articStaccatissimoAbove",
+    "E4A9": "articStaccatissimoAbove",
+    "E4AA": "articStaccatissimoAbove",
+    "E4AB": "articStaccatissimoAbove",
+    "E4AC": "articMarcatoAbove",
+    "E4AD": "articMarcatoAbove"
 }

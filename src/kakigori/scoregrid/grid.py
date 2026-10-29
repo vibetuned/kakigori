@@ -61,6 +61,10 @@ N_ALTER = 6           # none, -2..+2
 CLEFS = ("none", "G2", "F4", "C3", "C4", "C1", "C2", "C5", "G1", "F3", "F5", "G2v", "G2^", "F4v", "other")
 KEYS = ("none", "0", *(f"{n}s" for n in range(1, 8)), *(f"{n}f" for n in range(1, 8)), "other")
 SPAN_EXCLUDE = ("page-margin", "system", "system-staff")
+# The meter a system is read under (the detected time signature, carried
+# across the score): count 1-16 and unit, index 0 unknown
+METER_COUNTS = 17
+METER_UNITS = (0, 1, 2, 4, 8, 16, 32)
 
 
 @dataclass

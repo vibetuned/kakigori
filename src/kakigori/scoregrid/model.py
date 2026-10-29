@@ -44,6 +44,8 @@ from .grid import (
     N_PITCH,
     MAX_DOTS,
     DURATIONS,
+    METER_UNITS,
+    METER_COUNTS,
 )
 
 # cell columns: event, dur, dots, grace, pitch x K_MAX, alter x K_MAX
@@ -92,9 +94,23 @@ def cell_loss_mask(cells: torch.Tensor) -> torch.Tensor:
 
 class ScoreGridDecoder(nn.Module):
     def __init__(self, num_classes: int, d: int = 256, heads: int = 8, enc_layers: int = 3,
-                 dec_layers: int = 6, use_gnn: bool = True, dropout: float = 0.1):
+                 dec_layers: int = 6, use_gnn: bool = True, dropout: float = 0.1,
+                 use_cand: bool = False, use_meter: bool = False, cand_drop: float = 0.0):
         super().__init__()
         self.use_gnn = use_gnn
+        # each notehead's candidate pitch (data.candidate_pitches), and the
+        # meter of the system as one more decoder token. In training a node's
+        # candidate is hidden with probability cand_drop, so the decoder keeps
+        # reading pitch from the glyphs: copied whole, the candidate cost
+        # single-staff treble pitch (98.8% -> 97.9% on hits; the candidate is
+        # right for 94%) while it rescued the lower staff (87.7% -> 91.0%)
+        self.cand_emb = nn.Embedding(N_PITCH, d) if use_cand else None
+        self.cand_drop = cand_drop
+        if use_meter:
+            self.meter_count = nn.Embedding(METER_COUNTS, d)
+            self.meter_unit = nn.Embedding(len(METER_UNITS), d)
+            self.meter_type = nn.Parameter(torch.zeros(d))
+        self.use_meter = use_meter
         # --- nodes
         self.cls_emb = nn.Embedding(num_classes, d)
         self.row_emb = nn.Embedding(MAX_ROWS + 1, d)
@@ -134,6 +150,11 @@ class ScoreGridDecoder(nn.Module):
              + self.meas_emb((nodes["meas"] + 1).clamp(0, MAX_DETECTED_MEASURES)))
         if self.gnn is not None:
             h = h + self.gnn(nodes["gnn"])
+        if self.cand_emb is not None:
+            cand = nodes["cand"]
+            if self.training and self.cand_drop > 0:
+                cand = cand * (torch.rand(cand.shape, device=cand.device) >= self.cand_drop)
+            h = h + self.cand_emb(cand)
         return self.encoder(h, src_key_padding_mask=~nodes["valid"])
 
     def local_context(self, memory: torch.Tensor, nodes: dict) -> torch.Tensor:
@@ -167,10 +188,10 @@ class ScoreGridDecoder(nn.Module):
         n_edges = n_edges[:, :B_MAX].long().clamp(max=LOCAL_MAX_COUNT)
         return local + (self.edge(edges) + self.edge_count(n_edges)).unsqueeze(2)
 
-    def forward(self, cells, barline, staff, memory, memory_valid, local=None):
+    def forward(self, cells, barline, staff, memory, memory_valid, local=None, meter=None):
         """cells [B, B_MAX, S_MAX, 12], barline [B, B_MAX], staff [B, S_MAX, 3]:
-        field values, MASK where masked; ``local``: local_context(). Returns
-        per-field logits."""
+        field values, MASK where masked; ``local``: local_context(); ``meter``
+        [B, 2] (count, unit index). Returns per-field logits."""
         b = cells.shape[0]
         cell_tok = sum(emb(cells[..., i]) for i, emb in enumerate(self.cell_emb))
         if local is not None:
@@ -180,12 +201,15 @@ class ScoreGridDecoder(nn.Module):
                     + self.type_emb.weight[0])
         staff_tok = (sum(emb(staff[..., i]) for i, emb in enumerate(self.staff_emb))
                      + self.pos_s.weight + self.type_emb.weight[1])
-        tokens = torch.cat([cell_tok.reshape(b, -1, cell_tok.shape[-1]), staff_tok], dim=1)
+        parts = [cell_tok.reshape(b, -1, cell_tok.shape[-1]), staff_tok]
+        if self.use_meter and meter is not None:
+            parts.append((self.meter_count(meter[:, 0]) + self.meter_unit(meter[:, 1]) + self.meter_type)[:, None])
+        tokens = torch.cat(parts, dim=1)
         out = self.norm(self.decoder(tokens, memory, memory_key_padding_mask=~memory_valid))
         n_cells = B_MAX * S_MAX
         cell_out = out[:, :n_cells].reshape(b, B_MAX, S_MAX, -1)
         bar_out = cell_out.sum(dim=2)
-        staff_out = out[:, n_cells:]
+        staff_out = out[:, n_cells:n_cells + S_MAX]
         return (
             [head(cell_out) for head in self.cell_heads],
             self.barline_head(bar_out),
@@ -240,7 +264,7 @@ def flow_loss(model: ScoreGridDecoder, cells, barline, staff, nodes, t_min: floa
     local = model.local_context(memory, nodes)
     cell_logits, bar_logits, staff_logits = model(
         _mask_like(cells, CELL_VOCAB, keep_c), _mask_like(barline, BARLINE_VOCAB, keep_b),
-        _mask_like(staff, STAFF_VOCAB, keep_s), memory, nodes["valid"], local,
+        _mask_like(staff, STAFF_VOCAB, keep_s), memory, nodes["valid"], local, nodes.get("meter"),
     )
     informative = cell_loss_mask(cells)
     losses, parts = [], {}
@@ -311,7 +335,9 @@ def sample(model: ScoreGridDecoder, nodes: dict, steps: int = 8) -> tuple:
     last_bar_p1 = torch.zeros((b, B_MAX), device=dev)
 
     for step in range(steps):
-        cell_logits, bar_logits, staff_logits = model(cells, barline, staff, memory, nodes["valid"], local)
+        cell_logits, bar_logits, staff_logits = model(
+            cells, barline, staff, memory, nodes["valid"], local, nodes.get("meter")
+        )
 
         # 1. Primary schedule: EVENT [B, B_MAX*S_MAX], barline [B, B_MAX], staff [B, S_MAX*3]
         p_ev = cell_logits[EVENT].float().softmax(-1)

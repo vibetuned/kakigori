@@ -87,6 +87,8 @@ def collate(records: list) -> dict:
         "synth": torch.zeros(b, n),
         "roi": torch.zeros(b, n, 256),
         "gnn": torch.zeros(b, n, 256),
+        "cand": torch.zeros(b, n, dtype=torch.long),
+        "meter": torch.zeros(b, 2, dtype=torch.long),
         "valid": torch.zeros(b, n, dtype=torch.bool),
     }
     for i, r in enumerate(records):
@@ -107,6 +109,10 @@ def collate(records: list) -> dict:
         out["synth"][i, :k] = r["synth"][sel].float()
         out["roi"][i, :k] = r["roi"][sel].float()
         out["gnn"][i, :k] = r["gnn"][sel].float()
+        if "cand" in r:
+            out["cand"][i, :k] = r["cand"][sel].long()
+        if "meter" in r:
+            out["meter"][i] = torch.tensor(r["meter"])
         out["valid"][i, :k] = True
     if all(r["target"] is not None for r in records):
         cells, barline, staff = zip(*(grid_tensors(r["target"]) for r in records), strict=True)
@@ -140,6 +146,10 @@ def main():
     parser.add_argument("--out", type=str, required=True)
     parser.add_argument("--config", type=str, default="conf-lite/config.json")
     parser.add_argument("--no-gnn", action="store_true", help="Ablation: no GNN node states")
+    parser.add_argument("--no-cand", action="store_true", help="Ablation: no candidate pitch per notehead")
+    parser.add_argument("--meter", action="store_true", help="Input the detected meter as a decoder token")
+    parser.add_argument("--cand-drop", type=float, default=0.5,
+                        help="Hide each node's candidate pitch with this probability in training")
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=3e-4)
@@ -168,7 +178,8 @@ def main():
                               collate_fn=collate, drop_last=True, **workers)
     val_loader = DataLoader(SystemDataset(val), batch_size=args.batch_size, collate_fn=collate, **workers)
 
-    config = {"num_classes": num_classes, "use_gnn": not args.no_gnn}
+    config = {"num_classes": num_classes, "use_gnn": not args.no_gnn,
+              "use_cand": not args.no_cand, "use_meter": args.meter, "cand_drop": args.cand_drop}
     model = ScoreGridDecoder(**config).to(device)
     logger.info(f"ScoreGridDecoder: {sum(p.numel() for p in model.parameters()) / 1e6:.1f}M parameters, "
                 f"GNN node states {'on' if config['use_gnn'] else 'off'}")

@@ -48,13 +48,24 @@ from kakigori.graph.validate_detections import _score_pages
 from kakigori.graph.validate_predictions import _load_gnn
 
 # Local folder imports
-from .grid import systems_from_mei, grid_from_measures
+from .grid import N_PITCH, METER_COUNTS, METER_UNITS, systems_from_mei, grid_from_measures
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 SYSTEM_MIN_IOU = 0.5
 SHARD_SIZE = 2000
+
+# The diatonic step (octave * 7 + step) of each clef's top staff line,
+# measured from the training geometry: G2 38 (F5), F4 26 (A3), the octave
+# clefs an octave from G2 (the MEI holds sounding pitch); C clefs by the line
+# their centre sits on
+CLEF_TOP_LINE = {"G2": 38, "F4": 26, "G2^": 45, "G2v": 31, "C1": 36, "C2": 34, "C3": 32, "C4": 30, "C5": 28}
+CLEF_KIND = {
+    "clefG": "G2", "gClefChange": "G2", "clefF": "F4", "fClefChange": "F4",
+    "clefG8va": "G2^", "clefG8vb": "G2v", "clefC": "C", "cClefChange": "C",
+}
+NOTEHEADS = ("noteheadBlack", "noteheadHalf", "noteheadWhole")
 
 
 def _row_geometry(boxes, labels, row_idx: int):
@@ -86,6 +97,87 @@ def _measure_of(boxes, labels, measure_idx: int):
     width = torch.where(inside, width, torch.full_like(width, float("inf")))
     best = torch.argmin(width, dim=1)
     return torch.where(inside.any(dim=1), best, torch.full_like(best, -1))
+
+
+def candidate_pitches(cls, geom, row, class_list: list) -> torch.Tensor:
+    """Per node: the pitch (diatonic + 1; 0 none) a notehead's staff position
+    implies under the clef in effect at it, the nearest clef or clef change
+    to its left on its row (else the row's first). The decoder can copy it
+    whatever the clef: the clef-to-pitch mapping is not left to learn from
+    the few bass-clef examples, and mid-system clef changes are followed."""
+    names = [class_list[int(c)] for c in cls]
+    cx, steps = geom[:, 0].float(), geom[:, 4].float()
+    clefs = []
+    for i, name in enumerate(names):
+        if name in CLEF_KIND and int(row[i]) >= 0:
+            kind = CLEF_KIND[name]
+            if kind == "C":
+                kind = f"C{min(5, max(1, 5 - round(float(steps[i]) / 2)))}"
+            clefs.append((float(cx[i]), int(row[i]), kind))
+    out = torch.zeros(len(names), dtype=torch.int16)
+    for i, name in enumerate(names):
+        if name not in NOTEHEADS or int(row[i]) < 0:
+            continue
+        on_row = [c for c in clefs if c[1] == int(row[i])]
+        if not on_row:
+            continue
+        left = [c for c in on_row if c[0] <= float(cx[i])]
+        clef = max(left)[2] if left else min(on_row)[2]
+        diatonic = CLEF_TOP_LINE[clef] - round(float(steps[i]))
+        if 0 <= diatonic < N_PITCH - 1:
+            out[i] = diatonic + 1
+    return out
+
+
+def system_meter(cls, geom, row, conf, class_list: list):
+    """(count, unit) printed at the start of a system, or None: common and
+    cut time are 4/4 and 2/2; otherwise the time-signature digits of the
+    first row at the leftmost signature, those above the middle line read
+    left to right as the count, those below as the unit. Multi-label decoding
+    puts several digit classes on one digit box: each position keeps its
+    most confident one."""
+    names = [class_list[int(c)] for c in cls]
+    if "timeSigCommon" in names:
+        return (4, 4)
+    if "timeSigCutCommon" in names:
+        return (2, 2)
+    best: dict = {}
+    for i, name in enumerate(names):
+        if name.startswith("timeSig") and name[7:].isdigit():
+            key = (int(row[i]), round(float(geom[i, 0]) * 200), round(float(geom[i, 4])))
+            if key not in best or float(conf[i]) > best[key][0]:
+                best[key] = (float(conf[i]), float(geom[i, 0]), float(geom[i, 4]), int(row[i]), int(name[7:]))
+    digits = [d[1:] for d in best.values()]
+    if not digits:
+        return None
+    first_row = min(d[2] for d in digits)
+    digits = [d for d in digits if d[2] == first_row]
+    x0 = min(d[0] for d in digits)
+    digits = [d for d in digits if d[0] <= x0 + 0.03]  # one signature, not a later change
+    upper = "".join(str(d[3]) for d in sorted(d for d in digits if d[1] < 4))
+    lower = "".join(str(d[3]) for d in sorted(d for d in digits if d[1] >= 4))
+    if not upper or not lower:
+        return None
+    count, unit = int(upper), int(lower)
+    if not 1 <= count < METER_COUNTS or unit not in METER_UNITS[1:]:
+        return None
+    return (count, unit)
+
+
+def assign_meters(records: list, class_list: list) -> None:
+    """Each record's ``meter`` (count, unit index): the last one printed at
+    or before its system in the score (systems before the first printed meter
+    take that one), (0, 0) when none is found."""
+    by_score: dict = {}
+    for r in records:
+        by_score.setdefault(r["score"], []).append(r)
+    for systems in by_score.values():
+        systems.sort(key=lambda r: (r["page"], r["order"]))
+        printed = [system_meter(r["cls"], r["geom"], r["row"], r["conf"], class_list) for r in systems]
+        current = next((m for m in printed if m is not None), None)
+        for r, m in zip(systems, printed, strict=True):
+            current = m or current
+            r["meter"] = (current[0], METER_UNITS.index(current[1])) if current else (0, 0)
 
 
 @torch.no_grad()
@@ -184,11 +276,31 @@ def match_systems(records: list, gt_boxes: list) -> list:
     return out
 
 
+def augment(data_dir: Path, class_list: list) -> None:
+    """Add ``cand`` and ``meter`` to the records of a dataset built before
+    them (every shard of the dir in memory: a score's systems may span two
+    shards)."""
+    shards = sorted(data_dir.glob("shard_*.pt"))
+    loaded = [torch.load(s, weights_only=False) for s in shards]
+    records = [r for shard in loaded for r in shard]
+    for r in records:
+        r["cand"] = candidate_pitches(r["cls"], r["geom"], r["row"], class_list)
+    assign_meters(records, class_list)
+    for path, shard in zip(shards, loaded, strict=True):
+        tmp = path.with_suffix(".tmp")
+        torch.save(shard, tmp)
+        tmp.replace(path)
+    found = sum(r["meter"][0] > 0 for r in records)
+    logger.info(f"{data_dir}: {len(records)} systems augmented, meter found for {found}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Build scoregrid decoder data from the detection path.")
-    parser.add_argument("--data", type=str, required=True, help="Dataset dir (imgs/, annotations/, mei/)")
-    parser.add_argument("--out", type=str, required=True)
-    parser.add_argument("--checkpoint", type=str, required=True,
+    parser.add_argument("--data", type=str, help="Dataset dir (imgs/, annotations/, mei/)")
+    parser.add_argument("--out", type=str)
+    parser.add_argument("--augment", type=str, nargs="+", default=None,
+                        help="Instead: add candidate pitches and meters to these built dirs")
+    parser.add_argument("--checkpoint", type=str,
                         help="Joint / GNN run: its detector detects, its GNN gives the node states")
     parser.add_argument("--detector-checkpoint", type=str, default=None,
                         help="Another detector (default: the checkpoint's own)")
@@ -197,13 +309,17 @@ def main():
     parser.add_argument("--iou-thresh", type=float, default=0.5)
     parser.add_argument("--limit", type=int, default=0, help="Only the first N scores (smoke tests)")
     args = parser.parse_args()
+    class_list = json.load(open(args.config))["target_classes"]
+    if args.augment:
+        for data_dir in args.augment:
+            augment(Path(data_dir), class_list)
+        return
 
     # First party imports
     from kakigori.vision.utils import load_detector
 
     data, out = Path(args.data), Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    class_list = json.load(open(args.config))["target_classes"]
     class_to_idx = {c: i for i, c in enumerate(class_list)}
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     detector = load_detector(args.detector_checkpoint or args.checkpoint, len(class_list), device)
@@ -219,7 +335,7 @@ def main():
         grids, header = systems_from_mei(data / "mei" / f"{score}.mei", data / "annotations")
         stats["gt_systems"] += len(grids)
         stats["scores"] += 1
-        order = 0
+        order, score_records = 0, []
         for page_idx, img_path in enumerate(pages_by_score.get(score, [])):
             nodes = detect_page_nodes(detector, Image.open(img_path).convert("RGB"), page_idx,
                                       class_list, device, None, args.conf_thresh, args.iou_thresh)
@@ -241,10 +357,13 @@ def main():
                     target, numbers = None, []
                 record.update(score=score, page=page_idx, order=order, gt_index=gt_index,
                               target=target, numbers=numbers)
+                record["cand"] = candidate_pitches(record["cls"], record["geom"], record["row"], class_list)
                 order += 1
                 stats["systems"] += 1
                 stats["matched"] += gt_index >= 0
-                shard.append(record)
+                score_records.append(record)
+        assign_meters(score_records, class_list)
+        shard.extend(score_records)
         index[score] = {"gt_systems": len(grids), "meter": header["meter"], "staves": header["staves"]}
         if len(shard) >= SHARD_SIZE:
             torch.save(shard, out / f"shard_{n_shard:03d}.pt")
