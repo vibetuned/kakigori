@@ -1,0 +1,45 @@
+# lite2 (scripts/build-lite2.sh): the same recipe as fine_tune.yaml on the clean,
+# balanced sets — train-lite2 (real) and synthetic-lite2; output dirs and
+# checkpoints are set by pipeline-lite.sh / pipeline-gnn.sh.
+
+# Data args
+img_dir: "data/train-lite2/imgs"
+ann_dir: "data/train-lite2/annotations"
+synthetic_img_dir: "data/synthetic-lite2/imgs"
+synthetic_ann_dir: "data/synthetic-lite2/annotations"
+use_synthetic: true
+synthetic_ratio: 3
+config: "conf-lite/config.json"
+input_size: null  # the checkpoint's canvas (set one to move it)
+num_workers: 4
+
+# Model args
+# levels, neck and canvas come from the fine_tune checkpoint
+use_bottom_up: false
+out_indices: [0, 1, 2]
+
+# Trainer args
+reg_weight: 7.5
+cls_weight: 1.0
+max_gamma: 4.5    # Final gamma for focal loss
+base_gamma: 2.0   # Initial gamma for focal loss
+scale_ranges: null  # the checkpoint's own
+
+# Training args
+output_dir: "checkpoints_lite"
+logging_dir: "runs_lite"
+# 1 real : 3 synthetic, so an epoch is 10.4k steps: 10 epochs ~ the base run
+epochs: 10
+batch_size: 4
+# 3k-step sweep from run_004 (mAP@.50 / weak-class mean AP@.50:.95, base
+# 0.656 / 0.106): 2e-4 0.653 / 0.140, 5e-4 0.639 / 0.143, 1e-3 0.635 / 0.136,
+# 2e-3 0.633 / 0.158; the other classes lose -0.017 / -0.029 / -0.037 (2e-4,
+# 1e-3, 2e-3): weak gains flat, cost growing with lr
+lr: 0.0002
+logging_steps: 50
+save_steps: 500
+max_steps: -1
+seed: 42
+resume: false
+resume_from_checkpoint: null
+fine_tune: "checkpoints_lite/run_004/"

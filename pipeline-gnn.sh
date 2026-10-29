@@ -35,6 +35,8 @@
 # mix to build if missing), PRUNE (keep
 # threshold, default 0.5), LOGGING_STEPS (default 100),
 # VAL (validation set for the kern evaluations, default data/validation-lite),
+# STOP_AFTER (phase2: end after phase 2 and its evaluations — joint and stage
+# D did not improve on it, detection-driven kern F1 90.3 / 89.1 / 88.6),
 # EXTRA_ARGS (appended to every training command, e.g. a smoke test:
 # EXTRA_ARGS="--max-steps 30 --eval-steps 30 --save-steps 30").
 
@@ -114,6 +116,10 @@ kern_eval phase1 gt
 train phase2 train-gnn "$P2_CONFIG" --fine-tune "$(stage_run phase1)"
 kern_eval phase2 gt
 kern_eval phase2 det "$DET"
+if [ "${STOP_AFTER:-}" = phase2 ]; then
+    say "GNN pipeline done (STOP_AFTER=phase2): phase1 $(stage_run phase1), phase2 $(stage_run phase2)"
+    exit 0
+fi
 train joint train-joint "$JOINT_CONFIG" --fine-tune "$(stage_run phase2)"
 [ -f "$OUT/eval_joint.log" ] || eval_detector joint "$(stage_run joint)"
 kern_eval joint gt

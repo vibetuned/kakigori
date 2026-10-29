@@ -1,0 +1,29 @@
+# lite2 (scripts/build-lite2.sh): the same recipe as train_gnn_phase1.yaml on the clean,
+# balanced sets — train-lite2 (real) and synthetic-lite2; output dirs and
+# checkpoints are set by pipeline-lite.sh / pipeline-gnn.sh.
+
+img_dir: "data/train-lite2/imgs"
+ann_dir: "data/train-lite2/annotations"
+graph_dir: "data/train-lite2/graphs"
+config: "conf-lite/config.json"
+
+# Paths follow pipeline-gnn.sh (which sets them anyway): the 640x896 ReGLA
+# detector, every GNN stage in checkpoints_gnn_lite_896 (phase 1 run_001,
+# phase 2 run_002, joint run_003). The July ConvNeXt runs were
+# checkpoints_lite/run_003 -> checkpoints_gnn_lite -> checkpoints_joint.
+detector_checkpoint: "checkpoints_lite_896/run_003"
+
+unfreeze: "none"
+vision_lr: 0.00001
+box_jitter: 0.0
+
+output_dir: "checkpoints_gnn_lite_896"
+logging_dir: "runs_gnn_lite_896"
+epochs: 30
+batch_size: 2
+lr: 0.001
+logging_steps: 10
+eval_steps: 2500
+save_steps: 250
+max_steps: -1
+seed: 42
